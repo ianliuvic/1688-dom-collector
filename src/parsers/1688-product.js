@@ -21,7 +21,10 @@ function normalizeImageUrl(value, baseUrl) {
     const url = new URL(value.startsWith('//') ? `https:${value}` : value, baseUrl);
     if (!/^https?:$/.test(url.protocol)) return null;
     url.searchParams.delete('x-oss-process');
-    return url.href.replace(/_(?:\d+x\d+|sum|\.webp)(?=\.(?:jpg|jpeg|png|webp)(?:$|\?))/i, '');
+    if (!/\.(?:jpg|jpeg|png|webp)(?:$|\?)/i.test(url.href)) return null;
+    return url.href
+      .replace(/_(?:\d+x\d+|sum|\.webp)(?=\.(?:jpg|jpeg|png|webp)(?:$|\?))/i, '')
+      .replace(/\.(jpg|jpeg|png|webp)\.\1(?:$|\?)/i, '.$1');
   } catch {
     return null;
   }
@@ -80,7 +83,10 @@ export async function parse1688Product(page) {
       }
       return output;
     };
-    const embeddedCandidates = { prices: [], tiers: [], skuRows: [], dimensions: [], attributes: [], images: [] };
+    const embeddedCandidates = {
+      prices: [], tiers: [], skuRows: [], dimensions: [], attributes: [], images: [],
+      sellerNames: [], sellerUrls: [],
+    };
     const scanned = new WeakSet();
     const scan = (value, depth = 0, key = '') => {
       if (!value || depth > 9) return;
@@ -114,6 +120,10 @@ export async function parse1688Product(page) {
         if (/^(attributes|productAttributes|featureList)$/i.test(childKey) && Array.isArray(childValue)) {
           embeddedCandidates.attributes.push(...childValue.slice(0, 100).map(compact));
         }
+        if (/^(companyName|shopName|sellerName|supplierName|memberName)$/i.test(childKey)
+            && typeof childValue === 'string') embeddedCandidates.sellerNames.push(childValue);
+        if (/^(companyUrl|shopUrl|sellerUrl|supplierUrl)$/i.test(childKey)
+            && typeof childValue === 'string') embeddedCandidates.sellerUrls.push(childValue);
         scan(childValue, depth + 1, childKey);
       }
     };
@@ -162,7 +172,7 @@ export async function parse1688Product(page) {
       attributes,
       skuOptions,
       priceTexts,
-      bodyText: text(document.body).slice(0, 200000),
+      bodyText: (document.body?.innerText || '').slice(0, 200000),
       sellerLinks: all('a[href*="shop.1688.com"], a[href*="company.1688.com"]')
         .map((node) => ({ name: text(node), url: node.href })).filter((item) => item.name),
     };
@@ -236,10 +246,20 @@ export async function parse1688Product(page) {
     raw.mainImage, ...ldImages, ...candidates.images, ...raw.images,
   ].map((value) => normalizeImageUrl(value, raw.url)), MAX_IMAGES);
 
-  const attributes = [...raw.attributes, ...candidates.attributes.map((item) => ({
+  const knownAttributeNames = [
+    '货号', '品牌', '面料名称', '面料成分', '里料名称', '里料成分', '产地', '适用性别',
+    '适用年龄段', '图案', '款式', '是否跨境出口专供货源', '上市年份/季节', '质量等级',
+  ];
+  const textAttributes = knownAttributeNames.flatMap((name) => {
+    const match = raw.bodyText.match(new RegExp(`(?:^|\\n)\\s*${name}\\s*[：:]?\\s*(?:\\n\\s*)?([^\\n]{1,100})`, 'm'));
+    return match ? [{ name, value: cleanText(match[1]) }] : [];
+  });
+  const attributes = [...raw.attributes, ...textAttributes, ...candidates.attributes.map((item) => ({
     name: cleanText(item?.name ?? item?.key ?? item?.attributeName),
     value: cleanText(item?.value ?? item?.valueName ?? item?.attributeValue),
-  }))].filter((item) => item.name && item.value);
+  }))].filter((item) => item.name && item.value
+    && item.name.length <= 50 && item.value.length <= 300
+    && !/(平台活动下价格|活动前价格|划线价格|未划线价格|同款|\*注|前述说明)/.test(item.name));
   const attributeKeys = new Set();
   const dedupedAttributes = attributes.filter((item) => {
     const key = `${item.name}\0${item.value}`;
@@ -248,7 +268,22 @@ export async function parse1688Product(page) {
     return true;
   }).slice(0, MAX_ATTRIBUTES);
 
-  const seller = raw.sellerLinks[0] ?? {};
+  const seller = raw.sellerLinks[0] ?? {
+    name: cleanText(embedded.sellerNames?.[0]),
+    url: embedded.sellerUrls?.[0] ?? null,
+  };
+  const inferredSkuRows = raw.skuOptions.flatMap((item) => {
+    const match = cleanText(item.text).match(/^(.+?)[¥￥]\s*(\d+(?:\.\d+)?).*?库存\s*(\d+)/);
+    return match ? [{ skuText: match[1], price: Number(match[2]), stock: Number(match[3]) }] : [];
+  });
+  const sizeValues = unique(inferredSkuRows.map((row) => row.skuText), 100);
+  const colorValues = unique(raw.skuOptions
+    .filter((item) => item.image && cleanText(item.text) && cleanText(item.text) !== '颜色')
+    .map((item) => cleanText(item.text).replace(/^颜色/, '')), 100);
+  const inferredDimensions = [
+    ...(colorValues.length ? [{ name: 'Color', values: colorValues }] : []),
+    ...(sizeValues.length ? [{ name: 'Size', values: sizeValues }] : []),
+  ];
   const normalized = {
     schemaVersion: 1,
     pageType: 'product',
@@ -262,14 +297,15 @@ export async function parse1688Product(page) {
       min: priceValues.length ? Math.min(...priceValues) : null,
       max: priceValues.length ? Math.max(...priceValues) : null,
       tiers: candidates.tiers.slice(0, 50),
-      textCandidates: unique(raw.priceTexts, 20),
+      textCandidates: unique(raw.priceTexts.filter((value) => value.length <= 120 && /[¥￥]/.test(value)), 20),
     },
     moq: bodyMoq ? Number(bodyMoq[1]) : null,
-    mainImage: normalizeImageUrl(raw.mainImage || ldImages[0] || images[0], raw.url),
+    mainImage: [raw.mainImage, ldImages[0], ...images]
+      .map((value) => normalizeImageUrl(value, raw.url)).find(Boolean) ?? null,
     images,
     videos: [],
-    skuDimensions: candidates.dimensions.slice(0, 50),
-    skuRows: candidates.skuRows.slice(0, MAX_SKU_ROWS),
+    skuDimensions: (candidates.dimensions.length ? candidates.dimensions : inferredDimensions).slice(0, 50),
+    skuRows: (candidates.skuRows.length ? candidates.skuRows : inferredSkuRows).slice(0, MAX_SKU_ROWS),
     skuOptions: raw.skuOptions.slice(0, 200).map((item) => ({
       text: cleanText(item.text),
       image: normalizeImageUrl(item.image, raw.url),
