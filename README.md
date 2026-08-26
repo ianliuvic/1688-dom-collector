@@ -39,4 +39,10 @@ curl -X POST https://your-domain.example/api/jobs \
 
 ## Next phase
 
-Add a protected human-login console, account/session notifications, capture policies, structured product extraction, and an API suitable for a Codex skill.
+The `login/` image provides a temporary, Basic-Auth-protected noVNC console. It
+must share the collector's Docker volume and must never run at the same time as
+the collector. Stop the collector, start the login app, sign in manually, close
+Chromium, stop the login app, and then start the collector again.
+
+Further work can add account/session notifications, capture policies,
+structured product extraction, and an API suitable for a Codex skill.

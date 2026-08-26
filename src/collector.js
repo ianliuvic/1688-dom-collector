@@ -43,7 +43,7 @@ export function createCollector({ storagePath, navigationTimeoutMs }) {
       locale: 'zh-CN',
       timezoneId: 'Asia/Shanghai',
       viewport: { width: 1440, height: 1000 },
-      args: ['--disable-dev-shm-usage'],
+      args: ['--disable-dev-shm-usage', '--password-store=basic'],
     });
     page = context.pages()[0] ?? await context.newPage();
     page.setDefaultNavigationTimeout(navigationTimeoutMs);
