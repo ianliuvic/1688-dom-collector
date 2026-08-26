@@ -1,14 +1,22 @@
 const { chromium } = require('playwright');
 const { Server: ProxyChainServer } = require('proxy-chain');
+const path = require('node:path');
 
 const profilePath = process.env.PROFILE_PATH || '/app/storage/browser-profile';
 const proxyServer = process.env.PROXY_SERVER?.trim();
 const proxyUsername = process.env.PROXY_USERNAME?.trim();
 const proxyPassword = process.env.PROXY_PASSWORD;
 const startUrl = process.env.START_URL || 'https://login.1688.com/member/signin.htm';
+const storageStatePath = path.join(path.dirname(profilePath), 'storage-state.json');
 
 let context;
 let proxyAdapter;
+let stateTimer;
+
+async function saveStorageState() {
+  if (!context) return;
+  await context.storageState({ path: storageStatePath });
+}
 
 async function startProxyAdapter() {
   if (!proxyServer) return null;
@@ -27,6 +35,8 @@ async function startProxyAdapter() {
 }
 
 async function shutdown() {
+  clearInterval(stateTimer);
+  await saveStorageState().catch(() => {});
   await context?.close().catch(() => {});
   await proxyAdapter?.close(true).catch(() => {});
   process.exit(0);
@@ -54,6 +64,11 @@ process.on('SIGINT', shutdown);
   } catch (error) {
     console.warn('Initial proxy connectivity page failed:', error.message);
   }
+  stateTimer = setInterval(() => {
+    saveStorageState().catch((error) => {
+      console.warn('Storage state export failed:', error.message);
+    });
+  }, 10000);
   console.log(`Login browser ready. Proxy enabled: ${Boolean(proxyAdapter)}`);
 })().catch((error) => {
   console.error('Login browser failed to start:', error.message);

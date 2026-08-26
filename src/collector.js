@@ -56,6 +56,26 @@ export function createCollector({
       args: ['--disable-dev-shm-usage', '--password-store=basic'],
       ...(proxyAdapter ? { proxy: proxyAdapter.playwrightProxy } : {}),
     });
+
+    const storageStatePath = path.join(storagePath, 'storage-state.json');
+    try {
+      const storageState = JSON.parse(await fs.readFile(storageStatePath, 'utf8'));
+      if (Array.isArray(storageState.cookies) && storageState.cookies.length > 0) {
+        await context.addCookies(storageState.cookies);
+      }
+      if (Array.isArray(storageState.origins) && storageState.origins.length > 0) {
+        await context.addInitScript(({ origins }) => {
+          const origin = origins.find((item) => item.origin === window.location.origin);
+          if (!origin) return;
+          for (const item of origin.localStorage ?? []) {
+            window.localStorage.setItem(item.name, item.value);
+          }
+        }, { origins: storageState.origins });
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+
     page = context.pages()[0] ?? await context.newPage();
     page.setDefaultNavigationTimeout(navigationTimeoutMs);
   }
