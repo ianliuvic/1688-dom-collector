@@ -1,0 +1,8 @@
+{
+  "name": "1688-collector-login",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "playwright": "1.55.0"
+  }
+}

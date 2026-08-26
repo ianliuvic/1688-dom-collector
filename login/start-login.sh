@@ -19,12 +19,6 @@ rm -f \
   "$PROFILE_PATH/SingletonLock" \
   "$PROFILE_PATH/SingletonSocket"
 
-CHROMIUM_BIN="$(find /ms-playwright -type f -path '*/chrome-linux/chrome' -print -quit)"
-if [[ -z "$CHROMIUM_BIN" ]]; then
-  echo "Playwright Chromium executable was not found." >&2
-  exit 1
-fi
-
 runuser -u pwuser -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
   Xvfb "$DISPLAY" -screen 0 1440x1000x24 -nolisten tcp &
 
@@ -35,15 +29,13 @@ runuser -u pwuser -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
 runuser -u pwuser -- websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5900 &
 
 sleep 2
-runuser -u pwuser -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-  "$CHROMIUM_BIN" \
-    --no-sandbox \
-    --disable-dev-shm-usage \
-    --password-store=basic \
-    --no-first-run \
-    --no-default-browser-check \
-    --user-data-dir="$PROFILE_PATH" \
-    --window-size=1400,940 \
-    https://www.1688.com/ &
+runuser -u pwuser -- env \
+  DISPLAY="$DISPLAY" \
+  XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+  PROFILE_PATH="$PROFILE_PATH" \
+  PROXY_SERVER="${PROXY_SERVER:-}" \
+  PROXY_USERNAME="${PROXY_USERNAME:-}" \
+  PROXY_PASSWORD="${PROXY_PASSWORD:-}" \
+  node /opt/login/launch-login.cjs &
 
 exec nginx -g 'daemon off;'

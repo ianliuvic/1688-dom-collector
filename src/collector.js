@@ -27,7 +27,13 @@ export function isAllowed1688Url(value) {
   }
 }
 
-export function createCollector({ storagePath, navigationTimeoutMs }) {
+export function createCollector({
+  storagePath,
+  navigationTimeoutMs,
+  proxyServer,
+  proxyUsername,
+  proxyPassword,
+}) {
   const profilePath = path.join(storagePath, 'browser-profile');
   const capturesPath = path.join(storagePath, 'captures');
   let context;
@@ -38,12 +44,21 @@ export function createCollector({ storagePath, navigationTimeoutMs }) {
   async function start() {
     await fs.mkdir(profilePath, { recursive: true });
     await fs.mkdir(capturesPath, { recursive: true });
+    const proxy = proxyServer
+      ? {
+          server: proxyServer,
+          ...(proxyUsername ? { username: proxyUsername } : {}),
+          ...(proxyPassword ? { password: proxyPassword } : {}),
+        }
+      : undefined;
+
     context = await chromium.launchPersistentContext(profilePath, {
       headless: true,
       locale: 'zh-CN',
       timezoneId: 'Asia/Shanghai',
       viewport: { width: 1440, height: 1000 },
       args: ['--disable-dev-shm-usage', '--password-store=basic'],
+      ...(proxy ? { proxy } : {}),
     });
     page = context.pages()[0] ?? await context.newPage();
     page.setDefaultNavigationTimeout(navigationTimeoutMs);

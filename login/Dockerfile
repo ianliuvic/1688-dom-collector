@@ -20,8 +20,13 @@ RUN apt-get update \
       xvfb \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /opt/login
+COPY package*.json ./
+RUN npm ci --omit=dev
+
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY start-login.sh /usr/local/bin/start-login.sh
+COPY launch-login.cjs /opt/login/launch-login.cjs
 RUN chmod 0755 /usr/local/bin/start-login.sh \
     && mkdir -p /app/storage /tmp/browser-runtime \
     && chown -R pwuser:pwuser /app/storage /tmp/browser-runtime

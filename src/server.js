@@ -10,6 +10,9 @@ const config = {
   storagePath: process.env.STORAGE_PATH ?? '/app/storage',
   minCaptureIntervalMs: Number(process.env.MIN_CAPTURE_INTERVAL_MS ?? 15000),
   navigationTimeoutMs: Number(process.env.NAVIGATION_TIMEOUT_MS ?? 45000),
+  proxyServer: process.env.PROXY_SERVER?.trim() || null,
+  proxyUsername: process.env.PROXY_USERNAME?.trim() || null,
+  proxyPassword: process.env.PROXY_PASSWORD || null,
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');

@@ -6,6 +6,9 @@ services:
     environment:
       NOVNC_USERNAME: ${NOVNC_USERNAME}
       NOVNC_PASSWORD: ${NOVNC_PASSWORD}
+      PROXY_SERVER: ${PROXY_SERVER}
+      PROXY_USERNAME: ${PROXY_USERNAME}
+      PROXY_PASSWORD: ${PROXY_PASSWORD}
       PROFILE_PATH: /app/storage/browser-profile
     expose:
       - "8080"
