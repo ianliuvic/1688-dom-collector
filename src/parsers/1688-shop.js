@@ -5,7 +5,9 @@ function unique(values) {
 function offerIdsFromText(text) {
   const patterns = [
     /detail\.1688\.com\/offer\/(\d{10,13})\.html/gi,
+    /detail\.1688\.com\\\/offer\\\/(\d{10,13})\.html/gi,
     /["']offerId["']\s*:\s*["']?(\d{10,13})/gi,
+    /\\?["'](?:offerId|id)\\?["']\s*:\s*\\?["']?(\d{10,13})/gi,
     /offerId(?:%22|=|\\?u0026quot;|&quot;)[^0-9]{0,20}(\d{10,13})/gi,
   ];
   return patterns.flatMap((pattern) => [...text.matchAll(pattern)].map((match) => match[1]));
@@ -33,7 +35,11 @@ export async function parse1688Shop(page, networkResponses = []) {
 
   const networkOfferIds = networkResponses.flatMap((response) => offerIdsFromText(response.body));
   const domOfferIds = dom.domOfferUrls.flatMap(offerIdsFromText);
-  const offerIds = unique([...networkOfferIds, ...domOfferIds]);
+  const ignoredIds = new Set([
+    String(dom.globalData.sellerId ?? ''), String(dom.globalData.buyerId ?? ''),
+    String(dom.globalData.bizId ?? ''), String(dom.globalData.originalBizId ?? ''),
+  ]);
+  const offerIds = unique([...networkOfferIds, ...domOfferIds]).filter((id) => !ignoredIds.has(id));
   const globalData = dom.globalData;
 
   return {
