@@ -44,6 +44,9 @@ curl -X POST https://your-domain.example/api/jobs \
   -d '{"url":"https://detail.1688.com/offer/example.html"}'
 ```
 
+Shop-list jobs capture only the initially loaded page by default. Set
+`"paginate": true` only when a complete paginated Offer ID scan is required.
+
 `GET /api/jobs/:id` and `GET /api/session` use the same bearer token.
 `GET /api/jobs/:id/dom` downloads the archived HTML and is also bearer-token protected.
 

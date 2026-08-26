@@ -123,7 +123,8 @@ export function createCollector({
       await page.goto(job.url, { waitUntil: 'domcontentloaded' });
       const isShopPage = new URL(page.url()).hostname.startsWith('shop');
       await page.waitForTimeout(isShopPage ? 8000 : 3000);
-      if (isShopPage && new URL(page.url()).pathname.includes('offerlist')) {
+      if (job.options?.paginate === true
+          && isShopPage && new URL(page.url()).pathname.includes('offerlist')) {
         const paginationText = await page.locator('body').innerText().catch(() => '');
         const totalPages = Math.min(Number(paginationText.match(/\b\d+\/(\d+)\s*到/)?.[1] ?? 1), 20);
         for (let currentPage = 1; currentPage < totalPages; currentPage += 1) {

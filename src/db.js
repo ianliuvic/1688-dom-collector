@@ -24,13 +24,15 @@ export function createDatabase(databaseUrl) {
         ON capture_jobs (status, created_at);
       ALTER TABLE capture_jobs
         ADD COLUMN IF NOT EXISTS extracted_data jsonb;
+      ALTER TABLE capture_jobs
+        ADD COLUMN IF NOT EXISTS options jsonb NOT NULL DEFAULT '{}'::jsonb;
     `);
   }
 
-  async function createJob(id, url) {
+  async function createJob(id, url, options = {}) {
     const result = await pool.query(
-      'INSERT INTO capture_jobs (id, url) VALUES ($1, $2) RETURNING *',
-      [id, url],
+      'INSERT INTO capture_jobs (id, url, options) VALUES ($1, $2, $3) RETURNING *',
+      [id, url, options],
     );
     return result.rows[0];
   }

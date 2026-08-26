@@ -65,7 +65,12 @@ app.post('/api/jobs', { preHandler: requireApiKey }, async (request, reply) => {
   if (typeof url !== 'string' || !isAllowed1688Url(url)) {
     return reply.code(400).send({ error: 'A valid HTTPS URL under 1688.com is required.' });
   }
-  const job = await db.createJob(crypto.randomUUID(), url);
+  if (request.body?.paginate !== undefined && typeof request.body.paginate !== 'boolean') {
+    return reply.code(400).send({ error: 'paginate must be a boolean when provided.' });
+  }
+  const job = await db.createJob(crypto.randomUUID(), url, {
+    paginate: request.body?.paginate === true,
+  });
   return reply.code(202).send(job);
 });
 
