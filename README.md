@@ -5,7 +5,9 @@ A conservative, single-browser framework for archiving authorized 1688 product p
 ## Current scope
 
 - Persistent Chromium profile at `/app/storage/browser-profile`
-- Archived HTML and screenshots at `/app/storage/captures/<job-id>`
+- Archived HTML and normalized `product.json` at `/app/storage/captures/<job-id>`
+- Screenshots for failed/auth-challenged jobs by default
+- Structured 1688 product fields in PostgreSQL `extracted_data` JSONB
 - PostgreSQL-backed queue with one active capture at a time
 - Login/challenge detection; affected jobs stop as `requires_auth`
 - Bearer-token protected API
@@ -27,6 +29,7 @@ This framework does not bypass CAPTCHAs, signatures, access controls, or platfor
 | `PROXY_USERNAME` | no | - |
 | `PROXY_PASSWORD` | no | - |
 | `BROWSER_HEADLESS` | no | `false` |
+| `SCREENSHOT_MODE` | no | `errors` (`never`, `errors`, or `always`) |
 
 ## API
 

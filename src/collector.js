@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { startProxyAdapter } from './proxy.js';
+import { parse1688Product } from './parsers/1688-product.js';
 
 const AUTH_MARKERS = [
   'login.1688.com',
@@ -35,6 +36,7 @@ export function createCollector({
   proxyUsername,
   proxyPassword,
   browserHeadless,
+  screenshotMode = 'errors',
 }) {
   const profilePath = path.join(storagePath, 'browser-profile');
   const capturesPath = path.join(storagePath, 'captures');
@@ -99,26 +101,48 @@ export function createCollector({
     const domPath = path.join(jobPath, 'page.html');
     const screenshotPath = path.join(jobPath, 'page.png');
 
-    await page.goto(job.url, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(3000);
+    try {
+      await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(3000);
 
-    const finalUrl = page.url();
-    const title = await page.title();
-    const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
-    sessionState = classifySession(finalUrl, bodyText);
-    lastCheckedAt = new Date().toISOString();
+      const finalUrl = page.url();
+      const title = await page.title();
+      const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+      sessionState = classifySession(finalUrl, bodyText);
+      lastCheckedAt = new Date().toISOString();
+      const status = sessionState === 'requires_auth' ? 'requires_auth' : 'completed';
 
-    await fs.writeFile(domPath, await page.content(), 'utf8');
-    await page.screenshot({ path: screenshotPath, fullPage: true });
+      await fs.writeFile(domPath, await page.content(), 'utf8');
+      const extractedData = status === 'completed' ? await parse1688Product(page) : null;
+      let savedScreenshotPath = null;
+      if (screenshotMode === 'always' || (screenshotMode === 'errors' && status !== 'completed')) {
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        savedScreenshotPath = screenshotPath;
+      }
+      if (extractedData) {
+        await fs.writeFile(path.join(jobPath, 'product.json'), JSON.stringify(extractedData, null, 2), 'utf8');
+      }
 
-    return {
-      status: sessionState === 'requires_auth' ? 'requires_auth' : 'completed',
-      title,
-      finalUrl,
-      domPath,
-      screenshotPath,
-      error: sessionState === 'requires_auth' ? 'Login or human verification is required.' : null,
-    };
+      return {
+        status,
+        title,
+        finalUrl,
+        domPath,
+        screenshotPath: savedScreenshotPath,
+        extractedData,
+        error: status === 'requires_auth' ? 'Login or human verification is required.' : null,
+      };
+    } catch (error) {
+      let savedScreenshotPath = null;
+      if (screenshotMode !== 'never') {
+        try {
+          await page.screenshot({ path: screenshotPath, fullPage: true });
+          savedScreenshotPath = screenshotPath;
+        } catch { /* preserve the original capture error */ }
+      }
+      error.captureArtifacts = { screenshotPath: savedScreenshotPath };
+      throw error;
+    }
   }
 
   function getSessionStatus() {

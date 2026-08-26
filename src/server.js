@@ -14,6 +14,8 @@ const config = {
   proxyUsername: process.env.PROXY_USERNAME?.trim() || null,
   proxyPassword: process.env.PROXY_PASSWORD || null,
   browserHeadless: process.env.BROWSER_HEADLESS === 'true',
+  screenshotMode: ['never', 'errors', 'always'].includes(process.env.SCREENSHOT_MODE)
+    ? process.env.SCREENSHOT_MODE : 'errors',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -84,7 +86,8 @@ async function workerLoop() {
       app.log.error({ err: error, jobId: job.id }, 'capture failed');
       await db.completeJob(job.id, {
         status: 'failed', title: null, finalUrl: null, domPath: null,
-        screenshotPath: null, error: error.message,
+        screenshotPath: error.captureArtifacts?.screenshotPath ?? null,
+        extractedData: null, error: error.message,
       });
     }
     await new Promise((resolve) => setTimeout(resolve, config.minCaptureIntervalMs));

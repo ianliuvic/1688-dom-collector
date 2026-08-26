@@ -22,6 +22,8 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS capture_jobs_status_created_idx
         ON capture_jobs (status, created_at);
+      ALTER TABLE capture_jobs
+        ADD COLUMN IF NOT EXISTS extracted_data jsonb;
     `);
   }
 
@@ -58,10 +60,10 @@ export function createDatabase(databaseUrl) {
     await pool.query(
       `UPDATE capture_jobs
        SET status = $2, title = $3, final_url = $4, dom_path = $5,
-           screenshot_path = $6, error = $7, completed_at = now()
+           screenshot_path = $6, error = $7, extracted_data = $8, completed_at = now()
        WHERE id = $1`,
       [id, values.status, values.title, values.finalUrl, values.domPath,
-        values.screenshotPath, values.error],
+        values.screenshotPath, values.error, values.extractedData ?? null],
     );
   }
 
