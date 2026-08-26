@@ -1,7 +1,7 @@
 services:
   login:
     build:
-      context: .
+      context: ./login
       dockerfile: Dockerfile
     environment:
       NOVNC_USERNAME: ${NOVNC_USERNAME}
