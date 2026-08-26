@@ -47,6 +47,10 @@ curl -X POST https://your-domain.example/api/jobs \
 Shop-list jobs capture only the initially loaded page by default. Set
 `"paginate": true` only when a complete paginated Offer ID scan is required.
 
+The protected `POST /api/shop-scans` diagnostic queues one authorized MTop shop
+batch (up to 300 offers) through the collector's logged-in browser session. It
+accepts `url`, `memberId`, and optional `pageNum`, `pageSize`, and `sortType`.
+
 `GET /api/jobs/:id` and `GET /api/session` use the same bearer token.
 `GET /api/jobs/:id/dom` downloads the archived HTML and is also bearer-token protected.
 

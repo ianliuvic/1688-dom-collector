@@ -4,6 +4,7 @@ import { chromium } from 'playwright';
 import { startProxyAdapter } from './proxy.js';
 import { parse1688Product } from './parsers/1688-product.js';
 import { parse1688Shop } from './parsers/1688-shop.js';
+import { fetchShopOfferPage } from './mtop-shop.js';
 
 const AUTH_MARKERS = [
   'login.1688.com',
@@ -106,6 +107,53 @@ export function createCollector({
     await fs.mkdir(jobPath, { recursive: true });
     const domPath = path.join(jobPath, 'page.html');
     const screenshotPath = path.join(jobPath, 'page.png');
+
+    if (job.options?.mode === 'shop_mtop') {
+      try {
+        await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(3000);
+        const finalUrl = page.url();
+        const title = await page.title();
+        const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+        sessionState = classifySession(finalUrl, bodyText);
+        lastCheckedAt = new Date().toISOString();
+        await fs.writeFile(domPath, await page.content(), 'utf8');
+        if (sessionState === 'requires_auth') {
+          const savedScreenshotPath = screenshotMode === 'never' ? null : screenshotPath;
+          if (savedScreenshotPath) await page.screenshot({ path: screenshotPath, fullPage: true });
+          return {
+            status: 'requires_auth', title, finalUrl, domPath,
+            screenshotPath: savedScreenshotPath, extractedData: null,
+            error: 'Login or human verification is required.',
+          };
+        }
+
+        const { payload, result } = await fetchShopOfferPage({
+          context,
+          page,
+          memberId: job.options.memberId,
+          pageNum: job.options.pageNum,
+          pageSize: job.options.pageSize,
+          sortType: job.options.sortType,
+        });
+        await fs.writeFile(path.join(jobPath, 'mtop-response.json'), JSON.stringify(payload), 'utf8');
+        await fs.writeFile(path.join(jobPath, 'product.json'), JSON.stringify(result, null, 2), 'utf8');
+        return {
+          status: 'completed', title, finalUrl, domPath, screenshotPath: null,
+          extractedData: result, error: null,
+        };
+      } catch (error) {
+        let savedScreenshotPath = null;
+        if (screenshotMode !== 'never') {
+          try {
+            await page.screenshot({ path: screenshotPath, fullPage: true });
+            savedScreenshotPath = screenshotPath;
+          } catch { /* preserve the original batch error */ }
+        }
+        error.captureArtifacts = { screenshotPath: savedScreenshotPath };
+        throw error;
+      }
+    }
 
     const networkResponses = [];
     const pendingResponses = new Set();

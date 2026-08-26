@@ -74,6 +74,34 @@ app.post('/api/jobs', { preHandler: requireApiKey }, async (request, reply) => {
   return reply.code(202).send(job);
 });
 
+app.post('/api/shop-scans', { preHandler: requireApiKey }, async (request, reply) => {
+  const url = request.body?.url;
+  const memberId = request.body?.memberId;
+  const pageNum = request.body?.pageNum ?? 1;
+  const pageSize = request.body?.pageSize ?? 300;
+  const sortType = request.body?.sortType ?? 'wangpu_score';
+  if (typeof url !== 'string' || !isAllowed1688Url(url)
+      || !new URL(url).hostname.startsWith('shop')) {
+    return reply.code(400).send({ error: 'A valid HTTPS 1688 shop URL is required.' });
+  }
+  if (typeof memberId !== 'string' || !/^b2b-[a-z0-9-]{5,80}$/i.test(memberId)) {
+    return reply.code(400).send({ error: 'A valid 1688 memberId is required.' });
+  }
+  if (!Number.isInteger(pageNum) || pageNum < 1 || pageNum > 10000) {
+    return reply.code(400).send({ error: 'pageNum must be an integer between 1 and 10000.' });
+  }
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 300) {
+    return reply.code(400).send({ error: 'pageSize must be an integer between 1 and 300.' });
+  }
+  if (typeof sortType !== 'string' || !/^[a-z0-9_]{1,40}$/i.test(sortType)) {
+    return reply.code(400).send({ error: 'sortType is invalid.' });
+  }
+  const job = await db.createJob(crypto.randomUUID(), url, {
+    mode: 'shop_mtop', memberId, pageNum, pageSize, sortType,
+  });
+  return reply.code(202).send(job);
+});
+
 app.get('/api/jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = await db.getJob(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
