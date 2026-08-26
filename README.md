@@ -8,6 +8,7 @@ A conservative, single-browser framework for archiving authorized 1688 product p
 - Archived HTML and normalized `product.json` at `/app/storage/captures/<job-id>`
 - Screenshots for failed/auth-challenged jobs by default
 - Structured 1688 product fields in PostgreSQL `extracted_data` JSONB
+- Store metadata and Offer IDs from the relevant asynchronous shop response
 - PostgreSQL-backed queue with one active capture at a time
 - Login/challenge detection; affected jobs stop as `requires_auth`
 - Bearer-token protected API

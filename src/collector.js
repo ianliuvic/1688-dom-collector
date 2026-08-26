@@ -3,6 +3,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { startProxyAdapter } from './proxy.js';
 import { parse1688Product } from './parsers/1688-product.js';
+import { parse1688Shop } from './parsers/1688-shop.js';
 
 const AUTH_MARKERS = [
   'login.1688.com',
@@ -106,9 +107,23 @@ export function createCollector({
     const domPath = path.join(jobPath, 'page.html');
     const screenshotPath = path.join(jobPath, 'page.png');
 
+    const networkResponses = [];
+    const pendingResponses = new Set();
+    const responseHandler = (response) => {
+      const url = response.url();
+      const api = url.match(/mtop\.(?:alibaba\.alisite\.cbu\.server\.moduleasyncservice|1688\.shop\.data\.get)/i)?.[0];
+      if (!api || networkResponses.length >= 20) return;
+      const pending = response.text().then((body) => {
+        if (body.length <= 5 * 1024 * 1024) networkResponses.push({ api: api.toLowerCase(), body });
+      }).catch(() => {}).finally(() => pendingResponses.delete(pending));
+      pendingResponses.add(pending);
+    };
+    page.on('response', responseHandler);
     try {
       await page.goto(job.url, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(3000);
+      const isShopPage = new URL(page.url()).hostname.startsWith('shop');
+      await page.waitForTimeout(isShopPage ? 8000 : 3000);
+      await Promise.allSettled([...pendingResponses]);
 
       const finalUrl = page.url();
       const title = await page.title();
@@ -118,7 +133,9 @@ export function createCollector({
       const status = sessionState === 'requires_auth' ? 'requires_auth' : 'completed';
 
       await fs.writeFile(domPath, await page.content(), 'utf8');
-      const extractedData = status === 'completed' ? await parse1688Product(page) : null;
+      const extractedData = status === 'completed'
+        ? (isShopPage ? await parse1688Shop(page, networkResponses) : await parse1688Product(page))
+        : null;
       let savedScreenshotPath = null;
       if (screenshotMode === 'always' || (screenshotMode === 'errors' && status !== 'completed')) {
         await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -147,6 +164,8 @@ export function createCollector({
       }
       error.captureArtifacts = { screenshotPath: savedScreenshotPath };
       throw error;
+    } finally {
+      page.off('response', responseHandler);
     }
   }
 
