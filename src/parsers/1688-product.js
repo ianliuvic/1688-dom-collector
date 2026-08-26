@@ -173,8 +173,13 @@ export async function parse1688Product(page) {
       skuOptions,
       priceTexts,
       bodyText: (document.body?.innerText || '').slice(0, 200000),
-      sellerLinks: all('a[href*="shop.1688.com"], a[href*="company.1688.com"]')
+      sellerLinks: all([
+        'a[href*="shop.1688.com"]', 'a[href*="company.1688.com"]',
+        'a[href*="winport"]', 'a[href*="contactinfo"]', 'a[href*=".1688.com/page/"]',
+      ].join(','))
         .map((node) => ({ name: text(node), url: node.href })).filter((item) => item.name),
+      sellerTexts: all('[class*="company"], [class*="shop-name"], [class*="supplier"]')
+        .map(text).filter((value) => value && value.length <= 100),
     };
   });
 
@@ -248,7 +253,8 @@ export async function parse1688Product(page) {
 
   const knownAttributeNames = [
     '货号', '品牌', '面料名称', '面料成分', '里料名称', '里料成分', '产地', '适用性别',
-    '适用年龄段', '图案', '款式', '是否跨境出口专供货源', '上市年份/季节', '质量等级',
+    '适用年龄段', '图案', '风格', '款式', '适用场景', '产品类别', '颜色', '尺码',
+    '是否跨境出口专供货源', '上市年份/季节', '质量等级',
   ];
   const textAttributes = knownAttributeNames.flatMap((name) => {
     const match = raw.bodyText.match(new RegExp(`(?:^|\\n)\\s*${name}\\s*[：:]?\\s*(?:\\n\\s*)?([^\\n]{1,100})`, 'm'));
@@ -259,6 +265,7 @@ export async function parse1688Product(page) {
     value: cleanText(item?.value ?? item?.valueName ?? item?.attributeValue),
   }))].filter((item) => item.name && item.value
     && item.name.length <= 50 && item.value.length <= 300
+    && !knownAttributeNames.includes(item.value)
     && !/(平台活动下价格|活动前价格|划线价格|未划线价格|同款|\*注|前述说明)/.test(item.name));
   const attributeKeys = new Set();
   const dedupedAttributes = attributes.filter((item) => {
@@ -269,13 +276,16 @@ export async function parse1688Product(page) {
   }).slice(0, MAX_ATTRIBUTES);
 
   const seller = raw.sellerLinks[0] ?? {
-    name: cleanText(embedded.sellerNames?.[0]),
+    name: cleanText(embedded.sellerNames?.[0] ?? raw.sellerTexts?.[0]),
     url: embedded.sellerUrls?.[0] ?? null,
   };
-  const inferredSkuRows = raw.skuOptions.flatMap((item) => {
+  const inferredSkuRowsRaw = raw.skuOptions.flatMap((item) => {
     const match = cleanText(item.text).match(/^(.+?)[¥￥]\s*(\d+(?:\.\d+)?).*?库存\s*(\d+)/);
-    return match ? [{ skuText: match[1], price: Number(match[2]), stock: Number(match[3]) }] : [];
+    return match ? [{ skuText: match[1].replace(/^尺码/, ''), price: Number(match[2]), stock: Number(match[3]) }] : [];
   });
+  const inferredSkuRows = [...new Map(inferredSkuRowsRaw.map((row) => [
+    `${row.skuText}\0${row.price}\0${row.stock}`, row,
+  ])).values()];
   const sizeValues = unique(inferredSkuRows.map((row) => row.skuText), 100);
   const colorValues = unique(raw.skuOptions
     .filter((item) => item.image && cleanText(item.text) && cleanText(item.text) !== '颜色')
@@ -284,6 +294,12 @@ export async function parse1688Product(page) {
     ...(colorValues.length ? [{ name: 'Color', values: colorValues }] : []),
     ...(sizeValues.length ? [{ name: 'Size', values: sizeValues }] : []),
   ];
+  for (const row of inferredSkuRows) {
+    row.options = {
+      ...(colorValues.length === 1 ? { Color: colorValues[0] } : {}),
+      Size: row.skuText,
+    };
+  }
   const normalized = {
     schemaVersion: 1,
     pageType: 'product',
