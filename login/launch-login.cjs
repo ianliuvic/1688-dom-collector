@@ -5,6 +5,7 @@ const profilePath = process.env.PROFILE_PATH || '/app/storage/browser-profile';
 const proxyServer = process.env.PROXY_SERVER?.trim();
 const proxyUsername = process.env.PROXY_USERNAME?.trim();
 const proxyPassword = process.env.PROXY_PASSWORD;
+const startUrl = process.env.START_URL || 'https://login.1688.com/member/signin.htm';
 
 let context;
 let proxyAdapter;
@@ -49,7 +50,7 @@ process.on('SIGINT', shutdown);
 
   const page = context.pages()[0] || await context.newPage();
   try {
-    await page.goto('https://ipinfo.io/', { waitUntil: 'domcontentloaded' });
+    await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
   } catch (error) {
     console.warn('Initial proxy connectivity page failed:', error.message);
   }
