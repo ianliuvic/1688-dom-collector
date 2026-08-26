@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import Fastify from 'fastify';
 import { createDatabase } from './db.js';
 import { createCollector, isAllowed1688Url } from './collector.js';
@@ -70,6 +72,23 @@ app.post('/api/jobs', { preHandler: requireApiKey }, async (request, reply) => {
 app.get('/api/jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = await db.getJob(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.get('/api/jobs/:id/dom', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = await db.getJob(request.params.id);
+  if (!job) return reply.code(404).send({ error: 'not_found' });
+  if (!job.dom_path) return reply.code(409).send({ error: 'dom_not_available' });
+  const capturesRoot = path.resolve(config.storagePath, 'captures');
+  const domPath = path.resolve(job.dom_path);
+  if (!domPath.startsWith(`${capturesRoot}${path.sep}`)) {
+    return reply.code(500).send({ error: 'invalid_dom_path' });
+  }
+  try {
+    return reply.type('text/html; charset=utf-8').send(await fs.readFile(domPath));
+  } catch (error) {
+    if (error.code === 'ENOENT') return reply.code(404).send({ error: 'dom_file_not_found' });
+    throw error;
+  }
 });
 
 async function workerLoop() {

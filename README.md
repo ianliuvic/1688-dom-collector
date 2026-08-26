@@ -44,6 +44,7 @@ curl -X POST https://your-domain.example/api/jobs \
 ```
 
 `GET /api/jobs/:id` and `GET /api/session` use the same bearer token.
+`GET /api/jobs/:id/dom` downloads the archived HTML and is also bearer-token protected.
 
 ## Next phase
 
