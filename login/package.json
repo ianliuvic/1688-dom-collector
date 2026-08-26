@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
-    "playwright": "1.55.0"
+    "playwright": "1.55.0",
+    "proxy-chain": "3.0.0"
   }
 }

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
+import { startProxyAdapter } from './proxy.js';
 
 const AUTH_MARKERS = [
   'login.1688.com',
@@ -38,19 +39,14 @@ export function createCollector({
   const capturesPath = path.join(storagePath, 'captures');
   let context;
   let page;
+  let proxyAdapter;
   let sessionState = 'unknown';
   let lastCheckedAt = null;
 
   async function start() {
     await fs.mkdir(profilePath, { recursive: true });
     await fs.mkdir(capturesPath, { recursive: true });
-    const proxy = proxyServer
-      ? {
-          server: proxyServer,
-          ...(proxyUsername ? { username: proxyUsername } : {}),
-          ...(proxyPassword ? { password: proxyPassword } : {}),
-        }
-      : undefined;
+    proxyAdapter = await startProxyAdapter(proxyServer, proxyUsername, proxyPassword);
 
     context = await chromium.launchPersistentContext(profilePath, {
       headless: true,
@@ -58,7 +54,7 @@ export function createCollector({
       timezoneId: 'Asia/Shanghai',
       viewport: { width: 1440, height: 1000 },
       args: ['--disable-dev-shm-usage', '--password-store=basic'],
-      ...(proxy ? { proxy } : {}),
+      ...(proxyAdapter ? { proxy: proxyAdapter.playwrightProxy } : {}),
     });
     page = context.pages()[0] ?? await context.newPage();
     page.setDefaultNavigationTimeout(navigationTimeoutMs);
@@ -66,6 +62,7 @@ export function createCollector({
 
   async function stop() {
     await context?.close();
+    await proxyAdapter?.close();
   }
 
   function classifySession(finalUrl, bodyText) {
