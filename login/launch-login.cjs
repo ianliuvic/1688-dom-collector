@@ -34,7 +34,11 @@ process.on('SIGINT', shutdown);
   });
 
   const page = context.pages()[0] || await context.newPage();
-  await page.goto('https://www.1688.com/', { waitUntil: 'domcontentloaded' });
+  try {
+    await page.goto('https://ipinfo.io/', { waitUntil: 'domcontentloaded' });
+  } catch (error) {
+    console.warn('Initial proxy connectivity page failed:', error.message);
+  }
   console.log(`Login browser ready. Proxy enabled: ${Boolean(proxy)}`);
 })().catch((error) => {
   console.error('Login browser failed to start:', error.message);
