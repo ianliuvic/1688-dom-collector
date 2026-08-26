@@ -26,6 +26,7 @@ This framework does not bypass CAPTCHAs, signatures, access controls, or platfor
 | `PROXY_SERVER` | no | - |
 | `PROXY_USERNAME` | no | - |
 | `PROXY_PASSWORD` | no | - |
+| `BROWSER_HEADLESS` | no | `false` |
 
 ## API
 

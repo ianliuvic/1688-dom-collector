@@ -34,6 +34,7 @@ export function createCollector({
   proxyServer,
   proxyUsername,
   proxyPassword,
+  browserHeadless,
 }) {
   const profilePath = path.join(storagePath, 'browser-profile');
   const capturesPath = path.join(storagePath, 'captures');
@@ -49,7 +50,7 @@ export function createCollector({
     proxyAdapter = await startProxyAdapter(proxyServer, proxyUsername, proxyPassword);
 
     context = await chromium.launchPersistentContext(profilePath, {
-      headless: true,
+      headless: browserHeadless,
       locale: 'zh-CN',
       timezoneId: 'Asia/Shanghai',
       viewport: { width: 1440, height: 1000 },

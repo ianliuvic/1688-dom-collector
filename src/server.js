@@ -13,6 +13,7 @@ const config = {
   proxyServer: process.env.PROXY_SERVER?.trim() || null,
   proxyUsername: process.env.PROXY_USERNAME?.trim() || null,
   proxyPassword: process.env.PROXY_PASSWORD || null,
+  browserHeadless: process.env.BROWSER_HEADLESS === 'true',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
