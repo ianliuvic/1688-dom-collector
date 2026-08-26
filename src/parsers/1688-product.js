@@ -275,9 +275,14 @@ export async function parse1688Product(page) {
     return true;
   }).slice(0, MAX_ATTRIBUTES);
 
-  const seller = raw.sellerLinks[0] ?? {
-    name: cleanText(embedded.sellerNames?.[0] ?? raw.sellerTexts?.[0]),
-    url: embedded.sellerUrls?.[0] ?? null,
+  const genericSellerText = /^(商品|首页|店铺|公司|联系我们|联系方式|进入店铺)$/;
+  const sellerLink = raw.sellerLinks.find((item) => !genericSellerText.test(cleanText(item.name)));
+  const sellerText = (embedded.sellerNames ?? []).find((value) => !genericSellerText.test(cleanText(value)))
+    ?? (raw.sellerTexts ?? []).find((value) => !genericSellerText.test(cleanText(value)))
+    ?? sellerLink?.name;
+  const seller = {
+    name: cleanText(sellerText) || null,
+    url: embedded.sellerUrls?.[0] ?? sellerLink?.url ?? raw.sellerLinks[0]?.url ?? null,
   };
   const inferredSkuRowsRaw = raw.skuOptions.flatMap((item) => {
     const match = cleanText(item.text).match(/^(.+?)[¥￥]\s*(\d+(?:\.\d+)?).*?库存\s*(\d+)/);
