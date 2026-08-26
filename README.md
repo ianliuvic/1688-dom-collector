@@ -30,6 +30,7 @@ This framework does not bypass CAPTCHAs, signatures, access controls, or platfor
 | `PROXY_PASSWORD` | no | - |
 | `BROWSER_HEADLESS` | no | `false` |
 | `SCREENSHOT_MODE` | no | `errors` (`never`, `errors`, or `always`) |
+| `CLEAR_STALE_BROWSER_LOCKS` | no | `false`; one-shot recovery only while all profile users are stopped |
 
 ## API
 

@@ -37,6 +37,7 @@ export function createCollector({
   proxyPassword,
   browserHeadless,
   screenshotMode = 'errors',
+  clearStaleBrowserLocks = false,
 }) {
   const profilePath = path.join(storagePath, 'browser-profile');
   const capturesPath = path.join(storagePath, 'captures');
@@ -49,6 +50,10 @@ export function createCollector({
   async function start() {
     await fs.mkdir(profilePath, { recursive: true });
     await fs.mkdir(capturesPath, { recursive: true });
+    if (clearStaleBrowserLocks) {
+      await Promise.all(['SingletonLock', 'SingletonCookie', 'SingletonSocket'].map((name) =>
+        fs.rm(path.join(profilePath, name), { force: true, recursive: true })));
+    }
     proxyAdapter = await startProxyAdapter(proxyServer, proxyUsername, proxyPassword);
 
     context = await chromium.launchPersistentContext(profilePath, {

@@ -16,6 +16,7 @@ const config = {
   browserHeadless: process.env.BROWSER_HEADLESS === 'true',
   screenshotMode: ['never', 'errors', 'always'].includes(process.env.SCREENSHOT_MODE)
     ? process.env.SCREENSHOT_MODE : 'errors',
+  clearStaleBrowserLocks: process.env.CLEAR_STALE_BROWSER_LOCKS === 'true',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
