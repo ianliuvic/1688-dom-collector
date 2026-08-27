@@ -37,6 +37,7 @@ export function createCollector({
   proxyServer,
   proxyUsername,
   proxyPassword,
+  pluginExtensionSecret,
   browserHeadless,
   screenshotMode = 'errors',
   clearStaleBrowserLocks = false,
@@ -165,14 +166,31 @@ export function createCollector({
           };
         }
 
+        const pluginLogin = await fetchPluginLogin({ context, page });
+        if (!pluginLogin.result.isLogin) {
+          sessionState = 'requires_auth';
+          lastCheckedAt = new Date().toISOString();
+          return {
+            status: 'requires_auth', title, finalUrl, domPath,
+            screenshotPath: null, extractedData: pluginLogin.result,
+            error: 'The 1688 plugin session is not logged in.',
+          };
+        }
+
         const { payload, result } = await fetchShopOfferPage({
           context,
           page,
+          extensionSecret: pluginExtensionSecret,
           memberId: job.options.memberId,
           pageNum: job.options.pageNum,
           pageSize: job.options.pageSize,
           sortType: job.options.sortType,
         });
+        result.pluginSession = {
+          isLogin: true,
+          loginId: pluginLogin.result.loginId,
+          userId: pluginLogin.result.userId,
+        };
         await fs.writeFile(path.join(jobPath, 'mtop-response.json'), JSON.stringify(payload), 'utf8');
         await fs.writeFile(path.join(jobPath, 'product.json'), JSON.stringify(result, null, 2), 'utf8');
         return {

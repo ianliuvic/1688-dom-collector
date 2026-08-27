@@ -46,7 +46,7 @@ function shouldRefreshToken(payload) {
   return retMessages(payload).some((message) => /TOKEN|ILLEGAL_ACCESS|SESSION/i.test(message));
 }
 
-async function callMtop({ context, page, api, version, data }) {
+async function callMtop({ context, page, api, version, data, extraHeaders = {} }) {
   const userAgent = await page.evaluate(() => navigator.userAgent);
   let payload;
   let httpStatus;
@@ -61,6 +61,7 @@ async function callMtop({ context, page, api, version, data }) {
           origin: PLUGIN_ORIGIN,
           referer: `${PLUGIN_ORIGIN}/`,
           'user-agent': userAgent,
+          ...extraHeaders,
         },
         timeout: 30000,
       },
@@ -106,10 +107,20 @@ function findTotal(value, depth = 0) {
   return null;
 }
 
-export async function fetchShopOfferPage({ context, page, memberId, pageNum, pageSize, sortType }) {
+export async function fetchShopOfferPage({
+  context, page, extensionSecret, memberId, pageNum, pageSize, sortType,
+}) {
+  if (!extensionSecret) {
+    throw new Error('PLUGIN_EXTENSION_SECRET is required for the official plugin shop API.');
+  }
   const data = { memberId, sortType, pageNum, pageSize };
   const payload = await callMtop({
-    context, page, api: SHOP_API, version: SHOP_VERSION, data,
+    context,
+    page,
+    api: SHOP_API,
+    version: SHOP_VERSION,
+    data,
+    extraHeaders: { 'x-1688extension-secret': extensionSecret },
   });
   const offers = findOfferArray(payload) ?? [];
   return {

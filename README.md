@@ -29,6 +29,7 @@ This framework does not bypass CAPTCHAs, signatures, access controls, or platfor
 | `PROXY_SERVER` | no | - |
 | `PROXY_USERNAME` | no | - |
 | `PROXY_PASSWORD` | no | - |
+| `PLUGIN_EXTENSION_SECRET` | for plugin shop API | Official procurement-plugin request secret; store only as a runtime secret |
 | `BROWSER_HEADLESS` | no | `false` |
 | `SCREENSHOT_MODE` | no | `errors` (`never`, `errors`, or `always`) |
 | `CLEAR_STALE_BROWSER_LOCKS` | no | `false`; one-shot recovery only while all profile users are stopped |
@@ -50,6 +51,7 @@ Shop-list jobs capture only the initially loaded page by default. Set
 The protected `POST /api/shop-scans` diagnostic queues one authorized MTop shop
 batch (up to 300 offers) through the collector's logged-in browser session. It
 accepts `url`, `memberId`, and optional `pageNum`, `pageSize`, and `sortType`.
+The job verifies the official plugin session before requesting the offer batch.
 
 `POST /api/plugin-session/check` queues the official procurement-plugin MTop
 login check using the persistent browser session and returns the result through

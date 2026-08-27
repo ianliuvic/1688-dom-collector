@@ -15,6 +15,7 @@ const config = {
   proxyServer: process.env.PROXY_SERVER?.trim() || null,
   proxyUsername: process.env.PROXY_USERNAME?.trim() || null,
   proxyPassword: process.env.PROXY_PASSWORD || null,
+  pluginExtensionSecret: process.env.PLUGIN_EXTENSION_SECRET || null,
   browserHeadless: process.env.BROWSER_HEADLESS === 'true',
   screenshotMode: ['never', 'errors', 'always'].includes(process.env.SCREENSHOT_MODE)
     ? process.env.SCREENSHOT_MODE : 'errors',
