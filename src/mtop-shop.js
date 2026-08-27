@@ -47,27 +47,26 @@ function shouldRefreshToken(payload) {
 }
 
 async function callMtop({ context, page, api, version, data, extraHeaders = {} }) {
-  const userAgent = await page.evaluate(() => navigator.userAgent);
   let payload;
   let httpStatus;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const cookies = await context.cookies('https://h5api.m.1688.com');
-    const response = await context.request.get(
-      signedUrl(tokenValue(cookies), api, version, data),
-      {
-        headers: {
-          accept: '*/*',
-          origin: PLUGIN_ORIGIN,
-          referer: `${PLUGIN_ORIGIN}/`,
-          'user-agent': userAgent,
-          ...extraHeaders,
-        },
-        timeout: 30000,
-      },
-    );
-    httpStatus = response.status();
-    payload = parseJson(await response.text());
+    const response = await page.evaluate(async ({ url, headers }) => {
+      const fetched = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        signal: AbortSignal.timeout(30000),
+        headers: { accept: '*/*', ...headers },
+      });
+      return { status: fetched.status, text: await fetched.text() };
+    }, {
+      url: signedUrl(tokenValue(cookies), api, version, data),
+      headers: extraHeaders,
+    });
+    httpStatus = response.status;
+    payload = parseJson(response.text);
     if (isSuccess(payload)) return payload;
     if (attempt === 0 && shouldRefreshToken(payload)) continue;
     throw new Error(`1688 MTop rejected the request: ${retMessages(payload).join('; ') || httpStatus}`);

@@ -166,6 +166,8 @@ export function createCollector({
           };
         }
 
+        await page.goto('https://air.1688.com/', { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(500);
         const pluginLogin = await fetchPluginLogin({ context, page });
         if (!pluginLogin.result.isLogin) {
           sessionState = 'requires_auth';
