@@ -15,7 +15,6 @@ const config = {
   proxyServer: process.env.PROXY_SERVER?.trim() || null,
   proxyUsername: process.env.PROXY_USERNAME?.trim() || null,
   proxyPassword: process.env.PROXY_PASSWORD || null,
-  pluginExtensionSecret: process.env.PLUGIN_EXTENSION_SECRET || null,
   browserHeadless: process.env.BROWSER_HEADLESS === 'true',
   screenshotMode: ['never', 'errors', 'always'].includes(process.env.SCREENSHOT_MODE)
     ? process.env.SCREENSHOT_MODE : 'errors',
@@ -90,12 +89,15 @@ app.post('/api/shop-scans', { preHandler: requireApiKey }, async (request, reply
   const pageNum = request.body?.pageNum ?? 1;
   const pageSize = request.body?.pageSize ?? 300;
   const sortType = request.body?.sortType ?? 'wangpu_score';
+  const allPages = request.body?.allPages === true;
+  const maxPages = request.body?.maxPages ?? 1000;
   if (typeof url !== 'string' || !isAllowed1688Url(url)
       || !new URL(url).hostname.startsWith('shop')) {
     return reply.code(400).send({ error: 'A valid HTTPS 1688 shop URL is required.' });
   }
-  if (typeof memberId !== 'string' || !/^b2b-[a-z0-9-]{5,80}$/i.test(memberId)) {
-    return reply.code(400).send({ error: 'A valid 1688 memberId is required.' });
+  if (memberId !== undefined
+      && (typeof memberId !== 'string' || !/^b2b-[a-z0-9-]{5,80}$/i.test(memberId))) {
+    return reply.code(400).send({ error: 'memberId must be a valid 1688 memberId when provided.' });
   }
   if (!Number.isInteger(pageNum) || pageNum < 1 || pageNum > 10000) {
     return reply.code(400).send({ error: 'pageNum must be an integer between 1 and 10000.' });
@@ -106,8 +108,14 @@ app.post('/api/shop-scans', { preHandler: requireApiKey }, async (request, reply
   if (typeof sortType !== 'string' || !/^[a-z0-9_]{1,40}$/i.test(sortType)) {
     return reply.code(400).send({ error: 'sortType is invalid.' });
   }
+  if (request.body?.allPages !== undefined && typeof request.body.allPages !== 'boolean') {
+    return reply.code(400).send({ error: 'allPages must be a boolean when provided.' });
+  }
+  if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 1000) {
+    return reply.code(400).send({ error: 'maxPages must be an integer between 1 and 1000.' });
+  }
   const job = await db.createJob(crypto.randomUUID(), url, {
-    mode: 'shop_mtop', memberId, pageNum, pageSize, sortType,
+    mode: 'shop_mtop', memberId, pageNum, pageSize, sortType, allPages, maxPages,
   });
   return reply.code(202).send(job);
 });

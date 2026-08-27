@@ -4,7 +4,13 @@ import { chromium } from 'playwright';
 import { startProxyAdapter } from './proxy.js';
 import { parse1688Product } from './parsers/1688-product.js';
 import { parse1688Shop } from './parsers/1688-shop.js';
-import { fetchPluginLogin, fetchShopOfferPage } from './mtop-shop.js';
+import {
+  fetchAllShopOffers,
+  fetchPluginLogin,
+  fetchShopOfferPage,
+  refreshPluginHeartbeat,
+} from './mtop-shop.js';
+import { createPluginCrypto } from './plugin-crypto.js';
 
 const AUTH_MARKERS = [
   'login.1688.com',
@@ -37,7 +43,6 @@ export function createCollector({
   proxyServer,
   proxyUsername,
   proxyPassword,
-  pluginExtensionSecret,
   browserHeadless,
   screenshotMode = 'errors',
   clearStaleBrowserLocks = false,
@@ -49,6 +54,7 @@ export function createCollector({
   let proxyAdapter;
   let sessionState = 'unknown';
   let lastCheckedAt = null;
+  const pluginCrypto = createPluginCrypto({ storagePath, refreshToken: refreshPluginHeartbeat });
 
   async function start() {
     await fs.mkdir(profilePath, { recursive: true });
@@ -153,6 +159,8 @@ export function createCollector({
         const finalUrl = page.url();
         const title = await page.title();
         const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+        const shopData = await parse1688Shop(page).catch(() => null);
+        const memberId = job.options.memberId || shopData?.company?.memberId;
         sessionState = classifySession(finalUrl, bodyText);
         lastCheckedAt = new Date().toISOString();
         await fs.writeFile(domPath, await page.content(), 'utf8');
@@ -179,15 +187,20 @@ export function createCollector({
           };
         }
 
-        const { payload, result } = await fetchShopOfferPage({
-          context,
-          page,
-          extensionSecret: pluginExtensionSecret,
-          memberId: job.options.memberId,
+        if (!memberId) {
+          throw new Error('Could not determine the shop memberId from the supplied page.');
+        }
+        const scan = job.options.allPages
+          ? fetchAllShopOffers
+          : fetchShopOfferPage;
+        const { payload, result } = await scan({
+          context, page, pluginCrypto, memberId,
           pageNum: job.options.pageNum,
           pageSize: job.options.pageSize,
           sortType: job.options.sortType,
+          ...(job.options.allPages ? { maxPages: job.options.maxPages } : {}),
         });
+        result.shop = shopData;
         result.pluginSession = {
           isLogin: true,
           loginId: pluginLogin.result.loginId,

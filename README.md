@@ -29,7 +29,6 @@ This framework does not bypass CAPTCHAs, signatures, access controls, or platfor
 | `PROXY_SERVER` | no | - |
 | `PROXY_USERNAME` | no | - |
 | `PROXY_PASSWORD` | no | - |
-| `PLUGIN_EXTENSION_SECRET` | for plugin shop API | Official procurement-plugin request secret; store only as a runtime secret |
 | `BROWSER_HEADLESS` | no | `false` |
 | `SCREENSHOT_MODE` | no | `errors` (`never`, `errors`, or `always`) |
 | `CLEAR_STALE_BROWSER_LOCKS` | no | `false`; one-shot recovery only while all profile users are stopped |
@@ -48,10 +47,14 @@ curl -X POST https://your-domain.example/api/jobs \
 Shop-list jobs capture only the initially loaded page by default. Set
 `"paginate": true` only when a complete paginated Offer ID scan is required.
 
-The protected `POST /api/shop-scans` diagnostic queues one authorized MTop shop
-batch (up to 300 offers) through the collector's logged-in browser session. It
-accepts `url`, `memberId`, and optional `pageNum`, `pageSize`, and `sortType`.
-The job verifies the official plugin session before requesting the offer batch.
+The protected `POST /api/shop-scans` endpoint queues an authorized official-plugin
+MTop shop scan through the collector's logged-in browser session. It accepts
+`url` and optional `memberId`, `pageNum`, `pageSize`, and `sortType`. The
+collector resolves `memberId` from the shop page when omitted. Set
+`"allPages": true` to sequentially fetch every batch (up to 300 offers per
+request); `maxPages` defaults to 1000 as a safety limit. The collector refreshes
+the short-lived heartbeat token and creates a request-bound extension secret in
+memory. Neither value is logged or stored in PostgreSQL.
 
 `POST /api/plugin-session/check` queues the official procurement-plugin MTop
 login check using the persistent browser session and returns the result through
