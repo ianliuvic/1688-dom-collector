@@ -4,7 +4,7 @@ import { chromium } from 'playwright';
 import { startProxyAdapter } from './proxy.js';
 import { parse1688Product } from './parsers/1688-product.js';
 import { parse1688Shop } from './parsers/1688-shop.js';
-import { fetchShopOfferPage } from './mtop-shop.js';
+import { fetchPluginLogin, fetchShopOfferPage } from './mtop-shop.js';
 
 const AUTH_MARKERS = [
   'login.1688.com',
@@ -107,6 +107,43 @@ export function createCollector({
     await fs.mkdir(jobPath, { recursive: true });
     const domPath = path.join(jobPath, 'page.html');
     const screenshotPath = path.join(jobPath, 'page.png');
+
+    if (job.options?.mode === 'plugin_login') {
+      try {
+        await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(1500);
+        const { payload, result } = await fetchPluginLogin({ context, page });
+        const title = await page.title();
+        const finalUrl = page.url();
+        sessionState = result.isLogin ? 'active' : 'requires_auth';
+        lastCheckedAt = new Date().toISOString();
+        await fs.writeFile(domPath, await page.content(), 'utf8');
+        await fs.writeFile(path.join(jobPath, 'mtop-response.json'), JSON.stringify(payload), 'utf8');
+        await fs.writeFile(path.join(jobPath, 'product.json'), JSON.stringify(result, null, 2), 'utf8');
+        let savedScreenshotPath = null;
+        if (screenshotMode === 'always'
+            || (screenshotMode === 'errors' && sessionState !== 'active')) {
+          await page.screenshot({ path: screenshotPath, fullPage: true });
+          savedScreenshotPath = screenshotPath;
+        }
+        return {
+          status: result.isLogin ? 'completed' : 'requires_auth',
+          title, finalUrl, domPath, screenshotPath: savedScreenshotPath,
+          extractedData: result,
+          error: result.isLogin ? null : 'The 1688 plugin session is not logged in.',
+        };
+      } catch (error) {
+        let savedScreenshotPath = null;
+        if (screenshotMode !== 'never') {
+          try {
+            await page.screenshot({ path: screenshotPath, fullPage: true });
+            savedScreenshotPath = screenshotPath;
+          } catch { /* preserve the original plugin-session error */ }
+        }
+        error.captureArtifacts = { screenshotPath: savedScreenshotPath };
+        throw error;
+      }
+    }
 
     if (job.options?.mode === 'shop_mtop') {
       try {

@@ -1,15 +1,18 @@
 import crypto from 'node:crypto';
 
-const API = 'mtop.1688.pc.plugin.shop.offerlist.query';
-const VERSION = '1.1';
 const APP_KEY = '12574478';
+const PLUGIN_ORIGIN = 'https://air.1688.com';
+const SHOP_API = 'mtop.1688.pc.plugin.shop.offerlist.query';
+const SHOP_VERSION = '1.1';
+const LOGIN_API = 'mtop.1688.pc.plugin.user.login.get';
+const LOGIN_VERSION = '1.0';
 
 function tokenValue(cookies) {
   const cookie = cookies.find((item) => item.name === '_m_h5_tk');
   return cookie?.value?.split('_')[0] ?? '';
 }
 
-function signedUrl(token, data) {
+function signedUrl(token, api, version, data) {
   const timestamp = String(Date.now());
   const dataText = JSON.stringify(data);
   const sign = crypto.createHash('md5')
@@ -17,9 +20,9 @@ function signedUrl(token, data) {
     .digest('hex');
   const params = new URLSearchParams({
     jsv: '2.7.2', appKey: APP_KEY, t: timestamp, sign,
-    dataType: 'json', api: API, v: VERSION, type: 'originaljson', data: dataText,
+    dataType: 'json', api, v: version, type: 'originaljson', data: dataText,
   });
-  return `https://h5api.m.1688.com/h5/${API}/${VERSION}/?${params}`;
+  return `https://h5api.m.1688.com/h5/${api}/${version}/?${params}`;
 }
 
 function parseJson(text) {
@@ -41,6 +44,35 @@ function isSuccess(payload) {
 
 function shouldRefreshToken(payload) {
   return retMessages(payload).some((message) => /TOKEN|ILLEGAL_ACCESS|SESSION/i.test(message));
+}
+
+async function callMtop({ context, page, api, version, data }) {
+  const userAgent = await page.evaluate(() => navigator.userAgent);
+  let payload;
+  let httpStatus;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const cookies = await context.cookies('https://h5api.m.1688.com');
+    const response = await context.request.get(
+      signedUrl(tokenValue(cookies), api, version, data),
+      {
+        headers: {
+          accept: '*/*',
+          origin: PLUGIN_ORIGIN,
+          referer: `${PLUGIN_ORIGIN}/`,
+          'user-agent': userAgent,
+        },
+        timeout: 30000,
+      },
+    );
+    httpStatus = response.status();
+    payload = parseJson(await response.text());
+    if (isSuccess(payload)) return payload;
+    if (attempt === 0 && shouldRefreshToken(payload)) continue;
+    throw new Error(`1688 MTop rejected the request: ${retMessages(payload).join('; ') || httpStatus}`);
+  }
+
+  throw new Error(`1688 MTop request failed: ${retMessages(payload).join('; ') || httpStatus}`);
 }
 
 function findOfferArray(value, depth = 0) {
@@ -76,30 +108,9 @@ function findTotal(value, depth = 0) {
 
 export async function fetchShopOfferPage({ context, page, memberId, pageNum, pageSize, sortType }) {
   const data = { memberId, sortType, pageNum, pageSize };
-  const userAgent = await page.evaluate(() => navigator.userAgent);
-  let payload;
-  let httpStatus;
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const cookies = await context.cookies('https://h5api.m.1688.com');
-    const response = await context.request.get(signedUrl(tokenValue(cookies), data), {
-      headers: {
-        accept: 'application/json, text/plain, */*',
-        referer: page.url(),
-        'user-agent': userAgent,
-      },
-      timeout: 30000,
-    });
-    httpStatus = response.status();
-    payload = parseJson(await response.text());
-    if (isSuccess(payload)) break;
-    if (attempt === 0 && shouldRefreshToken(payload)) continue;
-    throw new Error(`1688 MTop rejected the request: ${retMessages(payload).join('; ') || httpStatus}`);
-  }
-
-  if (!isSuccess(payload)) {
-    throw new Error(`1688 MTop request failed: ${retMessages(payload).join('; ') || httpStatus}`);
-  }
+  const payload = await callMtop({
+    context, page, api: SHOP_API, version: SHOP_VERSION, data,
+  });
   const offers = findOfferArray(payload) ?? [];
   return {
     payload,
@@ -118,3 +129,20 @@ export async function fetchShopOfferPage({ context, page, memberId, pageNum, pag
   };
 }
 
+export async function fetchPluginLogin({ context, page }) {
+  const payload = await callMtop({
+    context, page, api: LOGIN_API, version: LOGIN_VERSION, data: {},
+  });
+  const data = payload?.data ?? {};
+  const result = {
+    schemaVersion: 1,
+    pageType: 'plugin-session',
+    source: '1688',
+    isLogin: data.isLogin === true || data.isLogin === 'true',
+    loginId: data.loginId ?? null,
+    userId: data.userId != null ? String(data.userId) : null,
+    mtopRet: retMessages(payload),
+    checkedAt: new Date().toISOString(),
+  };
+  return { payload, result };
+}

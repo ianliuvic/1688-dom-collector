@@ -51,6 +51,10 @@ The protected `POST /api/shop-scans` diagnostic queues one authorized MTop shop
 batch (up to 300 offers) through the collector's logged-in browser session. It
 accepts `url`, `memberId`, and optional `pageNum`, `pageSize`, and `sortType`.
 
+`POST /api/plugin-session/check` queues the official procurement-plugin MTop
+login check using the persistent browser session and returns the result through
+the normal `GET /api/jobs/:id` endpoint.
+
 `GET /api/jobs/:id` and `GET /api/session` use the same bearer token.
 `GET /api/jobs/:id/dom` downloads the archived HTML and is also bearer-token protected.
 

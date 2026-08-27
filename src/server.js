@@ -60,6 +60,15 @@ app.get('/health', async (_request, reply) => {
 
 app.get('/api/session', { preHandler: requireApiKey }, async () => collector.getSessionStatus());
 
+app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
+  const job = await db.createJob(
+    crypto.randomUUID(),
+    'https://air.1688.com/',
+    { mode: 'plugin_login' },
+  );
+  return reply.code(202).send(job);
+});
+
 app.post('/api/jobs', { preHandler: requireApiKey }, async (request, reply) => {
   const url = request.body?.url;
   if (typeof url !== 'string' || !isAllowed1688Url(url)) {
