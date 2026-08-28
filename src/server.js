@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import { createDatabase } from './db.js';
 import { createCollector, isAllowed1688Url } from './collector.js';
 import { analyzeProductImage } from './vision.js';
-import { analyzeGalleryImages, cleanProductGallery } from './image-cleaner.js';
+import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -135,67 +135,37 @@ app.get('/api/product-details/:id/vision', { preHandler: requireApiKey }, async 
   return db.listProductVision(detail.id);
 });
 
-app.post('/api/product-details/:id/image-clean', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/product-details/:id/image-audit', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   try {
-    const result = await cleanProductGallery({ detail, config: {
+    const result = await auditProductGallery({ detail, config: {
       apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
       model: config.visionModel, storagePath: config.storagePath,
     } });
-    const saved = await db.saveProductImageCleanup(detail.id, result);
-    return { cleanupId: saved.id, ...result, createdAt: saved.created_at };
+    return result;
   } catch (error) {
-    request.log.error({ err: error, productDetailId: detail.id }, 'gallery cleaning failed');
-    return reply.code(502).send({ error: 'image_clean_failed', message: error.message });
+    request.log.error({ err: error, productDetailId: detail.id }, 'gallery audit failed');
+    return reply.code(502).send({ error: 'image_audit_failed', message: error.message });
   }
 });
 
-app.get('/api/product-details/:id/image-clean', { preHandler: requireApiKey }, async (request, reply) => {
-  const detail = await db.getProductDetail(request.params.id);
-  if (!detail) return reply.code(404).send({ error: 'not_found' });
-  return db.listProductImageCleanups(detail.id);
-});
-
-app.post('/api/image-clean/test', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/image-audit/test', { preHandler: requireApiKey }, async (request, reply) => {
   if (!Array.isArray(request.body?.images) || request.body.images.length < 1 || request.body.images.length > 30) {
     return reply.code(400).send({ error: 'images must contain 1 to 30 ordered persistent-storage image paths.' });
   }
   try {
-    return await analyzeGalleryImages({ images: request.body.images, persistOutput: false, config: {
+    return await analyzeGalleryImages({ images: request.body.images, config: {
       apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
       model: config.visionModel, storagePath: config.storagePath,
     } });
   } catch (error) {
-    request.log.error({ err: error }, 'test gallery cleaning failed');
-    return reply.code(502).send({ error: 'image_clean_test_failed', message: error.message });
+    request.log.error({ err: error }, 'test gallery audit failed');
+    return reply.code(502).send({ error: 'image_audit_test_failed', message: error.message });
   }
 });
 
-app.post('/api/image-clean/test-from-products', { preHandler: requireApiKey }, async (request, reply) => {
-  const urls = Array.isArray(request.body?.urls) ? request.body.urls : [];
-  if (!urls.length || urls.length > 5 || urls.some((url) => typeof url !== 'string'
-    || !isAllowed1688Url(url) || !new URL(url).hostname.startsWith('detail.'))) {
-    return reply.code(400).send({ error: 'urls must contain 1 to 5 HTTPS 1688 detail URLs.' });
-  }
-  const results = [];
-  for (const url of urls) {
-    const testId = crypto.randomUUID();
-    try {
-      const source = await collector.extractProductImages(url, testId);
-      const analysis = await analyzeGalleryImages({ images: source.images, persistOutput: false, offerId: source.offerId || testId, config: {
-        apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
-        model: config.visionModel, storagePath: config.storagePath,
-      } });
-      results.push({ url, offerId: source.offerId, ...analysis });
-    } catch (error) {
-      results.push({ url, status: 'failed', error: error.message });
-    }
-  }
-  return { results };
-});
-
-app.post('/api/image-clean/test-live', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/image-audit/live', { preHandler: requireApiKey }, async (request, reply) => {
   const urls = Array.isArray(request.body?.urls) ? request.body.urls : [];
   if (!urls.length || urls.length > 5 || urls.some((url) => typeof url !== 'string'
     || !isAllowed1688Url(url) || !new URL(url).hostname.startsWith('detail.'))) {
@@ -206,7 +176,7 @@ app.post('/api/image-clean/test-live', { preHandler: requireApiKey }, async (req
     try {
       const source = await collector.extractProductImagesInMemory(url);
       if (source.status !== 'completed') { results.push({ url, ...source }); continue; }
-      const analysis = await analyzeGalleryImages({ images: source.images, persistOutput: false, offerId: source.offerId, config: {
+      const analysis = await analyzeGalleryImages({ images: source.images, config: {
         apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
         model: config.visionModel, storagePath: config.storagePath,
       } });

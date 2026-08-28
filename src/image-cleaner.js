@@ -31,12 +31,8 @@ async function callVision(content, config, maxTokens = 2500) {
   return { raw, parsed: parseJson(raw), usage: payload.usage ?? null };
 }
 
-async function sha256(filePath) {
-  return crypto.createHash('sha256').update(await fs.readFile(filePath)).digest('hex');
-}
-
-/** Analyze an explicitly supplied, correctly ordered product gallery without database access. */
-export async function analyzeGalleryImages({ images, config, persistOutput = false, offerId = 'test' }) {
+/** Audit an explicitly supplied, correctly ordered product gallery without modifying images. */
+export async function analyzeGalleryImages({ images, config }) {
   const gallery = (images || []).filter((image) => image.storage_path || image.path || image.dataUrl);
   if (!gallery.length) throw new Error('No locally stored product gallery images are available.');
   if (!config.apiKey) throw new Error('DASHSCOPE_API_KEY is not configured.');
@@ -79,80 +75,84 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
       indices: [...new Set((Array.isArray(set.indices) ? set.indices : []).map(Number)
         .filter((index) => Number.isInteger(index) && index >= 0 && index < files.length))],
     })).filter((set) => Number(set.confidence ?? 0) >= 0.85 && set.indices.length >= 2) : [];
-  const duplicateGroupByIndex = new Map();
-  for (const [groupIndex, set] of duplicateSets.entries()) {
-    for (const index of set.indices.map(Number)) duplicateGroupByIndex.set(index, `visual:${groupIndex}`);
+  const exactSets = [...new Set(files.map((file) => file.sha256))].map((hash) => ({
+    indices: files.filter((file) => file.sha256 === hash).map((file) => file.index),
+    confidence: 1, evidence: 'Binary-identical image content.', source: 'sha256',
+  })).filter((set) => set.indices.length >= 2);
+  const allDuplicateSets = [...exactSets, ...duplicateSets.map((set) => ({ ...set, source: 'vision' }))];
+  const mergedSets = [];
+  for (const set of allDuplicateSets) {
+    const overlaps = mergedSets.filter((candidate) => candidate.indices.some((index) => set.indices.includes(index)));
+    if (!overlaps.length) {
+      mergedSets.push({ ...set, indices: [...set.indices] });
+      continue;
+    }
+    const target = overlaps[0];
+    target.indices = [...new Set([...target.indices, ...set.indices])].sort((a, b) => a - b);
+    target.confidence = Math.max(Number(target.confidence || 0), Number(set.confidence || 0));
+    target.evidence = [target.evidence, set.evidence].filter(Boolean).join(' ');
+    target.source = target.source === set.source ? target.source : 'sha256+vision';
+    for (const extra of overlaps.slice(1)) {
+      target.indices = [...new Set([...target.indices, ...extra.indices])].sort((a, b) => a - b);
+      mergedSets.splice(mergedSets.indexOf(extra), 1);
+    }
   }
-  const prelim = files.map((file, index) => {
+  const duplicateGroupByIndex = new Map();
+  for (const [groupIndex, set] of mergedSets.entries()) {
+    for (const index of set.indices) duplicateGroupByIndex.set(index, `duplicate:${groupIndex + 1}`);
+  }
+  const auditedItems = files.map((file, index) => {
     const model = { ...(byIndex.get(index) || {}) };
     model.is_back_or_reverse = model.is_back_or_reverse === true || auditedBackIndices.has(index);
     if (auditedBackIndices.has(index) && !model.orientation_evidence) {
       model.orientation_evidence = orientationResult.parsed?.evidence?.[String(index)] || null;
     }
-    const duplicateGroup = duplicateGroupByIndex.get(index) || `unique:${index}`;
-    return { ...file, model, duplicateGroup, isBack: model.is_back_or_reverse === true };
+    const duplicateGroup = duplicateGroupByIndex.get(index) || null;
+    const duplicateSet = duplicateGroup
+      ? mergedSets[Number(duplicateGroup.split(':')[1]) - 1] : null;
+    const issues = [];
+    if (model.has_watermark === true) issues.push('watermark');
+    if (model.has_chinese_text === true) issues.push('chinese_text');
+    if (duplicateSet) issues.push('duplicate');
+    if (index === 0 && model.is_front_view !== true) issues.push('first_image_not_front');
+    if (index === 0 && model.is_back_or_reverse === true) issues.push('first_image_back_or_reverse');
+    if (index === 0 && model.is_collage === true) issues.push('first_image_collage');
+    return {
+      index, imageId: file.id, sourceUrl: file.sourceUrl, sourcePath: file.sourcePath,
+      sha256: file.sha256, isFrontView: model.is_front_view === true,
+      isBackOrReverse: model.is_back_or_reverse === true, isCollage: model.is_collage === true,
+      hasWatermark: model.has_watermark === true, hasChineseText: model.has_chinese_text === true,
+      isDuplicate: Boolean(duplicateSet), duplicateGroup,
+      duplicateWith: duplicateSet ? duplicateSet.indices.filter((value) => value !== index) : [],
+      issues, notes: model.notes || '', orientationEvidence: model.orientation_evidence || null,
+    };
   });
-  const groupWinners = new Map();
-  for (const item of prelim) {
-    const exactGroup = `sha:${item.sha256}`;
-    const group = prelim.some((other) => other !== item && other.sha256 === item.sha256)
-      ? exactGroup : item.duplicateGroup;
-    item.effectiveGroup = group;
-    const penalty = (item.model.has_watermark === true ? 1000 : 0)
-      + (item.model.has_chinese_text === true ? 1000 : 0)
-      + (item.model.is_collage === true ? 100 : 0)
-      + (item.isBack ? 10 : 0) + item.index / 100;
-    const current = groupWinners.get(group);
-    if (!current || penalty < current.penalty) groupWinners.set(group, { index: item.index, penalty });
-  }
-  const evaluated = prelim.map((file, index) => {
-    const model = file.model;
-    const groupMembers = prelim.filter((item) => item.effectiveGroup === file.effectiveGroup);
-    const duplicate = groupMembers.length > 1 && groupWinners.get(file.effectiveGroup)?.index !== index;
-    const reasons = [];
-    if (model.has_watermark === true) reasons.push('watermark');
-    if (model.has_chinese_text === true) reasons.push('chinese_text');
-    if (duplicate) reasons.push('duplicate');
-    if (index === 0 && model.is_front_view !== true) reasons.push('first_image_not_front');
-    if (index === 0 && model.is_back_or_reverse === true) reasons.push('first_image_back_or_reverse');
-    if (index === 0 && model.is_collage === true) reasons.push('first_image_collage');
-    return { ...file, duplicate, reasons, passed: reasons.length === 0 };
-  });
-  const outputDir = path.join(storageRoot, 'product-images', String(offerId), 'clean-gallery');
-  if (persistOutput) {
-    await fs.rm(outputDir, { recursive: true, force: true });
-    await fs.mkdir(outputDir, { recursive: true });
-  }
-  const accepted = [];
-  for (const item of evaluated.filter((entry) => entry.passed)) {
-    const ext = item.sourcePath ? (path.extname(item.sourcePath) || '.jpg') : '.jpg';
-    const outputPath = path.join(outputDir, `${String(accepted.length).padStart(4, '0')}-${item.sha256.slice(0, 12)}${ext}`);
-    if (persistOutput && item.sourcePath) await fs.copyFile(item.sourcePath, outputPath);
-    accepted.push({ imageId: item.id, sourceUrl: item.sourceUrl, sourcePath: item.sourcePath,
-      cleanPath: persistOutput ? outputPath : null, sortOrder: accepted.length });
-  }
-  const invalidCount = evaluated.filter((item) => item.reasons.some((reason) =>
-    ['watermark', 'chinese_text', 'first_image_not_front', 'first_image_back_or_reverse', 'first_image_collage'].includes(reason))).length;
-  const status = !evaluated[0]?.passed || invalidCount > 0
-    ? 'failed'
-    : (evaluated.some((item) => item.isBack) ? 'passed_with_warnings' : 'passed');
+  const first = auditedItems[0];
+  const firstImageIssues = first?.issues.filter((issue) => issue.startsWith('first_image_')) || [];
+  const summary = {
+    imageCount: auditedItems.length,
+    firstImageCompliant: firstImageIssues.length === 0,
+    firstImageIssues,
+    hasWatermark: auditedItems.some((item) => item.hasWatermark),
+    hasChineseText: auditedItems.some((item) => item.hasChineseText),
+    hasDuplicates: mergedSets.length > 0,
+    hasBackOrReverse: auditedItems.some((item) => item.isBackOrReverse),
+    hasCollage: auditedItems.some((item) => item.isCollage),
+  };
+  const auditStatus = Object.entries(summary).some(([key, value]) => key.startsWith('has') && value === true)
+    || !summary.firstImageCompliant ? 'issues_detected' : 'clear';
   return {
-    model: config.model || 'qwen3-vl-plus', galleryCount: files.length,
-    acceptedCount: accepted.length, invalidCount, status,
-    firstImagePassed: evaluated[0]?.passed === true,
-    backImageWarning: evaluated.some((item) => item.isBack),
-    items: evaluated.map(({ dataUrl, ...item }) => item), accepted,
-    validatedDuplicateSets: duplicateSets,
+    schemaVersion: 2, mode: 'audit_only', model: config.model || 'qwen3-vl-plus',
+    auditStatus, summary, images: auditedItems, duplicateSets: mergedSets,
     modelResponse: { quality: qualityResult, orientation: orientationResult, duplicates: duplicateResult },
   };
 }
 
-/** Backward-compatible persisted flow used after the test-stage rules are accepted. */
-export async function cleanProductGallery({ detail, config }) {
+export async function auditProductGallery({ detail, config }) {
   const images = (detail.images || []).sort((a, b) => {
     if (a.image_type === 'main') return -1;
     if (b.image_type === 'main') return 1;
     return (a.sort_order || 0) - (b.sort_order || 0);
   });
-  return analyzeGalleryImages({ images, config, persistOutput: true, offerId: detail.offer_id || detail.id });
+  return analyzeGalleryImages({ images, config });
 }
