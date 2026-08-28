@@ -5,6 +5,7 @@ import Fastify from 'fastify';
 import { createDatabase } from './db.js';
 import { createCollector, isAllowed1688Url } from './collector.js';
 import { analyzeProductImage } from './vision.js';
+import { cleanProductGallery } from './image-cleaner.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -118,6 +119,28 @@ app.get('/api/product-details/:id/vision', { preHandler: requireApiKey }, async 
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   return db.listProductVision(detail.id);
+});
+
+app.post('/api/product-details/:id/image-clean', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  try {
+    const result = await cleanProductGallery({ detail, config: {
+      apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+      model: config.visionModel, storagePath: config.storagePath,
+    } });
+    const saved = await db.saveProductImageCleanup(detail.id, result);
+    return { cleanupId: saved.id, ...result, createdAt: saved.created_at };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: detail.id }, 'gallery cleaning failed');
+    return reply.code(502).send({ error: 'image_clean_failed', message: error.message });
+  }
+});
+
+app.get('/api/product-details/:id/image-clean', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  return db.listProductImageCleanups(detail.id);
 });
 
 app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
