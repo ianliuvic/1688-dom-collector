@@ -42,7 +42,7 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
   const prompt = `你是商品Gallery图片质检器。图片按网页展示顺序提供，图片0是首图。只返回严格JSON对象：{"items":[{"index":0,"is_front_view":true,"is_back_or_reverse":false,"is_collage":false,"has_watermark":false,"has_chinese_text":false,"duplicate_group":"g0","notes":""}],"summary":""}。
 判定规则：
 1. is_front_view：展示商品正面；一套商品包含上下装不等于拼图。
-2. is_back_or_reverse：展示服装背面、内里或反面，无法确认时为false。
+2. is_back_or_reverse：展示服装背面、内里或反面。必须跨图片比较同一商品：例如其他图片显示印花外侧，而某图显示纯色内里、罩杯内侧、反面接缝或裤装背面，应标记true；不要因为仍能看到完整上下装就判为正面。无法确认时在notes说明。
 3. is_collage：同一画布含独立分格、圆形局部放大框、多个重复视图或多张照片拼接。仅仅同时展示上装和下装不算拼接。
 4. has_watermark：图片上叠加的品牌、店铺、平台、联系方式或水印文字/图标；正常场景道具不算水印。
 5. has_chinese_text：图片画面中确实可见中文字符。
@@ -60,13 +60,28 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
   const parsed = parseJson(rawContent);
   const modelItems = Array.isArray(parsed?.items) ? parsed.items : [];
   const byIndex = new Map(modelItems.map((item) => [Number(item.index), item]));
-  const seenGroups = new Set();
-  const evaluated = files.map((file, index) => {
+  const prelim = files.map((file, index) => {
     const model = byIndex.get(index) || {};
     const duplicateGroup = String(model.duplicate_group || `sha:${file.sha256}`);
-    const exactDuplicate = files.findIndex((candidate) => candidate.sha256 === file.sha256) !== index;
-    const duplicate = seenGroups.has(duplicateGroup) || exactDuplicate;
-    seenGroups.add(duplicateGroup);
+    return { ...file, model, duplicateGroup, isBack: model.is_back_or_reverse === true };
+  });
+  const groupWinners = new Map();
+  for (const item of prelim) {
+    const exactGroup = `sha:${item.sha256}`;
+    const group = prelim.some((other) => other !== item && other.sha256 === item.sha256)
+      ? exactGroup : item.duplicateGroup;
+    item.effectiveGroup = group;
+    const penalty = (item.model.has_watermark === true ? 1000 : 0)
+      + (item.model.has_chinese_text === true ? 1000 : 0)
+      + (item.model.is_collage === true ? 100 : 0)
+      + (item.isBack ? 10 : 0) + item.index / 100;
+    const current = groupWinners.get(group);
+    if (!current || penalty < current.penalty) groupWinners.set(group, { index: item.index, penalty });
+  }
+  const evaluated = prelim.map((file, index) => {
+    const model = file.model;
+    const groupMembers = prelim.filter((item) => item.effectiveGroup === file.effectiveGroup);
+    const duplicate = groupMembers.length > 1 && groupWinners.get(file.effectiveGroup)?.index !== index;
     const reasons = [];
     if (model.has_watermark === true) reasons.push('watermark');
     if (model.has_chinese_text === true) reasons.push('chinese_text');
@@ -74,8 +89,7 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
     if (index === 0 && model.is_front_view !== true) reasons.push('first_image_not_front');
     if (index === 0 && model.is_back_or_reverse === true) reasons.push('first_image_back_or_reverse');
     if (index === 0 && model.is_collage === true) reasons.push('first_image_collage');
-    return { ...file, model, duplicateGroup, duplicate, reasons,
-      isBack: model.is_back_or_reverse === true, passed: reasons.length === 0 };
+    return { ...file, duplicate, reasons, passed: reasons.length === 0 };
   });
   const outputDir = path.join(storageRoot, 'product-images', String(offerId), 'clean-gallery');
   if (persistOutput) {
