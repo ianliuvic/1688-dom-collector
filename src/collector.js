@@ -472,5 +472,29 @@ export function createCollector({
     return { status: 'completed', finalUrl, title, data };
   }
 
-  return { start, stop, capture, extractProductImages, inspectProduct, getSessionStatus };
+  // Read product images into memory through the logged-in browser context; no files or jobs are created.
+  async function extractProductImagesInMemory(url) {
+    const inspected = await inspectProduct(url);
+    if (inspected.status !== 'completed') return inspected;
+    const data = inspected.data;
+    const urls = [...new Set([data.mainImage, ...(data.images || [])].filter(Boolean))];
+    const images = [];
+    for (const [index, sourceUrl] of urls.entries()) {
+      try {
+        const response = await context.request.get(sourceUrl, {
+          headers: { referer: 'https://detail.1688.com/', 'user-agent': 'Mozilla/5.0' }, timeout: 20000,
+        });
+        if (!response.ok()) continue;
+        const mime = response.headers()['content-type']?.split(';')[0] || 'image/jpeg';
+        if (!mime.startsWith('image/')) continue;
+        const bytes = await response.body();
+        images.push({ type: index === 0 ? 'main' : 'gallery', sortOrder: index, sourceUrl,
+          dataUrl: `data:${mime};base64,${bytes.toString('base64')}` });
+      } catch { /* a blocked image is omitted from this ephemeral test */ }
+    }
+    return { status: 'completed', finalUrl: inspected.finalUrl, title: inspected.title,
+      offerId: data.offerId, images };
+  }
+
+  return { start, stop, capture, extractProductImages, extractProductImagesInMemory, inspectProduct, getSessionStatus };
 }

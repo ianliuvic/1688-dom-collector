@@ -43,11 +43,12 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
   const storageRoot = path.resolve(config.storagePath || '/app/storage');
   const files = [];
   for (const [index, image] of gallery.entries()) {
-    const imagePath = path.resolve(image.storage_path || image.path);
-    if (!imagePath.startsWith(`${storageRoot}${path.sep}`)) continue;
-    const bytes = await fs.readFile(imagePath);
-    const ext = path.extname(imagePath).toLowerCase();
-    const mime = ({ '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' })[ext] || 'image/jpeg';
+    const imagePath = image.storage_path || image.path ? path.resolve(image.storage_path || image.path) : null;
+    if (!image.dataUrl && (!imagePath || !imagePath.startsWith(`${storageRoot}${path.sep}`))) continue;
+    const dataUrl = image.dataUrl || null;
+    const bytes = dataUrl ? Buffer.from(dataUrl.split(',')[1] || '', 'base64') : await fs.readFile(imagePath);
+    const ext = imagePath ? path.extname(imagePath).toLowerCase() : '';
+    const mime = dataUrl?.match(/^data:([^;]+);/)?.[1] || ({ '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' })[ext] || 'image/jpeg';
     files.push({ id: image.id ?? null, index, sourceUrl: image.source_url || image.sourceUrl || null, sourcePath: imagePath,
       sha256: crypto.createHash('sha256').update(bytes).digest('hex'), dataUrl: `data:${mime};base64,${bytes.toString('base64')}` });
   }
@@ -124,9 +125,9 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
   }
   const accepted = [];
   for (const item of evaluated.filter((entry) => entry.passed)) {
-    const ext = path.extname(item.sourcePath) || '.jpg';
+    const ext = item.sourcePath ? (path.extname(item.sourcePath) || '.jpg') : '.jpg';
     const outputPath = path.join(outputDir, `${String(accepted.length).padStart(4, '0')}-${item.sha256.slice(0, 12)}${ext}`);
-    if (persistOutput) await fs.copyFile(item.sourcePath, outputPath);
+    if (persistOutput && item.sourcePath) await fs.copyFile(item.sourcePath, outputPath);
     accepted.push({ imageId: item.id, sourceUrl: item.sourceUrl, sourcePath: item.sourcePath,
       cleanPath: persistOutput ? outputPath : null, sortOrder: accepted.length });
   }
