@@ -61,6 +61,12 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
 不要根据商品相同就推测其他属性，不可见信息不要编造。图片编号从0开始。\n${files.map((_, i) => `图片编号 ${i}`).join('、')}`;
   const content = [{ type: 'text', text: prompt }, ...files.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } }))];
   const qualityResult = await callVision(content, config);
+  const orientationPrompt = `你是服装正反面复核员。跨图片比较同一商品，只找出明确展示背面、内里或反面的图片。泳装中，若其他图显示印花外侧，而某图的对应部件显示纯色内里/反面，应列入；局部特写、不完整、不同花位本身不算反面。只返回严格JSON：{"back_or_reverse_indices":[1],"evidence":{"1":"与正面印花杯面对比，该图上装展示纯色内里"}}。没有明确证据则返回空数组。编号范围只能是0到${files.length - 1}。`;
+  const orientationContent = [{ type: 'text', text: orientationPrompt }, ...files.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } }))];
+  const orientationResult = await callVision(orientationContent, config, 1000);
+  const auditedBackIndices = new Set((Array.isArray(orientationResult.parsed?.back_or_reverse_indices)
+    ? orientationResult.parsed.back_or_reverse_indices : []).map(Number)
+    .filter((index) => Number.isInteger(index) && index >= 0 && index < files.length));
   const duplicatePrompt = `你是图片取证去重器。严格比较以下编号图片，只判断是否源自同一张原始照片/完全相同构图。仅更换或抠除背景、改变格式、缩放、轻微裁切、添加局部放大框/文字覆盖，仍算重复。相同商品但不同角度、不同摆放、完整图与独立拍摄的局部特写绝对不算重复。只返回严格JSON：{"duplicate_sets":[{"indices":[0,2],"confidence":0.98,"evidence":"主体轮廓、褶皱和位置逐点一致，仅覆盖层不同"}],"summary":""}。没有高置信度重复则返回空数组；不要为了分组而强行判断。图片编号从0开始。`;
   const duplicateContent = [{ type: 'text', text: duplicatePrompt }, ...files.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } }))];
   const duplicateResult = await callVision(duplicateContent, config, 1800);
@@ -77,7 +83,11 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
     for (const index of set.indices.map(Number)) duplicateGroupByIndex.set(index, `visual:${groupIndex}`);
   }
   const prelim = files.map((file, index) => {
-    const model = byIndex.get(index) || {};
+    const model = { ...(byIndex.get(index) || {}) };
+    model.is_back_or_reverse = model.is_back_or_reverse === true || auditedBackIndices.has(index);
+    if (auditedBackIndices.has(index) && !model.orientation_evidence) {
+      model.orientation_evidence = orientationResult.parsed?.evidence?.[String(index)] || null;
+    }
     const duplicateGroup = duplicateGroupByIndex.get(index) || `unique:${index}`;
     return { ...file, model, duplicateGroup, isBack: model.is_back_or_reverse === true };
   });
@@ -131,7 +141,8 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
     firstImagePassed: evaluated[0]?.passed === true,
     backImageWarning: evaluated.some((item) => item.isBack),
     items: evaluated.map(({ dataUrl, ...item }) => item), accepted,
-    modelResponse: { quality: qualityResult, duplicates: duplicateResult },
+    validatedDuplicateSets: duplicateSets,
+    modelResponse: { quality: qualityResult, orientation: orientationResult, duplicates: duplicateResult },
   };
 }
 
