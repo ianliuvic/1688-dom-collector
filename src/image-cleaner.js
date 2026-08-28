@@ -54,7 +54,7 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
   const prompt = `你是商品Gallery图片质检器。图片按网页展示顺序提供，图片0是首图。本轮不要判断重复，只返回严格JSON对象：{"items":[{"index":0,"is_front_view":true,"is_back_or_reverse":false,"is_collage":false,"has_watermark":false,"has_chinese_text":false,"notes":""}],"summary":""}。
 判定规则：
 1. is_front_view：展示商品正面；一套商品包含上下装不等于拼图。
-2. is_back_or_reverse：展示服装背面、内里或反面。必须跨图片比较同一商品：例如其他图片显示印花外侧，而某图显示纯色内里、罩杯内侧、反面接缝或裤装背面，应标记true；不要因为仍能看到完整上下装就判为正面。无法确认时在notes说明。
+2. is_back_or_reverse：展示服装背面、内里或反面。必须跨图片比较同一商品：例如其他图片显示印花外侧，而某图显示纯色内里、罩杯内侧、反面接缝或裤装背面，应标记true。局部特写或产品不完整本身绝不代表反面；如果局部图展示的印花外侧与其他正面图一致且没有明确内里证据，必须标记false。无法确认时也标记false并在notes说明。
 3. is_collage：同一画布含独立分格、圆形局部放大框、多个重复视图或多张照片拼接。仅仅同时展示上装和下装不算拼接。
 4. has_watermark：图片上叠加的品牌、店铺、平台、联系方式或水印文字/图标；正常场景道具不算水印。
 5. has_chinese_text：图片画面中确实可见中文字符。
@@ -68,8 +68,10 @@ export async function analyzeGalleryImages({ images, config, persistOutput = fal
   const modelItems = Array.isArray(parsed?.items) ? parsed.items : [];
   const byIndex = new Map(modelItems.map((item) => [Number(item.index), item]));
   const duplicateSets = Array.isArray(duplicateResult.parsed?.duplicate_sets)
-    ? duplicateResult.parsed.duplicate_sets.filter((set) => Number(set.confidence ?? 0) >= 0.85
-      && Array.isArray(set.indices) && set.indices.length >= 2) : [];
+    ? duplicateResult.parsed.duplicate_sets.map((set) => ({ ...set,
+      indices: [...new Set((Array.isArray(set.indices) ? set.indices : []).map(Number)
+        .filter((index) => Number.isInteger(index) && index >= 0 && index < files.length))],
+    })).filter((set) => Number(set.confidence ?? 0) >= 0.85 && set.indices.length >= 2) : [];
   const duplicateGroupByIndex = new Map();
   for (const [groupIndex, set] of duplicateSets.entries()) {
     for (const index of set.indices.map(Number)) duplicateGroupByIndex.set(index, `visual:${groupIndex}`);
