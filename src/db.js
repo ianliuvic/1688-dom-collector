@@ -161,6 +161,7 @@ export function createDatabase(databaseUrl) {
   async function upsertShopProfile(data) {
     if (!data || data.pageType !== 'shop' || !data.url) return null;
     const parsedUrl = new URL(data.url);
+    const shopUrl = `${parsedUrl.origin}/`;
     const company = data.company ?? {};
     const metrics = data.metrics ?? {};
     const contact = data.contact ?? {};
@@ -191,7 +192,7 @@ export function createDatabase(databaseUrl) {
         raw_data=EXCLUDED.raw_data, last_seen_at=now()
       RETURNING *
     `, [
-      data.url, parsedUrl.hostname, company.name ?? null, data.title ?? null,
+      shopUrl, parsedUrl.hostname, company.name ?? null, data.title ?? null,
       company.memberId ?? null, company.sellerId ?? null, company.companyId ?? null,
       company.sellerType ?? null, company.mainCategory ?? null, company.address ?? null,
       company.establishedYear ?? null, parseDate(company.establishedDate),
