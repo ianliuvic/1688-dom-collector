@@ -451,11 +451,8 @@ export function createCollector({
     if (sessionState === 'requires_auth') throw new Error('Login or human verification is required.');
     const extractedData = await parse1688Product(page);
     const localImages = await downloadProductImages(extractedData, storagePath, `image-test-${testId}`);
-    const imageByUrl = new Map(localImages.map((image) => [image.sourceUrl, image]));
-    const ordered = [{ type: 'main', sortOrder: 0, sourceUrl: extractedData.mainImage },
-      ...(extractedData.images || []).map((sourceUrl, index) => ({ type: 'gallery', sortOrder: index, sourceUrl }))]
-      .map((image) => ({ ...image, ...(imageByUrl.get(image.sourceUrl) || {}) }))
-      .filter((image) => image.storagePath);
+    const ordered = localImages.filter((image) => image.type === 'main' || image.type === 'gallery')
+      .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
     return { offerId: extractedData.offerId, images: ordered };
   }
 
