@@ -88,6 +88,20 @@ app.post('/api/product-details', { preHandler: requireApiKey }, async (request, 
   return reply.code(202).send(job);
 });
 
+app.post('/api/product-details/test', { preHandler: requireApiKey }, async (request, reply) => {
+  const url = request.body?.url;
+  if (typeof url !== 'string' || !isAllowed1688Url(url)
+      || !new URL(url).hostname.startsWith('detail.')) {
+    return reply.code(400).send({ error: 'Provide a valid HTTPS 1688 detail URL.' });
+  }
+  try {
+    return await collector.inspectProduct(url);
+  } catch (error) {
+    request.log.error({ err: error }, 'ephemeral product inspection failed');
+    return reply.code(502).send({ error: 'product_inspection_failed', message: error.message });
+  }
+});
+
 app.get('/api/product-details/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   return detail ?? reply.code(404).send({ error: 'not_found' });

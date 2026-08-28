@@ -458,5 +458,19 @@ export function createCollector({
     return { offerId: extractedData.offerId, images: ordered };
   }
 
-  return { start, stop, capture, extractProductImages, getSessionStatus };
+  // Ephemeral DOM-only product inspection; intentionally does not create jobs, files, or database rows.
+  async function inspectProduct(url) {
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(5000);
+    const finalUrl = page.url();
+    const title = await page.title();
+    const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    sessionState = classifySession(finalUrl, bodyText);
+    lastCheckedAt = new Date().toISOString();
+    if (sessionState === 'requires_auth') return { status: 'requires_auth', finalUrl, title, data: null };
+    const data = await parse1688Product(page);
+    return { status: 'completed', finalUrl, title, data };
+  }
+
+  return { start, stop, capture, extractProductImages, inspectProduct, getSessionStatus };
 }
