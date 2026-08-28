@@ -47,7 +47,7 @@ export async function parse1688Shop(page, networkResponses = []) {
   const phoneMatch = dom.bodyText.match(/电话\s*[：:]\s*([^\s]+)/);
   const mobileMatch = dom.bodyText.match(/手机\s*[：:]\s*([^\s]+)/);
   const faxMatch = dom.bodyText.match(/传真\s*[：:]\s*([^\s]+)/);
-  const contactNameMatch = dom.bodyText.match(/([\u4e00-\u9fa5]{2,8})(?:先生|女士)/);
+  const contactNameMatch = dom.bodyText.match(/传真\s*[：:][\s\S]{0,220}?([\u4e00-\u9fa5]{2,8})(?:先生|女士)/);
   const offerList = dom.navigation.find((item) => item.id === 'offerlist');
   const newOfferList = dom.navigation.find((item) => item.id === 'newofferlist');
 
