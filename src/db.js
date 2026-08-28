@@ -176,6 +176,20 @@ export function createDatabase(databaseUrl) {
         currency text,
         UNIQUE (product_detail_id, min_quantity, max_quantity, price)
       );
+      CREATE TABLE IF NOT EXISTS product_vision_analyses (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        image_id bigint REFERENCES product_detail_images(id) ON DELETE SET NULL,
+        model text NOT NULL,
+        image_path text NOT NULL,
+        source_url text,
+        prompt text,
+        content text,
+        parsed jsonb,
+        usage jsonb,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS product_vision_analyses_product_idx ON product_vision_analyses(product_detail_id, created_at DESC);
     `);
   }
 
@@ -414,12 +428,27 @@ export function createDatabase(databaseUrl) {
       attributes: attributes.rows, priceTiers: tiers.rows };
   }
 
+  async function saveProductVision(productDetailId, imageId, result) {
+    const saved = await pool.query(`INSERT INTO product_vision_analyses
+      (product_detail_id, image_id, model, image_path, source_url, prompt, content, parsed, usage)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`, [productDetailId, imageId ?? null,
+      result.model, result.imagePath, result.sourceUrl, result.prompt, result.content,
+      result.parsed ? JSON.stringify(result.parsed) : null, result.usage ? JSON.stringify(result.usage) : null]);
+    return { visionAnalysisId: saved.rows[0].id, ...saved.rows[0] };
+  }
+
+  async function listProductVision(productDetailId) {
+    const result = await pool.query('SELECT * FROM product_vision_analyses WHERE product_detail_id=$1 ORDER BY created_at DESC', [productDetailId]);
+    return result.rows;
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
 
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
-    saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail, ping };
+    saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail,
+    saveProductVision, listProductVision, ping };
 }
 
 function parseScore(value) {

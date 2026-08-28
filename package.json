@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/db.js && node --check src/collector.js && node --check src/mtop-shop.js && node --check src/plugin-crypto.js && node --check src/parsers/1688-product.js && node --check src/parsers/1688-shop.js",
+    "check": "node --check src/server.js && node --check src/db.js && node --check src/collector.js && node --check src/mtop-shop.js && node --check src/plugin-crypto.js && node --check src/vision.js && node --check src/parsers/1688-product.js && node --check src/parsers/1688-shop.js",
     "test": "node --test"
   },
   "dependencies": {

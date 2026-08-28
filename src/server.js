@@ -4,6 +4,7 @@ import path from 'node:path';
 import Fastify from 'fastify';
 import { createDatabase } from './db.js';
 import { createCollector, isAllowed1688Url } from './collector.js';
+import { analyzeProductImage } from './vision.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -19,6 +20,9 @@ const config = {
   screenshotMode: ['never', 'errors', 'always'].includes(process.env.SCREENSHOT_MODE)
     ? process.env.SCREENSHOT_MODE : 'errors',
   clearStaleBrowserLocks: process.env.CLEAR_STALE_BROWSER_LOCKS === 'true',
+  dashscopeApiKey: process.env.DASHSCOPE_API_KEY,
+  dashscopeBaseUrl: process.env.DASHSCOPE_BASE_URL,
+  visionModel: process.env.DASHSCOPE_VISION_MODEL || 'qwen3-vl-plus',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -86,6 +90,34 @@ app.post('/api/product-details', { preHandler: requireApiKey }, async (request, 
 app.get('/api/product-details/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   return detail ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.post('/api/product-details/:id/vision', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const firstImage = detail.images.find((image) => image.image_type === 'main')
+    ?? detail.images[0];
+  if (!firstImage?.storage_path) return reply.code(409).send({ error: 'no_local_image' });
+  try {
+    const result = await analyzeProductImage({
+      imagePath: firstImage.storage_path, sourceUrl: firstImage.source_url,
+      offerId: detail.offer_id, prompt: request.body?.prompt, config: {
+        apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+        model: config.visionModel, storagePath: config.storagePath,
+      },
+    });
+    const saved = await db.saveProductVision(detail.id, firstImage.id, result);
+    return { ...saved, analysis: result };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: detail.id }, 'vision analysis failed');
+    return reply.code(502).send({ error: 'vision_analysis_failed', message: error.message });
+  }
+});
+
+app.get('/api/product-details/:id/vision', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  return db.listProductVision(detail.id);
 });
 
 app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
