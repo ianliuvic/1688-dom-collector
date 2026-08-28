@@ -47,6 +47,7 @@ export async function parse1688Shop(page, networkResponses = []) {
   const phoneMatch = dom.bodyText.match(/电话\s*[：:]\s*([^\s]+)/);
   const mobileMatch = dom.bodyText.match(/手机\s*[：:]\s*([^\s]+)/);
   const faxMatch = dom.bodyText.match(/传真\s*[：:]\s*([^\s]+)/);
+  const contactNameMatch = dom.bodyText.match(/([\u4e00-\u9fa5]{2,8})(?:先生|女士)/);
   const offerList = dom.navigation.find((item) => item.id === 'offerlist');
   const newOfferList = dom.navigation.find((item) => item.id === 'newofferlist');
 
@@ -79,6 +80,7 @@ export async function parse1688Shop(page, networkResponses = []) {
     },
     session: { buyerIsLogin: globalData.buyerIsLogin === true },
     contact: {
+      name: contactNameMatch ? contactNameMatch[1] : null,
       phone: phoneMatch?.[1] && phoneMatch[1] !== '暂无' ? phoneMatch[1] : null,
       mobile: mobileMatch?.[1] && mobileMatch[1] !== '暂无' ? mobileMatch[1] : null,
       fax: faxMatch?.[1] && faxMatch[1] !== '暂无' ? faxMatch[1] : null,

@@ -46,6 +46,7 @@ export function createDatabase(databaseUrl) {
         repeat_rate text,
         fulfillment_rate text,
         years_on_platform text,
+        contact_name text,
         phone text,
         mobile text,
         fax text,
@@ -60,6 +61,8 @@ export function createDatabase(databaseUrl) {
       CREATE INDEX IF NOT EXISTS shop_profiles_domain_idx ON shop_profiles (domain);
       CREATE INDEX IF NOT EXISTS shop_profiles_member_id_idx ON shop_profiles (member_id);
       CREATE INDEX IF NOT EXISTS shop_profiles_offer_count_idx ON shop_profiles (offer_count);
+      ALTER TABLE shop_profiles ADD COLUMN IF NOT EXISTS contact_name text;
+      ALTER TABLE shop_profiles ADD COLUMN IF NOT EXISTS wangwang_url text;
     `);
   }
 
@@ -118,9 +121,9 @@ export function createDatabase(databaseUrl) {
         shop_url, domain, shop_name, page_title, member_id, seller_id, company_id,
         seller_type, main_category, address, established_year, established_date,
         follower_count, offer_count, service_score, repeat_rate, fulfillment_rate,
-        years_on_platform, phone, mobile, fax, offer_list_url, new_offer_list_url,
+        years_on_platform, contact_name, phone, mobile, fax, wangwang_url, offer_list_url, new_offer_list_url,
         navigation, raw_data, last_seen_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,now())
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,now())
       ON CONFLICT (shop_url) DO UPDATE SET
         domain=EXCLUDED.domain, shop_name=EXCLUDED.shop_name, page_title=EXCLUDED.page_title,
         member_id=EXCLUDED.member_id, seller_id=EXCLUDED.seller_id, company_id=EXCLUDED.company_id,
@@ -129,8 +132,9 @@ export function createDatabase(databaseUrl) {
         established_date=EXCLUDED.established_date, follower_count=EXCLUDED.follower_count,
         offer_count=EXCLUDED.offer_count, service_score=EXCLUDED.service_score,
         repeat_rate=EXCLUDED.repeat_rate, fulfillment_rate=EXCLUDED.fulfillment_rate,
-        years_on_platform=EXCLUDED.years_on_platform, phone=EXCLUDED.phone,
-        mobile=EXCLUDED.mobile, fax=EXCLUDED.fax, offer_list_url=EXCLUDED.offer_list_url,
+        years_on_platform=EXCLUDED.years_on_platform, contact_name=EXCLUDED.contact_name,
+        phone=EXCLUDED.phone, mobile=EXCLUDED.mobile, fax=EXCLUDED.fax,
+        wangwang_url=EXCLUDED.wangwang_url, offer_list_url=EXCLUDED.offer_list_url,
         new_offer_list_url=EXCLUDED.new_offer_list_url, navigation=EXCLUDED.navigation,
         raw_data=EXCLUDED.raw_data, last_seen_at=now()
       RETURNING *
@@ -142,8 +146,9 @@ export function createDatabase(databaseUrl) {
       metrics.followerCount ?? null, metrics.offerCount ?? null,
       parseScore(metrics.serviceScore), metrics.repeatRate ?? null,
       metrics.fulfillmentRate ?? null, metrics.yearsOnPlatform ?? null,
-      contact.phone ?? null, contact.mobile ?? null, contact.fax ?? null,
-      offerListUrl, newOfferListUrl, JSON.stringify(data.navigation ?? []), JSON.stringify(data),
+      contact.name ?? null, contact.phone ?? null, contact.mobile ?? null, contact.fax ?? null,
+      data.wangwangUrl ?? null, offerListUrl, newOfferListUrl,
+      JSON.stringify(data.navigation ?? []), JSON.stringify(data),
     ]);
     return result.rows[0];
   }

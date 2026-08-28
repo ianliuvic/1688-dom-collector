@@ -345,6 +345,10 @@ export function createCollector({
       const extractedData = status === 'completed'
         ? (isShopPage ? await parse1688Shop(page, networkResponses) : await parse1688Product(page))
         : null;
+      if (extractedData?.pageType === 'shop') {
+        const contact = await captureShopContactUrl(page, context).catch(() => ({ url: null }));
+        extractedData.wangwangUrl = contact.url;
+      }
       let savedScreenshotPath = null;
       if (screenshotMode === 'always' || (screenshotMode === 'errors' && status !== 'completed')) {
         await page.screenshot({ path: screenshotPath, fullPage: true });
