@@ -63,6 +63,58 @@ export function createDatabase(databaseUrl) {
       CREATE INDEX IF NOT EXISTS shop_profiles_offer_count_idx ON shop_profiles (offer_count);
       ALTER TABLE shop_profiles ADD COLUMN IF NOT EXISTS contact_name text;
       ALTER TABLE shop_profiles ADD COLUMN IF NOT EXISTS wangwang_url text;
+      CREATE TABLE IF NOT EXISTS shop_scan_runs (
+        id bigserial PRIMARY KEY,
+        job_id uuid NOT NULL UNIQUE REFERENCES capture_jobs(id) ON DELETE CASCADE,
+        shop_id bigint NOT NULL REFERENCES shop_profiles(id) ON DELETE CASCADE,
+        total_count integer,
+        fetched_count integer NOT NULL DEFAULT 0,
+        request_count integer,
+        truncated boolean NOT NULL DEFAULT false,
+        started_at timestamptz NOT NULL DEFAULT now(),
+        completed_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS shop_products (
+        id bigserial PRIMARY KEY,
+        shop_id bigint NOT NULL REFERENCES shop_profiles(id) ON DELETE CASCADE,
+        offer_id text NOT NULL,
+        title text,
+        category text,
+        price numeric(12,2),
+        currency text,
+        image_url text,
+        product_url text,
+        sale_quantity numeric(14,2),
+        sale_quantity_text text,
+        listing_time timestamptz,
+        shipping_info text,
+        status text NOT NULL DEFAULT 'unknown',
+        raw_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+        first_seen_at timestamptz NOT NULL DEFAULT now(),
+        last_crawled_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (shop_id, offer_id)
+      );
+      CREATE INDEX IF NOT EXISTS shop_products_shop_idx ON shop_products (shop_id);
+      CREATE INDEX IF NOT EXISTS shop_products_offer_idx ON shop_products (offer_id);
+      CREATE INDEX IF NOT EXISTS shop_products_listing_idx ON shop_products (listing_time);
+      CREATE INDEX IF NOT EXISTS shop_products_sales_idx ON shop_products (sale_quantity);
+      CREATE INDEX IF NOT EXISTS shop_products_status_idx ON shop_products (status);
+      CREATE TABLE IF NOT EXISTS shop_product_snapshots (
+        id bigserial PRIMARY KEY,
+        scan_run_id bigint NOT NULL REFERENCES shop_scan_runs(id) ON DELETE CASCADE,
+        shop_product_id bigint NOT NULL REFERENCES shop_products(id) ON DELETE CASCADE,
+        title text,
+        price numeric(12,2),
+        sale_quantity numeric(14,2),
+        sale_quantity_text text,
+        listing_time timestamptz,
+        status text,
+        observed_at timestamptz NOT NULL DEFAULT now(),
+        raw_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+        UNIQUE (scan_run_id, shop_product_id)
+      );
+      CREATE INDEX IF NOT EXISTS shop_product_snapshots_observed_idx
+        ON shop_product_snapshots (observed_at);
     `);
   }
 
@@ -161,12 +213,68 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function saveShopScan(jobId, data) {
+    if (!data || data.pageType !== 'shop-offer-collection' || !data.shop) return null;
+    const shop = await upsertShopProfile(data.shop);
+    const run = await pool.query(`
+      INSERT INTO shop_scan_runs (job_id, shop_id, total_count, fetched_count, request_count, truncated)
+      VALUES ($1,$2,$3,$4,$5,$6)
+      ON CONFLICT (job_id) DO UPDATE SET
+        total_count=EXCLUDED.total_count, fetched_count=EXCLUDED.fetched_count,
+        request_count=EXCLUDED.request_count, truncated=EXCLUDED.truncated,
+        completed_at=now()
+      RETURNING *
+    `, [jobId, shop.id, data.totalCount ?? null, data.offerCount ?? 0,
+      data.requestCount ?? null, data.truncated === true]);
+    const scanRun = run.rows[0];
+    let saved = 0;
+    for (const offer of data.offers ?? []) {
+      const offerId = offer?.offerId == null ? null : String(offer.offerId);
+      if (!offerId) continue;
+      const product = normalizeOffer(offer);
+      const productResult = await pool.query(`
+        INSERT INTO shop_products (
+          shop_id, offer_id, title, category, price, currency, image_url, product_url,
+          sale_quantity, sale_quantity_text, listing_time, shipping_info, status, raw_data, last_crawled_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
+        ON CONFLICT (shop_id, offer_id) DO UPDATE SET
+          title=EXCLUDED.title, category=EXCLUDED.category, price=EXCLUDED.price,
+          currency=EXCLUDED.currency, image_url=EXCLUDED.image_url, product_url=EXCLUDED.product_url,
+          sale_quantity=EXCLUDED.sale_quantity, sale_quantity_text=EXCLUDED.sale_quantity_text,
+          listing_time=COALESCE(EXCLUDED.listing_time, shop_products.listing_time),
+          shipping_info=EXCLUDED.shipping_info, status=EXCLUDED.status, raw_data=EXCLUDED.raw_data,
+          last_crawled_at=now()
+        RETURNING id
+      `, [shop.id, offerId, product.title, product.category, product.price, product.currency,
+        product.imageUrl, product.productUrl, product.saleQuantity, product.saleQuantityText,
+        product.listingTime, product.shippingInfo, product.status, JSON.stringify(offer)]);
+      await pool.query(`
+        INSERT INTO shop_product_snapshots
+          (scan_run_id, shop_product_id, title, price, sale_quantity, sale_quantity_text, listing_time, status, raw_data)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        ON CONFLICT (scan_run_id, shop_product_id) DO NOTHING
+      `, [scanRun.id, productResult.rows[0].id, product.title, product.price,
+        product.saleQuantity, product.saleQuantityText, product.listingTime,
+        product.status, JSON.stringify(offer)]);
+      saved += 1;
+    }
+    return { shopId: shop.id, scanRunId: scanRun.id, savedProducts: saved };
+  }
+
+  async function listShopProducts(shopId, limit = 100) {
+    const result = await pool.query(
+      'SELECT * FROM shop_products WHERE shop_id = $1 ORDER BY last_crawled_at DESC LIMIT $2',
+      [shopId, Math.min(Math.max(Number(limit) || 100, 1), 1000)],
+    );
+    return result.rows;
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
 
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
-    listShopProfiles, ping };
+    saveShopScan, listShopProfiles, listShopProducts, ping };
 }
 
 function parseScore(value) {
@@ -179,4 +287,35 @@ function parseDate(value) {
   if (!value) return null;
   const match = String(value).match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
   return match ? `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}` : null;
+}
+
+function normalizeOffer(offer) {
+  const saleRaw = offer.saleQuantity ?? offer.saleCount ?? offer.soldQuantity ?? offer.sales;
+  const saleText = offer.saleQuantityText ?? offer.saleQuantityLabel ?? (typeof saleRaw === 'string' ? saleRaw : null);
+  const listingRaw = offer.gmtCreate ?? offer.gmtCreateTime ?? offer.createTime ?? offer.onsaleTime;
+  return {
+    title: offer.title ?? offer.name ?? null,
+    category: offer.categoryName ?? offer.category ?? null,
+    price: parseNumber(offer.price ?? offer.agentPrice ?? offer.minPrice),
+    currency: offer.currency ?? offer.currencyCode ?? 'CNY',
+    imageUrl: offer.picUrl ?? offer.mainImage ?? offer.imageUrl ?? null,
+    productUrl: offer.offerUrl ?? offer.url ?? null,
+    saleQuantity: parseNumber(saleRaw),
+    saleQuantityText: saleText == null ? null : String(saleText),
+    listingTime: parseTimestamp(listingRaw),
+    shippingInfo: offer.fahuoTime ?? offer.shippingTime ?? offer.label ?? null,
+    status: offer.status ?? (offer.isOnline === false ? 'offline' : 'online'),
+  };
+}
+
+function parseNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const match = String(value).replaceAll(',', '').match(/[\d.]+/);
+  return match ? Number(match[0]) : null;
+}
+
+function parseTimestamp(value) {
+  if (!value) return null;
+  const date = new Date(String(value).replace(/年|\//g, '-').replace(/月/g, '-').replace(/日/g, ''));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }

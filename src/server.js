@@ -64,6 +64,10 @@ app.get('/api/shops', { preHandler: requireApiKey }, async (request) => {
   return db.listShopProfiles(request.query?.limit);
 });
 
+app.get('/api/shops/:id/products', { preHandler: requireApiKey }, async (request) => {
+  return db.listShopProducts(request.params.id, request.query?.limit);
+});
+
 app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
   const job = await db.createJob(
     crypto.randomUUID(),
@@ -181,6 +185,8 @@ async function workerLoop() {
       await db.completeJob(job.id, result);
       if (result.extractedData?.pageType === 'shop') {
         await db.upsertShopProfile(result.extractedData);
+      } else if (result.extractedData?.pageType === 'shop-offer-collection') {
+        await db.saveShopScan(job.id, result.extractedData);
       }
     } catch (error) {
       app.log.error({ err: error, jobId: job.id }, 'capture failed');
