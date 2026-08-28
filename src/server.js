@@ -69,6 +69,15 @@ app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_req
   return reply.code(202).send(job);
 });
 
+app.post('/api/shop-contact-link', { preHandler: requireApiKey }, async (request, reply) => {
+  const url = request.body?.url;
+  if (typeof url !== 'string' || !isAllowed1688Url(url)) {
+    return reply.code(400).send({ error: 'A valid HTTPS 1688 shop URL is required.' });
+  }
+  const job = await db.createJob(crypto.randomUUID(), url, { mode: 'shop_contact' });
+  return reply.code(202).send(job);
+});
+
 app.post('/api/jobs', { preHandler: requireApiKey }, async (request, reply) => {
   const url = request.body?.url;
   if (typeof url !== 'string' || !isAllowed1688Url(url)) {

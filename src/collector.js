@@ -27,6 +27,64 @@ const CHALLENGE_TEXT = [
   '异常访问',
 ];
 
+const WEB_IM_URL_PATTERN = '**/app/ocms-fusion-components-1688/def_cbu_web_im/**';
+
+async function captureShopContactUrl(page, context) {
+  const customerService = page.getByText('客服', { exact: true }).first();
+  if (!await customerService.isVisible().catch(() => false)) {
+    return { url: null, source: null, error: 'Customer service button was not found.' };
+  }
+
+  const directUrl = await customerService.evaluate((element) => {
+    const anchor = element.closest('a');
+    return anchor?.href || element.getAttribute('href') || element.dataset?.href || null;
+  }).catch(() => null);
+  if (directUrl?.includes('/def_cbu_web_im/')) {
+    return { url: directUrl, source: 'dom', error: null };
+  }
+
+  await context.route(WEB_IM_URL_PATTERN, (route) => route.abort('blockedbyclient'));
+  await page.evaluate(() => {
+    window.__collectorPopupCapture = { urls: [], originalOpen: window.open };
+    const record = (value) => {
+      if (value == null) return;
+      window.__collectorPopupCapture.urls.push(String(value));
+    };
+    window.open = (url) => {
+      record(url);
+      return new Proxy({ closed: false, focus() {}, close() {}, postMessage() {} }, {
+        set(target, property, value) {
+          if (property === 'location' || property === 'href') record(value);
+          target[property] = value;
+          return true;
+        },
+      });
+    };
+  });
+
+  let capturedUrl = null;
+  try {
+    await customerService.click({ noWaitAfter: true, timeout: 5000 });
+    await page.waitForTimeout(750);
+    capturedUrl = await page.evaluate(() => window.__collectorPopupCapture?.urls
+      ?.find((url) => url.includes('/def_cbu_web_im/')) ?? null);
+  } finally {
+    await page.evaluate(() => {
+      if (window.__collectorPopupCapture?.originalOpen) {
+        window.open = window.__collectorPopupCapture.originalOpen;
+      }
+      delete window.__collectorPopupCapture;
+    }).catch(() => {});
+    await context.unroute(WEB_IM_URL_PATTERN).catch(() => {});
+  }
+
+  return {
+    url: capturedUrl,
+    source: capturedUrl ? 'window_open_intercept' : null,
+    error: capturedUrl ? null : 'The button did not expose a web IM URL.',
+  };
+}
+
 export function isAllowed1688Url(value) {
   try {
     const url = new URL(value);
@@ -114,6 +172,28 @@ export function createCollector({
     await fs.mkdir(jobPath, { recursive: true });
     const domPath = path.join(jobPath, 'page.html');
     const screenshotPath = path.join(jobPath, 'page.png');
+
+    if (job.options?.mode === 'shop_contact') {
+      await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(8000);
+      const title = await page.title();
+      const finalUrl = page.url();
+      const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+      sessionState = classifySession(finalUrl, bodyText);
+      lastCheckedAt = new Date().toISOString();
+      await fs.writeFile(domPath, await page.content(), 'utf8');
+      if (sessionState === 'requires_auth') {
+        return {
+          status: 'requires_auth', title, finalUrl, domPath, screenshotPath: null,
+          extractedData: null, error: 'Login or human verification is required.',
+        };
+      }
+      const contact = await captureShopContactUrl(page, context);
+      return {
+        status: contact.url ? 'completed' : 'failed', title, finalUrl, domPath,
+        screenshotPath: null, extractedData: { contact }, error: contact.error,
+      };
+    }
 
     if (job.options?.mode === 'plugin_login') {
       try {
