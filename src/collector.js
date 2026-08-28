@@ -86,7 +86,7 @@ async function captureShopContactUrl(page, context) {
   };
 }
 
-async function downloadProductImages(data, storagePath, jobId) {
+async function downloadProductImages(data, storagePath, jobId, requestContext = null) {
   const sources = [];
   if (data.mainImage) sources.push({ url: data.mainImage, type: 'main' });
   for (const [index, url] of (data.images ?? []).entries()) sources.push({ url, type: 'gallery', sortOrder: index });
@@ -101,17 +101,19 @@ async function downloadProductImages(data, storagePath, jobId) {
     if (!source.url || seen.has(source.url)) continue;
     seen.add(source.url);
     try {
-      const response = await fetch(source.url, {
-        headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://detail.1688.com/' },
-        signal: AbortSignal.timeout(20000),
-      });
-      if (!response.ok) continue;
-      const contentType = response.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
+      const headers = { 'user-agent': 'Mozilla/5.0', referer: 'https://detail.1688.com/' };
+      const response = requestContext?.request
+        ? await requestContext.request.get(source.url, { headers, timeout: 20000 })
+        : await fetch(source.url, { headers, signal: AbortSignal.timeout(20000) });
+      const ok = requestContext?.request ? response.ok() : response.ok;
+      if (!ok) continue;
+      const contentType = (requestContext?.request ? response.headers()['content-type'] : response.headers.get('content-type'))?.split(';')[0] || 'image/jpeg';
       if (!contentType.startsWith('image/')) continue;
       const extension = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' })[contentType] || 'bin';
       const hash = crypto.createHash('sha1').update(source.url).digest('hex').slice(0, 12);
       const filePath = path.join(imageDir, `${source.type}-${String(source.sortOrder ?? files.length).padStart(4, '0')}-${hash}.${extension}`);
-      await fs.writeFile(filePath, Buffer.from(await response.arrayBuffer()));
+      const bytes = requestContext?.request ? await response.body() : Buffer.from(await response.arrayBuffer());
+      await fs.writeFile(filePath, bytes);
       files.push({ type: source.type, sortOrder: source.sortOrder ?? files.length, sourceUrl: source.url,
         storagePath: filePath, mimeType: contentType });
     } catch { /* preserve the source URL even when an individual image is blocked */ }
@@ -221,7 +223,7 @@ export function createCollector({
           extractedData: null, error: 'Login or human verification is required.' };
       }
       const extractedData = await parse1688Product(page);
-      extractedData.localImages = await downloadProductImages(extractedData, storagePath, job.id);
+      extractedData.localImages = await downloadProductImages(extractedData, storagePath, job.id, context);
       await fs.writeFile(path.join(jobPath, 'product.json'), JSON.stringify(extractedData, null, 2), 'utf8');
       return { status: 'completed', title, finalUrl, domPath, screenshotPath: null,
         extractedData, error: null };
@@ -450,7 +452,7 @@ export function createCollector({
     lastCheckedAt = new Date().toISOString();
     if (sessionState === 'requires_auth') throw new Error('Login or human verification is required.');
     const extractedData = await parse1688Product(page);
-    const localImages = await downloadProductImages(extractedData, storagePath, `image-test-${testId}`);
+    const localImages = await downloadProductImages(extractedData, storagePath, `image-test-${testId}`, context);
     const ordered = localImages.filter((image) => image.type === 'main' || image.type === 'gallery')
       .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
     return { offerId: extractedData.offerId, images: ordered };
