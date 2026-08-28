@@ -37,7 +37,7 @@ async function sha256(filePath) {
 
 /** Analyze an explicitly supplied, correctly ordered product gallery without database access. */
 export async function analyzeGalleryImages({ images, config, persistOutput = false, offerId = 'test' }) {
-  const gallery = (images || []).filter((image) => image.storage_path || image.path);
+  const gallery = (images || []).filter((image) => image.storage_path || image.path || image.dataUrl);
   if (!gallery.length) throw new Error('No locally stored product gallery images are available.');
   if (!config.apiKey) throw new Error('DASHSCOPE_API_KEY is not configured.');
   const storageRoot = path.resolve(config.storagePath || '/app/storage');
