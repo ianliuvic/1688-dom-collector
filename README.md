@@ -56,6 +56,9 @@ request); `maxPages` defaults to 1000 as a safety limit. The collector refreshes
 the short-lived heartbeat token and creates a request-bound extension secret in
 memory. Neither value is logged or stored in PostgreSQL.
 
+For a URL-only full scan, send `POST /api/shop-scans/all` with a JSON body
+containing only `url`; it uses the safe defaults above.
+
 `POST /api/plugin-session/check` queues the official procurement-plugin MTop
 login check using the persistent browser session and returns the result through
 the normal `GET /api/jobs/:id` endpoint.

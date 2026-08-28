@@ -120,6 +120,19 @@ app.post('/api/shop-scans', { preHandler: requireApiKey }, async (request, reply
   return reply.code(202).send(job);
 });
 
+app.post('/api/shop-scans/all', { preHandler: requireApiKey }, async (request, reply) => {
+  const url = request.body?.url;
+  if (typeof url !== 'string' || !isAllowed1688Url(url)
+      || !new URL(url).hostname.startsWith('shop')) {
+    return reply.code(400).send({ error: 'A valid HTTPS 1688 shop URL is required.' });
+  }
+  const job = await db.createJob(crypto.randomUUID(), url, {
+    mode: 'shop_mtop', allPages: true, pageNum: 1, pageSize: 300,
+    sortType: 'wangpu_score', maxPages: 1000,
+  });
+  return reply.code(202).send(job);
+});
+
 app.get('/api/jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = await db.getJob(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
