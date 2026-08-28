@@ -129,7 +129,11 @@ export async function parse1688Product(page) {
     };
     scan(assignedJson);
 
-    const images = all('img').map((image) => attr(image, [
+    const images = all('img').filter((image) => {
+      const width = image.naturalWidth || image.width || 0;
+      const height = image.naturalHeight || image.height || 0;
+      return width >= 300 && height >= 300;
+    }).map((image) => attr(image, [
       'src', 'data-src', 'data-lazy-src', 'data-original', 'data-ks-lazyload',
     ]));
 
@@ -247,9 +251,16 @@ export async function parse1688Product(page) {
 
   const bodyMoq = raw.bodyText.match(/(?:起批量|最小起订量|起订量|MOQ)\s*[：:]?\s*(\d+)/i);
   const ldImages = Array.isArray(productLd.image) ? productLd.image : [productLd.image];
-  const images = unique([
+  const normalizedImages = unique([
     raw.mainImage, ...ldImages, ...candidates.images, ...raw.images,
   ].map((value) => normalizeImageUrl(value, raw.url)), MAX_IMAGES);
+  const imageKeys = new Set();
+  const images = normalizedImages.filter((url) => {
+    const key = url.replace(/[?#].*$/, '').replace(/_\.webp$/i, '').replace(/_\d+x\d+[^/]*$/i, '');
+    if (imageKeys.has(key)) return false;
+    imageKeys.add(key);
+    return true;
+  });
 
   const knownAttributeNames = [
     '货号', '品牌', '面料名称', '面料成分', '里料名称', '里料成分', '产地', '适用性别',

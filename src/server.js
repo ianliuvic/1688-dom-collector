@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import { createDatabase } from './db.js';
 import { createCollector, isAllowed1688Url } from './collector.js';
 import { analyzeProductImage } from './vision.js';
-import { cleanProductGallery } from './image-cleaner.js';
+import { analyzeGalleryImages, cleanProductGallery } from './image-cleaner.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -141,6 +141,21 @@ app.get('/api/product-details/:id/image-clean', { preHandler: requireApiKey }, a
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   return db.listProductImageCleanups(detail.id);
+});
+
+app.post('/api/image-clean/test', { preHandler: requireApiKey }, async (request, reply) => {
+  if (!Array.isArray(request.body?.images) || request.body.images.length < 1 || request.body.images.length > 30) {
+    return reply.code(400).send({ error: 'images must contain 1 to 30 ordered persistent-storage image paths.' });
+  }
+  try {
+    return await analyzeGalleryImages({ images: request.body.images, persistOutput: false, config: {
+      apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+      model: config.visionModel, storagePath: config.storagePath,
+    } });
+  } catch (error) {
+    request.log.error({ err: error }, 'test gallery cleaning failed');
+    return reply.code(502).send({ error: 'image_clean_test_failed', message: error.message });
+  }
 });
 
 app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
