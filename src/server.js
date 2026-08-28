@@ -68,6 +68,21 @@ app.get('/api/shops/:id/products', { preHandler: requireApiKey }, async (request
   return db.listShopProducts(request.params.id, request.query?.limit);
 });
 
+app.post('/api/product-details', { preHandler: requireApiKey }, async (request, reply) => {
+  const suppliedUrl = request.body?.url;
+  const offerId = request.body?.offerId;
+  let url = suppliedUrl;
+  if (!url && typeof offerId === 'string' && /^\d{10,13}$/.test(offerId)) {
+    url = `https://detail.1688.com/offer/${offerId}.html`;
+  }
+  if (typeof url !== 'string' || !isAllowed1688Url(url)
+      || !new URL(url).hostname.startsWith('detail.')) {
+    return reply.code(400).send({ error: 'Provide a valid HTTPS 1688 detail URL or offerId.' });
+  }
+  const job = await db.createJob(crypto.randomUUID(), url, { mode: 'product_detail' });
+  return reply.code(202).send(job);
+});
+
 app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
   const job = await db.createJob(
     crypto.randomUUID(),
@@ -187,6 +202,9 @@ async function workerLoop() {
         await db.upsertShopProfile(result.extractedData);
       } else if (result.extractedData?.pageType === 'shop-offer-collection') {
         await db.saveShopScan(job.id, result.extractedData);
+      } else if (job.options?.mode === 'product_detail'
+          && result.extractedData?.pageType === 'product') {
+        await db.saveProductDetail(result.extractedData, job.url, result.extractedData.localImages ?? []);
       }
     } catch (error) {
       app.log.error({ err: error, jobId: job.id }, 'capture failed');

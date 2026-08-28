@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
@@ -83,6 +84,39 @@ async function captureShopContactUrl(page, context) {
     source: capturedUrl ? 'window_open_intercept' : null,
     error: capturedUrl ? null : 'The button did not expose a web IM URL.',
   };
+}
+
+async function downloadProductImages(data, storagePath, jobId) {
+  const sources = [];
+  if (data.mainImage) sources.push({ url: data.mainImage, type: 'main' });
+  for (const [index, url] of (data.images ?? []).entries()) sources.push({ url, type: 'gallery', sortOrder: index });
+  for (const [index, item] of (data.skuOptions ?? []).entries()) {
+    if (item.image) sources.push({ url: item.image, type: 'sku', sortOrder: index });
+  }
+  const seen = new Set();
+  const imageDir = path.join(storagePath, 'product-images', String(data.offerId || jobId));
+  await fs.mkdir(imageDir, { recursive: true });
+  const files = [];
+  for (const source of sources) {
+    if (!source.url || seen.has(source.url)) continue;
+    seen.add(source.url);
+    try {
+      const response = await fetch(source.url, {
+        headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://detail.1688.com/' },
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!response.ok) continue;
+      const contentType = response.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
+      if (!contentType.startsWith('image/')) continue;
+      const extension = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' })[contentType] || 'bin';
+      const hash = crypto.createHash('sha1').update(source.url).digest('hex').slice(0, 12);
+      const filePath = path.join(imageDir, `${source.type}-${String(source.sortOrder ?? files.length).padStart(4, '0')}-${hash}.${extension}`);
+      await fs.writeFile(filePath, Buffer.from(await response.arrayBuffer()));
+      files.push({ type: source.type, sortOrder: source.sortOrder ?? files.length, sourceUrl: source.url,
+        storagePath: filePath, mimeType: contentType });
+    } catch { /* preserve the source URL even when an individual image is blocked */ }
+  }
+  return files;
 }
 
 export function isAllowed1688Url(value) {
@@ -172,6 +206,26 @@ export function createCollector({
     await fs.mkdir(jobPath, { recursive: true });
     const domPath = path.join(jobPath, 'page.html');
     const screenshotPath = path.join(jobPath, 'page.png');
+
+    if (job.options?.mode === 'product_detail') {
+      await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(5000);
+      const finalUrl = page.url();
+      const title = await page.title();
+      const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+      sessionState = classifySession(finalUrl, bodyText);
+      lastCheckedAt = new Date().toISOString();
+      await fs.writeFile(domPath, await page.content(), 'utf8');
+      if (sessionState === 'requires_auth') {
+        return { status: 'requires_auth', title, finalUrl, domPath, screenshotPath: null,
+          extractedData: null, error: 'Login or human verification is required.' };
+      }
+      const extractedData = await parse1688Product(page);
+      extractedData.localImages = await downloadProductImages(extractedData, storagePath, job.id);
+      await fs.writeFile(path.join(jobPath, 'product.json'), JSON.stringify(extractedData, null, 2), 'utf8');
+      return { status: 'completed', title, finalUrl, domPath, screenshotPath: null,
+        extractedData, error: null };
+    }
 
     if (job.options?.mode === 'shop_contact') {
       await page.goto(job.url, { waitUntil: 'domcontentloaded' });

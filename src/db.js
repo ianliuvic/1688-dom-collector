@@ -115,6 +115,67 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS shop_product_snapshots_observed_idx
         ON shop_product_snapshots (observed_at);
+      CREATE TABLE IF NOT EXISTS product_details (
+        id bigserial PRIMARY KEY,
+        offer_id text UNIQUE,
+        source_url text NOT NULL UNIQUE,
+        canonical_url text,
+        title text,
+        description text,
+        currency text,
+        price_min numeric(12,2),
+        price_max numeric(12,2),
+        moq integer,
+        seller_name text,
+        seller_url text,
+        raw_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+        first_seen_at timestamptz NOT NULL DEFAULT now(),
+        last_crawled_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS product_details_title_idx ON product_details (title);
+      CREATE INDEX IF NOT EXISTS product_details_last_crawled_idx ON product_details (last_crawled_at);
+      CREATE TABLE IF NOT EXISTS product_detail_images (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        image_type text NOT NULL,
+        sort_order integer NOT NULL DEFAULT 0,
+        source_url text NOT NULL,
+        storage_path text,
+        mime_type text,
+        downloaded_at timestamptz,
+        UNIQUE (product_detail_id, image_type, sort_order, source_url)
+      );
+      CREATE INDEX IF NOT EXISTS product_detail_images_product_idx ON product_detail_images (product_detail_id);
+      CREATE TABLE IF NOT EXISTS product_detail_skus (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        sku_key text NOT NULL,
+        sku_text text,
+        price numeric(12,2),
+        stock numeric(14,2),
+        image_source_url text,
+        image_storage_path text,
+        option_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+        raw_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+        UNIQUE (product_detail_id, sku_key)
+      );
+      CREATE TABLE IF NOT EXISTS product_detail_attributes (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        name text NOT NULL,
+        value text NOT NULL,
+        sort_order integer NOT NULL DEFAULT 0,
+        UNIQUE (product_detail_id, name, value)
+      );
+      CREATE TABLE IF NOT EXISTS product_detail_price_tiers (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        min_quantity numeric(14,2),
+        max_quantity numeric(14,2),
+        price numeric(12,2) NOT NULL,
+        currency text,
+        UNIQUE (product_detail_id, min_quantity, max_quantity, price)
+      );
     `);
   }
 
@@ -270,12 +331,82 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function saveProductDetail(data, sourceUrl, imageFiles = []) {
+    if (!data || data.pageType !== 'product' || !sourceUrl) return null;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const existing = data.offerId
+        ? await client.query('SELECT id FROM product_details WHERE offer_id = $1 OR source_url = $2 LIMIT 1', [String(data.offerId), sourceUrl])
+        : await client.query('SELECT id FROM product_details WHERE source_url = $1 LIMIT 1', [sourceUrl]);
+      const price = data.price ?? {};
+      let detailId;
+      if (existing.rows[0]) {
+        detailId = existing.rows[0].id;
+        await client.query(`UPDATE product_details SET offer_id=$1, source_url=$2, canonical_url=$3,
+          title=$4, description=$5, currency=$6, price_min=$7, price_max=$8, moq=$9,
+          seller_name=$10, seller_url=$11, raw_data=$12, last_crawled_at=now() WHERE id=$13`, [
+          data.offerId ? String(data.offerId) : null, sourceUrl, data.canonicalUrl ?? null,
+          data.title ?? null, data.description ?? null, data.currency ?? null,
+          price.min ?? null, price.max ?? null, data.moq ?? null,
+          data.seller?.name ?? null, data.seller?.url ?? null, JSON.stringify(data), detailId,
+        ]);
+        await client.query('DELETE FROM product_detail_images WHERE product_detail_id=$1', [detailId]);
+        await client.query('DELETE FROM product_detail_skus WHERE product_detail_id=$1', [detailId]);
+        await client.query('DELETE FROM product_detail_attributes WHERE product_detail_id=$1', [detailId]);
+        await client.query('DELETE FROM product_detail_price_tiers WHERE product_detail_id=$1', [detailId]);
+      } else {
+        const inserted = await client.query(`INSERT INTO product_details
+          (offer_id, source_url, canonical_url, title, description, currency, price_min, price_max, moq, seller_name, seller_url, raw_data)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`, [
+          data.offerId ? String(data.offerId) : null, sourceUrl, data.canonicalUrl ?? null,
+          data.title ?? null, data.description ?? null, data.currency ?? null,
+          price.min ?? null, price.max ?? null, data.moq ?? null,
+          data.seller?.name ?? null, data.seller?.url ?? null, JSON.stringify(data),
+        ]);
+        detailId = inserted.rows[0].id;
+      }
+      for (const image of imageFiles) {
+        await client.query(`INSERT INTO product_detail_images
+          (product_detail_id, image_type, sort_order, source_url, storage_path, mime_type, downloaded_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [detailId, image.type, image.sortOrder ?? 0,
+          image.sourceUrl, image.storagePath ?? null, image.mimeType ?? null,
+          image.storagePath ? new Date() : null]);
+      }
+      for (const [index, sku] of (data.skuRows ?? []).entries()) {
+        await client.query(`INSERT INTO product_detail_skus
+          (product_detail_id, sku_key, sku_text, price, stock, option_data, raw_data)
+          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [detailId, String(sku.skuKey ?? sku.skuText ?? index),
+          sku.skuText ?? sku.text ?? null, sku.price ?? null, sku.stock ?? null,
+          JSON.stringify(sku.options ?? {}), JSON.stringify(sku)]);
+      }
+      for (const [index, attribute] of (data.attributes ?? []).entries()) {
+        await client.query(`INSERT INTO product_detail_attributes
+          (product_detail_id, name, value, sort_order) VALUES ($1,$2,$3,$4)`,
+        [detailId, String(attribute.name), String(attribute.value), index]);
+      }
+      for (const tier of price.tiers ?? []) {
+        await client.query(`INSERT INTO product_detail_price_tiers
+          (product_detail_id, min_quantity, max_quantity, price, currency)
+          VALUES ($1,$2,$3,$4,$5)`, [detailId, tier.minQuantity ?? null, tier.maxQuantity ?? null,
+          tier.price, data.currency ?? null]);
+      }
+      await client.query('COMMIT');
+      return { productDetailId: detailId, imageCount: imageFiles.length };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
 
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
-    saveShopScan, listShopProfiles, listShopProducts, ping };
+    saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, ping };
 }
 
 function parseScore(value) {
