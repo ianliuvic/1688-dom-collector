@@ -158,6 +158,29 @@ app.post('/api/image-clean/test', { preHandler: requireApiKey }, async (request,
   }
 });
 
+app.post('/api/image-clean/test-from-products', { preHandler: requireApiKey }, async (request, reply) => {
+  const urls = Array.isArray(request.body?.urls) ? request.body.urls : [];
+  if (!urls.length || urls.length > 5 || urls.some((url) => typeof url !== 'string'
+    || !isAllowed1688Url(url) || !new URL(url).hostname.startsWith('detail.'))) {
+    return reply.code(400).send({ error: 'urls must contain 1 to 5 HTTPS 1688 detail URLs.' });
+  }
+  const results = [];
+  for (const url of urls) {
+    const testId = crypto.randomUUID();
+    try {
+      const source = await collector.extractProductImages(url, testId);
+      const analysis = await analyzeGalleryImages({ images: source.images, persistOutput: false, offerId: source.offerId || testId, config: {
+        apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+        model: config.visionModel, storagePath: config.storagePath,
+      } });
+      results.push({ url, offerId: source.offerId, ...analysis });
+    } catch (error) {
+      results.push({ url, status: 'failed', error: error.message });
+    }
+  }
+  return { results };
+});
+
 app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
   const job = await db.createJob(
     crypto.randomUUID(),

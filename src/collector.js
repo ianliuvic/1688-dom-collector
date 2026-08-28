@@ -440,5 +440,24 @@ export function createCollector({
     return { state: sessionState, lastCheckedAt };
   }
 
-  return { start, stop, capture, getSessionStatus };
+  // Ephemeral image-only extraction for test/QA flows; it does not create a capture job or save product data.
+  async function extractProductImages(url, testId = crypto.randomUUID()) {
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(5000);
+    const finalUrl = page.url();
+    const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    sessionState = classifySession(finalUrl, bodyText);
+    lastCheckedAt = new Date().toISOString();
+    if (sessionState === 'requires_auth') throw new Error('Login or human verification is required.');
+    const extractedData = await parse1688Product(page);
+    const localImages = await downloadProductImages(extractedData, storagePath, `image-test-${testId}`);
+    const imageByUrl = new Map(localImages.map((image) => [image.sourceUrl, image]));
+    const ordered = [{ type: 'main', sortOrder: 0, sourceUrl: extractedData.mainImage },
+      ...(extractedData.images || []).map((sourceUrl, index) => ({ type: 'gallery', sortOrder: index, sourceUrl }))]
+      .map((image) => ({ ...image, ...(imageByUrl.get(image.sourceUrl) || {}) }))
+      .filter((image) => image.storagePath);
+    return { offerId: extractedData.offerId, images: ordered };
+  }
+
+  return { start, stop, capture, extractProductImages, getSessionStatus };
 }
