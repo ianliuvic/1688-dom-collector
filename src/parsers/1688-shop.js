@@ -24,6 +24,7 @@ export async function parse1688Shop(page, networkResponses = []) {
     return {
       url: location.href,
       title: document.title,
+      bodyText: document.body?.innerText ?? '',
       globalData: data.globalData ?? {},
       header,
       footer,
@@ -41,6 +42,13 @@ export async function parse1688Shop(page, networkResponses = []) {
   ]);
   const offerIds = unique([...networkOfferIds, ...domOfferIds]).filter((id) => !ignoredIds.has(id));
   const globalData = dom.globalData;
+  const followerMatch = dom.bodyText.match(/粉丝数\s*[：:]\s*([\d,]+)/);
+  const establishedDateMatch = dom.bodyText.match(/成立时间\s*[：:]\s*([\d]{4}年\d{1,2}月\d{1,2}日)/);
+  const phoneMatch = dom.bodyText.match(/电话\s*[：:]\s*([^\s]+)/);
+  const mobileMatch = dom.bodyText.match(/手机\s*[：:]\s*([^\s]+)/);
+  const faxMatch = dom.bodyText.match(/传真\s*[：:]\s*([^\s]+)/);
+  const offerList = dom.navigation.find((item) => item.id === 'offerlist');
+  const newOfferList = dom.navigation.find((item) => item.id === 'newofferlist');
 
   return {
     schemaVersion: 1,
@@ -58,9 +66,11 @@ export async function parse1688Shop(page, networkResponses = []) {
       address: dom.header.addr?.entAddress ?? dom.footer.detailAddress ?? null,
       establishedYear: dom.header.establishedYear ?? null,
       mainCategory: dom.header.mainCate ?? null,
+      establishedDate: establishedDateMatch?.[1] ?? null,
     },
     metrics: {
       offerCount: Number(globalData.offerNum) || null,
+      followerCount: followerMatch ? Number(followerMatch[1].replaceAll(',', '')) : null,
       serviceScore: dom.header.customerStar ?? null,
       repeatRate: dom.header.byrRepeatRateText ?? null,
       fulfillmentRate: dom.header.lgtFulfillGotRateText ?? null,
@@ -68,7 +78,14 @@ export async function parse1688Shop(page, networkResponses = []) {
       businessTags: dom.header.businessTags ?? [],
     },
     session: { buyerIsLogin: globalData.buyerIsLogin === true },
+    contact: {
+      phone: phoneMatch?.[1] && phoneMatch[1] !== '暂无' ? phoneMatch[1] : null,
+      mobile: mobileMatch?.[1] && mobileMatch[1] !== '暂无' ? mobileMatch[1] : null,
+      fax: faxMatch?.[1] && faxMatch[1] !== '暂无' ? faxMatch[1] : null,
+    },
     navigation: dom.navigation.map((item) => ({ name: item.name, id: item.id, url: item.uri })),
+    offerListUrl: offerList?.uri ?? null,
+    newOfferListUrl: newOfferList?.uri ?? null,
     offerIds,
     offerIdCount: offerIds.length,
     networkSources: unique(networkResponses.map((response) => response.api)),

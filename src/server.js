@@ -60,6 +60,10 @@ app.get('/health', async (_request, reply) => {
 
 app.get('/api/session', { preHandler: requireApiKey }, async () => collector.getSessionStatus());
 
+app.get('/api/shops', { preHandler: requireApiKey }, async (request) => {
+  return db.listShopProfiles(request.query?.limit);
+});
+
 app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
   const job = await db.createJob(
     crypto.randomUUID(),
@@ -175,6 +179,9 @@ async function workerLoop() {
     try {
       const result = await collector.capture(job);
       await db.completeJob(job.id, result);
+      if (result.extractedData?.pageType === 'shop') {
+        await db.upsertShopProfile(result.extractedData);
+      }
     } catch (error) {
       app.log.error({ err: error, jobId: job.id }, 'capture failed');
       await db.completeJob(job.id, {
