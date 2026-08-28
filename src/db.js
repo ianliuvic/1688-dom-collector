@@ -401,12 +401,25 @@ export function createDatabase(databaseUrl) {
     }
   }
 
+  async function getProductDetail(id) {
+    const detail = await pool.query('SELECT * FROM product_details WHERE id = $1', [id]);
+    if (!detail.rows[0]) return null;
+    const [images, skus, attributes, tiers] = await Promise.all([
+      pool.query('SELECT * FROM product_detail_images WHERE product_detail_id = $1 ORDER BY image_type, sort_order', [id]),
+      pool.query('SELECT * FROM product_detail_skus WHERE product_detail_id = $1 ORDER BY id', [id]),
+      pool.query('SELECT * FROM product_detail_attributes WHERE product_detail_id = $1 ORDER BY sort_order', [id]),
+      pool.query('SELECT * FROM product_detail_price_tiers WHERE product_detail_id = $1 ORDER BY min_quantity NULLS FIRST', [id]),
+    ]);
+    return { ...detail.rows[0], images: images.rows, skus: skus.rows,
+      attributes: attributes.rows, priceTiers: tiers.rows };
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
 
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
-    saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, ping };
+    saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail, ping };
 }
 
 function parseScore(value) {

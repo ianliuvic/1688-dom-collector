@@ -83,6 +83,11 @@ app.post('/api/product-details', { preHandler: requireApiKey }, async (request, 
   return reply.code(202).send(job);
 });
 
+app.get('/api/product-details/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  return detail ?? reply.code(404).send({ error: 'not_found' });
+});
+
 app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
   const job = await db.createJob(
     crypto.randomUUID(),
