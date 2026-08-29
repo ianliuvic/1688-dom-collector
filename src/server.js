@@ -7,6 +7,7 @@ import { createCollector, isAllowed1688Url } from './collector.js';
 import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
+import { translateProductDetail } from './product-translator.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -37,7 +38,9 @@ const collector = createCollector(config);
 let workerRunning = true;
 const skuAuditJobs = new Map();
 const imageAuditJobs = new Map();
+const translationJobs = new Map();
 let multimodalAuditQueue = Promise.resolve();
+let translationQueue = Promise.resolve();
 
 function requireApiKey(request, reply, done) {
   const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
@@ -107,9 +110,67 @@ app.post('/api/product-details/test', { preHandler: requireApiKey }, async (requ
   }
 });
 
+app.get('/api/product-details', { preHandler: requireApiKey }, async (request, reply) => {
+  const offerId = request.query?.offerId || null;
+  if (offerId && !/^\d{10,13}$/.test(String(offerId))) {
+    return reply.code(400).send({ error: 'offerId must be a 10 to 13 digit number.' });
+  }
+  return db.listProductDetails({ offerId, limit: request.query?.limit });
+});
+
 app.get('/api/product-details/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   return detail ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.post('/api/product-details/:id/translations', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const targetLanguage = request.body?.targetLanguage || 'en';
+  if (targetLanguage !== 'en') {
+    return reply.code(400).send({ error: 'Only targetLanguage=en is currently supported.' });
+  }
+  const id = crypto.randomUUID();
+  const job = { id, productDetailId: detail.id, offerId: detail.offer_id, targetLanguage,
+    model: config.complexModel, status: 'queued', createdAt: new Date().toISOString(),
+    startedAt: null, completedAt: null, translationId: null, result: null, error: null };
+  translationJobs.set(id, job);
+  while (translationJobs.size > 100) translationJobs.delete(translationJobs.keys().next().value);
+  translationQueue = translationQueue.catch(() => {}).then(async () => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    try {
+      const translated = await translateProductDetail({ detail, targetLanguage, config: {
+        apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+        complexModel: config.complexModel,
+      } });
+      const saved = await db.saveProductTranslation(detail.id, translated);
+      job.translationId = saved.id;
+      job.result = saved;
+      job.status = 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = error.message;
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  });
+  return reply.code(202).send(job);
+});
+
+app.get('/api/product-details/:id/translations', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const targetLanguage = request.query?.targetLanguage || null;
+  if (targetLanguage && targetLanguage !== 'en') {
+    return reply.code(400).send({ error: 'Only targetLanguage=en is currently supported.' });
+  }
+  return db.listProductTranslations(detail.id, targetLanguage);
+});
+
+app.get('/api/translation-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = translationJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
 app.post('/api/product-details/:id/vision', { preHandler: requireApiKey }, async (request, reply) => {

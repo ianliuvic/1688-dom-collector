@@ -203,6 +203,30 @@ export function createDatabase(databaseUrl) {
         created_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE INDEX IF NOT EXISTS product_image_cleanups_product_idx ON product_image_cleanups(product_detail_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS product_detail_translations (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        source_language text NOT NULL DEFAULT 'zh-CN',
+        target_language text NOT NULL,
+        model text NOT NULL,
+        source_hash text NOT NULL,
+        title text,
+        description text,
+        seller_name text,
+        attributes jsonb NOT NULL DEFAULT '[]'::jsonb,
+        sku_dimensions jsonb NOT NULL DEFAULT '[]'::jsonb,
+        sku_options jsonb NOT NULL DEFAULT '[]'::jsonb,
+        sku_rows jsonb NOT NULL DEFAULT '[]'::jsonb,
+        price_text_candidates jsonb NOT NULL DEFAULT '[]'::jsonb,
+        source_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+        translated_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+        usage jsonb,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (product_detail_id, target_language, source_hash, model)
+      );
+      CREATE INDEX IF NOT EXISTS product_detail_translations_product_idx
+        ON product_detail_translations(product_detail_id, target_language, created_at DESC);
     `);
   }
 
@@ -441,6 +465,18 @@ export function createDatabase(databaseUrl) {
       attributes: attributes.rows, priceTiers: tiers.rows };
   }
 
+  async function listProductDetails({ offerId = null, limit = 100 } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 1000);
+    if (offerId) {
+      const result = await pool.query(`SELECT * FROM product_details
+        WHERE offer_id=$1 ORDER BY last_crawled_at DESC LIMIT $2`, [String(offerId), safeLimit]);
+      return result.rows;
+    }
+    const result = await pool.query(`SELECT * FROM product_details
+      ORDER BY last_crawled_at DESC LIMIT $1`, [safeLimit]);
+    return result.rows;
+  }
+
   async function saveProductVision(productDetailId, imageId, result) {
     const saved = await pool.query(`INSERT INTO product_vision_analyses
       (product_detail_id, image_id, model, image_path, source_url, prompt, content, parsed, usage)
@@ -468,13 +504,47 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function saveProductTranslation(productDetailId, result) {
+    const translated = result.translated;
+    const saved = await pool.query(`INSERT INTO product_detail_translations
+      (product_detail_id, source_language, target_language, model, source_hash,
+       title, description, seller_name, attributes, sku_dimensions, sku_options,
+       sku_rows, price_text_candidates, source_data, translated_data, usage)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      ON CONFLICT (product_detail_id, target_language, source_hash, model)
+      DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description,
+        seller_name=EXCLUDED.seller_name, attributes=EXCLUDED.attributes,
+        sku_dimensions=EXCLUDED.sku_dimensions, sku_options=EXCLUDED.sku_options,
+        sku_rows=EXCLUDED.sku_rows, price_text_candidates=EXCLUDED.price_text_candidates,
+        source_data=EXCLUDED.source_data, translated_data=EXCLUDED.translated_data,
+        usage=EXCLUDED.usage, updated_at=now()
+      RETURNING *`, [productDetailId, result.sourceLanguage, result.targetLanguage,
+      result.model, result.sourceHash, translated.title, translated.description,
+      translated.sellerName, JSON.stringify(translated.attributes),
+      JSON.stringify(translated.skuDimensions), JSON.stringify(translated.skuOptions),
+      JSON.stringify(translated.skuRows), JSON.stringify(translated.priceTextCandidates),
+      JSON.stringify(result.source), JSON.stringify(translated),
+      result.usage ? JSON.stringify(result.usage) : null]);
+    return saved.rows[0];
+  }
+
+  async function listProductTranslations(productDetailId, targetLanguage = null) {
+    const values = [productDetailId];
+    const languageFilter = targetLanguage ? ' AND target_language=$2' : '';
+    if (targetLanguage) values.push(targetLanguage);
+    const result = await pool.query(`SELECT * FROM product_detail_translations
+      WHERE product_detail_id=$1${languageFilter} ORDER BY created_at DESC`, values);
+    return result.rows;
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
 
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
-    saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail,
-    saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups, ping };
+    saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail, listProductDetails,
+    saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
+    saveProductTranslation, listProductTranslations, ping };
 }
 
 function parseScore(value) {
