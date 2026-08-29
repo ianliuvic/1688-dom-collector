@@ -42,7 +42,9 @@ async function loadImages(detail, config, limit = 4) {
     if (!identity || seen.has(identity)) continue;
     seen.add(identity);
     let url = '';
-    if (image.storage_path) {
+    const sourceUrl = /^https:\/\//i.test(clean(image.source_url)) ? clean(image.source_url) : '';
+    if (config.modelImageTransport !== 'persistent_storage' && sourceUrl) url = sourceUrl;
+    if (!url && image.storage_path) {
       const filename = path.resolve(image.storage_path);
       if (filename.startsWith(`${root}${path.sep}`)) {
         try {
@@ -53,7 +55,7 @@ async function loadImages(detail, config, limit = 4) {
         } catch { /* use source URL below */ }
       }
     }
-    if (!url && /^https:\/\//i.test(clean(image.source_url))) url = clean(image.source_url);
+    if (!url && sourceUrl) url = sourceUrl;
     if (url) loaded.push({ url, sourceUrl: clean(image.source_url), imageId: image.id ?? null });
     if (loaded.length >= limit) break;
   }

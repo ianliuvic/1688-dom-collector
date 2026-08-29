@@ -31,6 +31,8 @@ const config = {
   visionModel: process.env.DASHSCOPE_VISION_MODEL || 'qwen3.8-max',
   complexModel: process.env.DASHSCOPE_COMPLEX_MODEL || 'qwen3.8-max',
   translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
+  modelImageTransport: process.env.MODEL_IMAGE_TRANSPORT === 'persistent_storage'
+    ? 'persistent_storage' : 'source_url',
   wordpressBaseUrl: process.env.WORDPRESS_BASE_URL,
   wordpressUsername: process.env.WORDPRESS_USERNAME,
   wordpressApplicationPassword: process.env.WORDPRESS_APPLICATION_PASSWORD,
@@ -277,6 +279,7 @@ app.post('/api/product-details/:id/translations', { preHandler: requireApiKey },
         apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
         complexModel: config.complexModel, storagePath: config.storagePath,
         maxTranslationImages: config.translationImageLimit,
+        modelImageTransport: config.modelImageTransport,
       } });
       const saved = await db.saveProductTranslation(detail.id, translated);
       job.translationId = saved.id;

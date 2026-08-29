@@ -329,6 +329,7 @@ export async function prepareWordPressProductDraft({
     ? await analyzeProductMerchandising({ detail, translation, taxonomies, config: {
       apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
       complexModel: config.complexModel, storagePath: config.storagePath,
+      modelImageTransport: config.modelImageTransport,
     } }) : null;
   const selection = resolveMerchandisingSelection({ options, merchandising, taxonomies });
   let styleNo = clean(options.styleNo);

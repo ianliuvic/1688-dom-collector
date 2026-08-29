@@ -152,7 +152,12 @@ async function loadTranslationImages(detail, config) {
   for (const [index, item] of selected.entries()) {
     let url = null;
     let transport = null;
-    if (item.storage_path) {
+    const sourceUrl = /^https:\/\//i.test(item.source_url || '') ? item.source_url : null;
+    if (config.modelImageTransport !== 'persistent_storage' && sourceUrl) {
+      url = sourceUrl;
+      transport = 'source_url';
+    }
+    if (!url && item.storage_path) {
       const imagePath = path.resolve(item.storage_path);
       if (imagePath.startsWith(`${storageRoot}${path.sep}`)) {
         try {
@@ -167,8 +172,8 @@ async function loadTranslationImages(detail, config) {
         } catch { /* fall back to the retained source URL */ }
       }
     }
-    if (!url && /^https:\/\//i.test(item.source_url || '')) {
-      url = item.source_url;
+    if (!url && sourceUrl) {
+      url = sourceUrl;
       transport = 'source_url';
     }
     if (!url) continue;
