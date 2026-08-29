@@ -267,9 +267,12 @@ app.post('/api/product-details/:id/translations', { preHandler: requireApiKey },
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   const targetLanguage = request.body?.targetLanguage || 'en';
+  const preserveCatalogCopy = request.body?.preserveCatalogCopy === true;
   if (targetLanguage !== 'en') {
     return reply.code(400).send({ error: 'Only targetLanguage=en is currently supported.' });
   }
+  const previousTranslation = preserveCatalogCopy
+    ? await db.getLatestProductTranslation(detail.id, targetLanguage) : null;
   const id = crypto.randomUUID();
   const job = { id, productDetailId: detail.id, offerId: detail.offer_id, targetLanguage,
     model: config.complexModel, status: 'queued', createdAt: new Date().toISOString(),
@@ -286,6 +289,11 @@ app.post('/api/product-details/:id/translations', { preHandler: requireApiKey },
         maxTranslationImages: config.translationImageLimit,
         modelImageTransport: config.modelImageTransport,
       } });
+      if (previousTranslation) {
+        translated.translated.title = previousTranslation.title;
+        translated.translated.description = previousTranslation.description;
+        translated.namingStrategy = 'preserved_catalog_copy_sku_refresh';
+      }
       const saved = await db.saveProductTranslation(detail.id, translated);
       job.translationId = saved.id;
       job.result = saved;
