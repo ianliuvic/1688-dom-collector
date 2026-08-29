@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildWordPressProductDraft, buildWearHongxiuPricing } from '../src/wordpress-publisher.js';
+import { buildWordPressProductDraft, buildWearHongxiuPricing,
+  normalizePublicationDate } from '../src/wordpress-publisher.js';
 
 const detail = {
   id: '1', offer_id: '1068935307931', canonical_url: 'https://detail.1688.com/offer/1068935307931.html',
   currency: 'CNY', price_min: '23.50', price_max: '23.50', moq: null,
   seller_name: '兴城市沐风制衣厂', seller_url: 'https://example.1688.com/', last_crawled_at: '2026-08-29T00:00:00Z',
+  first_seen_at: '2026-08-28T00:00:00Z', publication_date: '2025-11-05T01:08:00Z',
+  publication_date_source: '1688_listing_time',
   raw_data: { gallery: { source: 'exact_dom_gallery', complete: true, imageCount: 3 } },
   images: [
     { id: '1', image_type: 'main', sort_order: 0, source_url: 'https://img/1.webp', storage_path: '/app/storage/product-images/1/1.webp', mime_type: 'image/webp' },
@@ -38,6 +41,8 @@ test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
   assert.equal(result.payload.external_id, '1688:1068935307931');
   assert.equal(result.payload.style_no, 'SWBK142');
   assert.equal(result.payload.status, 'publish');
+  assert.equal(result.payload.publication_date, '2025-11-05T01:08:00.000Z');
+  assert.equal(result.payload.source.publication_date_source, '1688_listing_time');
   assert.deepEqual(result.payload.category_ids, [35]);
   assert.equal(result.payload.images.length, 3);
   assert.equal(result.payload.images.some((image) => image.source_url.includes('logo')), true);
@@ -55,6 +60,11 @@ test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
   assert.equal(result.payload.meta.style, 'Bikini Set');
   assert.equal(result.payload.meta.source_currency, 'CNY');
   assert.equal(result.payload.meta.source_price_min, 23.5);
+});
+
+test('normalizes valid source dates and rejects invalid values', () => {
+  assert.equal(normalizePublicationDate('2025-11-05T01:08:00Z'), '2025-11-05T01:08:00.000Z');
+  assert.equal(normalizePublicationDate('not-a-date'), '');
 });
 
 test('maps each color to its own saved SKU image without adding swatches to the Gallery', () => {

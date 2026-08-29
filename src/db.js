@@ -485,7 +485,20 @@ export function createDatabase(databaseUrl) {
   }
 
   async function getProductDetail(id) {
-    const detail = await pool.query('SELECT * FROM product_details WHERE id = $1', [id]);
+    const detail = await pool.query(`SELECT product_details.*,
+      COALESCE(
+        (SELECT shop_products.listing_time FROM shop_products
+          WHERE shop_products.offer_id = product_details.offer_id
+            AND shop_products.listing_time IS NOT NULL
+          ORDER BY shop_products.last_crawled_at DESC LIMIT 1),
+        product_details.first_seen_at
+      ) AS publication_date,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM shop_products
+        WHERE shop_products.offer_id = product_details.offer_id
+          AND shop_products.listing_time IS NOT NULL
+      ) THEN '1688_listing_time' ELSE 'first_seen_at' END AS publication_date_source
+      FROM product_details WHERE product_details.id = $1`, [id]);
     if (!detail.rows[0]) return null;
     const [images, skus, attributes, tiers] = await Promise.all([
       pool.query('SELECT * FROM product_detail_images WHERE product_detail_id = $1 ORDER BY image_type, sort_order', [id]),
@@ -588,6 +601,28 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  async function listWordPressPublicationDates() {
+    const result = await pool.query(`SELECT publications.product_detail_id,
+      publications.wp_post_id, publications.external_id,
+      COALESCE(
+        (SELECT shop_products.listing_time FROM shop_products
+          WHERE shop_products.offer_id = details.offer_id
+            AND shop_products.listing_time IS NOT NULL
+          ORDER BY shop_products.last_crawled_at DESC LIMIT 1),
+        details.first_seen_at
+      ) AS publication_date,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM shop_products
+        WHERE shop_products.offer_id = details.offer_id
+          AND shop_products.listing_time IS NOT NULL
+      ) THEN '1688_listing_time' ELSE 'first_seen_at' END AS publication_date_source
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id = publications.product_detail_id
+      WHERE publications.wp_post_id IS NOT NULL
+      ORDER BY publications.id`);
+    return result.rows;
+  }
+
   async function saveWordPressPublication(productDetailId, values) {
     const payload = values.payload ?? {};
     const result = values.result ?? {};
@@ -626,7 +661,7 @@ export function createDatabase(databaseUrl) {
     saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail, listProductDetails,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
-    getWordPressPublication, saveWordPressPublication, ping };
+    getWordPressPublication, listWordPressPublicationDates, saveWordPressPublication, ping };
 }
 
 function parseScore(value) {

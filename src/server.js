@@ -9,7 +9,8 @@ import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
 import { translateProductDetail } from './product-translator.js';
-import { prepareWordPressProductDraft, publishProductToWordPress } from './wordpress-publisher.js';
+import { prepareWordPressProductDraft, publishProductToWordPress,
+  setWordPressProductPublicationDate } from './wordpress-publisher.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
 
@@ -59,6 +60,7 @@ const skuAuditJobs = new Map();
 const imageAuditJobs = new Map();
 const translationJobs = new Map();
 const wordpressJobs = new Map();
+const wordpressPublicationDateJobs = new Map();
 let multimodalAuditQueue = Promise.resolve();
 const translationQueue = createConcurrentQueue({
   concurrency: config.translationConcurrency,
@@ -422,6 +424,53 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
 
 app.get('/api/wordpress-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = wordpressJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.post('/api/wordpress/publication-dates/backfill', { preHandler: requireApiKey }, async (_request, reply) => {
+  const id = crypto.randomUUID();
+  const job = { id, status: 'queued', total: 0, updated: 0, failed: 0,
+    from1688ListingTime: 0, fromFirstSeenAt: 0,
+    createdAt: new Date().toISOString(), startedAt: null, completedAt: null, errors: [] };
+  wordpressPublicationDateJobs.set(id, job);
+  while (wordpressPublicationDateJobs.size > 100) {
+    wordpressPublicationDateJobs.delete(wordpressPublicationDateJobs.keys().next().value);
+  }
+  wordpressQueue = wordpressQueue.catch(() => {}).then(async () => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    try {
+      const rows = await db.listWordPressPublicationDates();
+      job.total = rows.length;
+      for (let offset = 0; offset < rows.length; offset += 5) {
+        const batch = rows.slice(offset, offset + 5);
+        await Promise.all(batch.map(async (row) => {
+          try {
+            await setWordPressProductPublicationDate({
+              postId: row.wp_post_id, publicationDate: row.publication_date, config,
+            });
+            job.updated += 1;
+            if (row.publication_date_source === '1688_listing_time') job.from1688ListingTime += 1;
+            else job.fromFirstSeenAt += 1;
+          } catch (error) {
+            job.failed += 1;
+            job.errors.push({ productDetailId: row.product_detail_id, message: error.message });
+          }
+        }));
+      }
+      job.status = job.failed ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.errors.push({ message: error.message });
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  });
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress-publication-date-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = wordpressPublicationDateJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 

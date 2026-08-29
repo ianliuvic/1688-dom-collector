@@ -21,6 +21,12 @@ function roundCurrency(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
+export function normalizePublicationDate(value) {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
 export function getSourceMaximumPrice(detail) {
   const candidates = [detail?.price_min, detail?.price_max];
   for (const sku of detail?.skus ?? []) candidates.push(sku?.price);
@@ -221,6 +227,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   const hasAllSkuStock = allSkuRowsInStock(skuMatrix);
   const sourceCurrency = clean(detail.currency) || 'CNY';
   const externalId = `1688:${detail.offer_id}`;
+  const publicationDate = normalizePublicationDate(detail.publication_date || detail.first_seen_at);
 
   const payload = {
     external_id: externalId,
@@ -228,6 +235,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
     title: clean(translation.title),
     description: clean(translation.description),
     status: clean(options.status) || 'draft',
+    publication_date: publicationDate,
     source_updated_at: detail.last_crawled_at || '',
     category_ids: selection.categoryIds,
     tag_ids: selection.tagIds,
@@ -300,6 +308,8 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
       price_min: numberOrNull(detail.price_min),
       price_max: numberOrNull(detail.price_max),
       collected_at: detail.last_crawled_at || '',
+      publication_date: publicationDate,
+      publication_date_source: clean(detail.publication_date_source) || 'first_seen_at',
       merchandising: merchandising ? {
         model: merchandising.model || '', confidence: merchandising.confidence ?? null,
         category_mode: selection.categoryMode, tag_mode: selection.tagMode,
@@ -308,6 +318,17 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   };
 
   return { externalId, styleNo, publishingImages, swatchImages, uploadImages, payload };
+}
+
+export async function setWordPressProductPublicationDate({ postId, publicationDate, config }) {
+  const normalized = normalizePublicationDate(publicationDate);
+  if (!Number(postId) || !normalized) throw new Error('A WordPress post ID and valid publication date are required.');
+  const wp = wordpressClient(config);
+  return wp(`/wp-json/wp/v2/product/${Number(postId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date_gmt: normalized }),
+  });
 }
 
 function extensionForMime(mimeType) {
@@ -454,5 +475,12 @@ export async function publishProductToWordPress({ detail, translation, options =
     body: JSON.stringify(payload),
     timeoutMs: 120000,
   });
-  return { draft, payload, media, wordpress: result };
+  let publicationDateResult = null;
+  if (result.post_id && payload.publication_date) {
+    publicationDateResult = await setWordPressProductPublicationDate({
+      postId: result.post_id, publicationDate: payload.publication_date, config,
+    });
+  }
+  return { draft, payload, media, wordpress: { ...result,
+    publication_date: publicationDateResult?.date_gmt || publicationDateResult?.date || payload.publication_date } };
 }
