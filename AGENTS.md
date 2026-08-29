@@ -3,26 +3,24 @@
 ## Coolify 应用
 
 - 采集器：`1688-dom-collector`，UUID `kc1izz5i6mnhs9z29ckl1ajp`
-- 登录/noVNC：`1688-collector-login`，UUID `lel8d5rmvlos9hr6c81ap5vh`
 - 采集器地址：<https://collector.yiswim.cloud>
-- noVNC 地址：<https://collector-login.yiswim.cloud>
+- 集成 noVNC：<https://collector.yiswim.cloud/login/vnc.html?autoconnect=1&resize=remote&path=login/websockify>
 
 ## 重要约束
 
-- 两个应用共享同一个 Persistent Volume 的 `/app/storage`，不能同时运行，否则会争用 Chromium profile。
+- 采集和登录模式共用 Persistent Volume 的 `/app/storage/browser-profile`，必须通过浏览器模式 API 互斥切换。
+- 不要手工启动第二个 Chromium 或直接复用该 profile。
 - 不要在对话、日志或提交中输出 Cookie、token、Secret 或代理密码。
 - Coolify 操作前必须先读取 `coolify` skill，并检查应用当前状态；不要凭猜测索要用户手动执行。
 
-## 首次登录/切换流程
+## 登录/采集模式切换
 
-1. 停止 `1688-dom-collector`。
-2. 启动 `1688-collector-login`。
-3. 检查 noVNC URL 返回正常页面后，让用户在其中登录 1688。
-4. 调用登录检测接口确认登录成功。
-5. 停止 `1688-collector-login`，等待容器完全停止。
-6. 启动 `1688-dom-collector`，再次调用登录检测接口。
+1. 调用 `POST /api/browser-mode/login`；该接口会暂停任务领取、等待当前浏览器操作结束、关闭采集 Chromium，再启动可视 Chromium/noVNC。
+2. 通过集成 noVNC URL 登录；noVNC 仍有独立 Basic Auth。
+3. 登录完成后调用 `POST /api/browser-mode/collector`；该接口会保存会话、关闭可视 Chromium，再恢复采集 Chromium和任务 worker。
+4. 调用 `POST /api/plugin-session/check` 并轮询任务，确认插件登录有效。
 
-每一步都要核实 Coolify 状态、容器健康状态和 HTTP 返回结果。不要只根据浏览器页面是否显示登录状态判断。
+用 `GET /api/browser-mode` 检查实际模式。不要只根据浏览器页面是否显示登录状态判断，也不要通过重启/重新部署代替模式切换。
 
 ## 采集接口
 

@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import Fastify from 'fastify';
+import fastifyHttpProxy from '@fastify/http-proxy';
 import { createDatabase } from './db.js';
 import { createCollector, isAllowed1688Url } from './collector.js';
 import { analyzeProductImage } from './vision.js';
@@ -9,6 +10,7 @@ import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
 import { translateProductDetail } from './product-translator.js';
 import { prepareWordPressProductDraft, publishProductToWordPress } from './wordpress-publisher.js';
+import { createLoginManager } from './login-manager.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -32,6 +34,8 @@ const config = {
   wordpressBaseUrl: process.env.WORDPRESS_BASE_URL,
   wordpressUsername: process.env.WORDPRESS_USERNAME,
   wordpressApplicationPassword: process.env.WORDPRESS_APPLICATION_PASSWORD,
+  novncUsername: process.env.NOVNC_USERNAME || '',
+  novncPassword: process.env.NOVNC_PASSWORD || '',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -40,7 +44,13 @@ if (!config.adminApiKey) throw new Error('ADMIN_API_KEY is required');
 const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 1024 * 1024 });
 const db = createDatabase(config.databaseUrl);
 const collector = createCollector(config);
+const loginManager = createLoginManager(config);
 let workerRunning = true;
+let workerEnabled = true;
+let workerActive = false;
+let browserMode = 'collector';
+let browserTransition = null;
+let modeSwitchQueue = Promise.resolve();
 const skuAuditJobs = new Map();
 const imageAuditJobs = new Map();
 const translationJobs = new Map();
@@ -62,9 +72,105 @@ function requireApiKey(request, reply, done) {
   done();
 }
 
+function requireCollectorMode(_request, reply, done) {
+  if (browserMode !== 'collector' || browserTransition) {
+    reply.code(409).send({ error: 'collector_unavailable', browserMode, transition: browserTransition });
+    return;
+  }
+  done();
+}
+
+function requireNovncAuth(request, reply, done) {
+  if (!config.novncUsername || !config.novncPassword) {
+    reply.code(503).send({ error: 'novnc_credentials_not_configured' });
+    return;
+  }
+  const encoded = request.headers.authorization?.match(/^Basic\s+(.+)$/i)?.[1] || '';
+  let supplied = '';
+  try { supplied = Buffer.from(encoded, 'base64').toString('utf8'); } catch { /* invalid Basic auth */ }
+  const expected = `${config.novncUsername}:${config.novncPassword}`;
+  const suppliedBuffer = Buffer.from(supplied);
+  const expectedBuffer = Buffer.from(expected);
+  if (suppliedBuffer.length !== expectedBuffer.length
+      || !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)) {
+    reply.header('WWW-Authenticate', 'Basic realm="1688 Login"');
+    reply.code(401).send({ error: 'unauthorized' });
+    return;
+  }
+  if (browserMode !== 'login' || browserTransition) {
+    reply.code(409).send({ error: 'login_mode_inactive', browserMode, transition: browserTransition });
+    return;
+  }
+  done();
+}
+
+async function waitForWorkerIdle() {
+  while (workerActive) await new Promise((resolve) => setTimeout(resolve, 100));
+}
+
+async function performBrowserModeSwitch(target) {
+  if (!['collector', 'login'].includes(target)) throw new Error(`Unsupported browser mode: ${target}`);
+  if (browserMode === target && !browserTransition) return getBrowserModeStatus();
+  browserTransition = `${browserMode}_to_${target}`;
+  if (target === 'login') {
+    workerEnabled = false;
+    await waitForWorkerIdle();
+    try {
+      await collector.stop();
+      await loginManager.start();
+      browserMode = 'login';
+    } catch (error) {
+      await loginManager.stop().catch(() => {});
+      await collector.start();
+      workerEnabled = true;
+      browserTransition = null;
+      throw error;
+    }
+  } else {
+    try {
+      await loginManager.stop();
+      await collector.start();
+      browserMode = 'collector';
+      workerEnabled = true;
+    } catch (error) {
+      browserTransition = null;
+      throw error;
+    }
+  }
+  browserTransition = null;
+  return getBrowserModeStatus();
+}
+
+function switchBrowserMode(target) {
+  const operation = modeSwitchQueue.catch(() => {}).then(() => performBrowserModeSwitch(target));
+  modeSwitchQueue = operation;
+  return operation;
+}
+
+function getBrowserModeStatus() {
+  return {
+    mode: browserMode,
+    transition: browserTransition,
+    workerEnabled,
+    workerActive,
+    collector: collector.getSessionStatus(),
+    login: loginManager.getStatus(),
+    loginUrl: `https://${process.env.LOGIN_PUBLIC_HOST || 'collector.yiswim.cloud'}/login/vnc.html?autoconnect=1&resize=remote&path=login/websockify`,
+  };
+}
+
+app.register(fastifyHttpProxy, {
+  upstream: 'http://127.0.0.1:6080',
+  prefix: '/login',
+  rewritePrefix: '',
+  websocket: true,
+  preHandler: requireNovncAuth,
+});
+
 app.get('/', async () => ({
   name: '1688 DOM Collector',
   status: 'framework-ready',
+  browserMode: getBrowserModeStatus(),
   session: collector.getSessionStatus(),
 }));
 
@@ -80,6 +186,26 @@ app.get('/health', async (_request, reply) => {
 
 app.get('/api/session', { preHandler: requireApiKey }, async () => collector.getSessionStatus());
 
+app.get('/api/browser-mode', { preHandler: requireApiKey }, async () => getBrowserModeStatus());
+
+app.post('/api/browser-mode/login', { preHandler: requireApiKey }, async (request, reply) => {
+  try {
+    return await switchBrowserMode('login');
+  } catch (error) {
+    request.log.error({ err: error }, 'failed to enter login mode');
+    return reply.code(500).send({ error: 'login_mode_failed', message: error.message });
+  }
+});
+
+app.post('/api/browser-mode/collector', { preHandler: requireApiKey }, async (request, reply) => {
+  try {
+    return await switchBrowserMode('collector');
+  } catch (error) {
+    request.log.error({ err: error }, 'failed to enter collector mode');
+    return reply.code(500).send({ error: 'collector_mode_failed', message: error.message });
+  }
+});
+
 app.get('/api/shops', { preHandler: requireApiKey }, async (request) => {
   return db.listShopProfiles(request.query?.limit);
 });
@@ -88,7 +214,7 @@ app.get('/api/shops/:id/products', { preHandler: requireApiKey }, async (request
   return db.listShopProducts(request.params.id, request.query?.limit);
 });
 
-app.post('/api/product-details', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/product-details', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const suppliedUrl = request.body?.url;
   const offerId = request.body?.offerId;
   let url = suppliedUrl;
@@ -103,7 +229,7 @@ app.post('/api/product-details', { preHandler: requireApiKey }, async (request, 
   return reply.code(202).send(job);
 });
 
-app.post('/api/product-details/test', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/product-details/test', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const url = request.body?.url;
   if (typeof url !== 'string' || !isAllowed1688Url(url)
       || !new URL(url).hostname.startsWith('detail.')) {
@@ -329,7 +455,7 @@ app.post('/api/image-audit/test', { preHandler: requireApiKey }, async (request,
   }
 });
 
-app.post('/api/image-audit/live', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/image-audit/live', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const urls = Array.isArray(request.body?.urls) ? request.body.urls : [];
   if (!urls.length || urls.length > 5 || urls.some((url) => typeof url !== 'string'
     || !isAllowed1688Url(url) || !new URL(url).hostname.startsWith('detail.'))) {
@@ -378,7 +504,7 @@ app.get('/api/image-audit/jobs/:id', { preHandler: requireApiKey }, async (reque
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
-app.post('/api/sku-audit/live', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/sku-audit/live', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const suppliedUrls = Array.isArray(request.body?.urls) ? request.body.urls : [];
   const offerIds = Array.isArray(request.body?.offerIds) ? request.body.offerIds : [];
   const urls = [...suppliedUrls, ...offerIds.map((offerId) => `https://detail.1688.com/offer/${offerId}.html`)];
@@ -430,7 +556,7 @@ app.get('/api/sku-audit/jobs/:id', { preHandler: requireApiKey }, async (request
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
-app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {
+app.post('/api/plugin-session/check', { preHandler: [requireApiKey, requireCollectorMode] }, async (_request, reply) => {
   const job = await db.createJob(
     crypto.randomUUID(),
     'https://air.1688.com/',
@@ -439,7 +565,7 @@ app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_req
   return reply.code(202).send(job);
 });
 
-app.post('/api/shop-contact-link', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/shop-contact-link', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const url = request.body?.url;
   if (typeof url !== 'string' || !isAllowed1688Url(url)) {
     return reply.code(400).send({ error: 'A valid HTTPS 1688 shop URL is required.' });
@@ -448,7 +574,7 @@ app.post('/api/shop-contact-link', { preHandler: requireApiKey }, async (request
   return reply.code(202).send(job);
 });
 
-app.post('/api/jobs', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/jobs', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const url = request.body?.url;
   if (typeof url !== 'string' || !isAllowed1688Url(url)) {
     return reply.code(400).send({ error: 'A valid HTTPS URL under 1688.com is required.' });
@@ -462,7 +588,7 @@ app.post('/api/jobs', { preHandler: requireApiKey }, async (request, reply) => {
   return reply.code(202).send(job);
 });
 
-app.post('/api/shop-scans', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/shop-scans', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const url = request.body?.url;
   const memberId = request.body?.memberId;
   const pageNum = request.body?.pageNum ?? 1;
@@ -499,7 +625,7 @@ app.post('/api/shop-scans', { preHandler: requireApiKey }, async (request, reply
   return reply.code(202).send(job);
 });
 
-app.post('/api/shop-scans/all', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/shop-scans/all', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const url = request.body?.url;
   if (typeof url !== 'string' || !isAllowed1688Url(url)
       || !new URL(url).hostname.startsWith('shop')) {
@@ -536,8 +662,20 @@ app.get('/api/jobs/:id/dom', { preHandler: requireApiKey }, async (request, repl
 
 async function workerLoop() {
   while (workerRunning) {
-    const job = await db.claimNextJob();
+    if (!workerEnabled) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      continue;
+    }
+    workerActive = true;
+    let job;
+    try {
+      job = await db.claimNextJob();
+    } catch (error) {
+      workerActive = false;
+      throw error;
+    }
     if (!job) {
+      workerActive = false;
       await new Promise((resolve) => setTimeout(resolve, 2000));
       continue;
     }
@@ -560,6 +698,8 @@ async function workerLoop() {
         screenshotPath: error.captureArtifacts?.screenshotPath ?? null,
         extractedData: null, error: error.message,
       });
+    } finally {
+      workerActive = false;
     }
     await new Promise((resolve) => setTimeout(resolve, config.minCaptureIntervalMs));
   }
@@ -567,6 +707,9 @@ async function workerLoop() {
 
 async function shutdown() {
   workerRunning = false;
+  workerEnabled = false;
+  await waitForWorkerIdle();
+  await loginManager.stop();
   await collector.stop();
   await db.pool.end();
   await app.close();

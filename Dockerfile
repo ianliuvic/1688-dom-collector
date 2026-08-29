@@ -1,7 +1,8 @@
 FROM mcr.microsoft.com/playwright:v1.55.0-noble
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends dumb-init xvfb \
+    && apt-get install -y --no-install-recommends \
+      dbus-x11 dumb-init fluxbox fonts-noto-cjk novnc websockify x11vnc xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \

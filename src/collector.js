@@ -146,54 +146,95 @@ export function createCollector({
   let context;
   let page;
   let proxyAdapter;
+  let lifecycleState = 'stopped';
+  let activeOperations = 0;
+  let idleWaiters = [];
   let sessionState = 'unknown';
   let lastCheckedAt = null;
   const pluginCrypto = createPluginCrypto({ storagePath, refreshToken: refreshPluginHeartbeat });
 
   async function start() {
+    if (lifecycleState === 'running') return;
+    if (lifecycleState !== 'stopped') throw new Error(`Collector cannot start while state is ${lifecycleState}.`);
+    lifecycleState = 'starting';
     await fs.mkdir(profilePath, { recursive: true });
     await fs.mkdir(capturesPath, { recursive: true });
     if (clearStaleBrowserLocks) {
       await Promise.all(['SingletonLock', 'SingletonCookie', 'SingletonSocket'].map((name) =>
         fs.rm(path.join(profilePath, name), { force: true, recursive: true })));
     }
-    proxyAdapter = await startProxyAdapter(proxyServer, proxyUsername, proxyPassword);
 
-    context = await chromium.launchPersistentContext(profilePath, {
-      headless: browserHeadless,
-      locale: 'zh-CN',
-      timezoneId: 'Asia/Shanghai',
-      viewport: { width: 1440, height: 1000 },
-      args: ['--disable-dev-shm-usage', '--password-store=basic'],
-      ...(proxyAdapter ? { proxy: proxyAdapter.playwrightProxy } : {}),
-    });
-
-    const storageStatePath = path.join(storagePath, 'storage-state.json');
     try {
-      const storageState = JSON.parse(await fs.readFile(storageStatePath, 'utf8'));
-      if (Array.isArray(storageState.cookies) && storageState.cookies.length > 0) {
-        await context.addCookies(storageState.cookies);
-      }
-      if (Array.isArray(storageState.origins) && storageState.origins.length > 0) {
-        await context.addInitScript(({ origins }) => {
-          const origin = origins.find((item) => item.origin === window.location.origin);
-          if (!origin) return;
-          for (const item of origin.localStorage ?? []) {
-            window.localStorage.setItem(item.name, item.value);
-          }
-        }, { origins: storageState.origins });
-      }
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+      proxyAdapter = await startProxyAdapter(proxyServer, proxyUsername, proxyPassword);
+      context = await chromium.launchPersistentContext(profilePath, {
+        headless: browserHeadless,
+        locale: 'zh-CN',
+        timezoneId: 'Asia/Shanghai',
+        viewport: { width: 1440, height: 1000 },
+        args: ['--disable-dev-shm-usage', '--password-store=basic'],
+        ...(proxyAdapter ? { proxy: proxyAdapter.playwrightProxy } : {}),
+      });
 
-    page = context.pages()[0] ?? await context.newPage();
-    page.setDefaultNavigationTimeout(navigationTimeoutMs);
+      const storageStatePath = path.join(storagePath, 'storage-state.json');
+      try {
+        const storageState = JSON.parse(await fs.readFile(storageStatePath, 'utf8'));
+        if (Array.isArray(storageState.cookies) && storageState.cookies.length > 0) {
+          await context.addCookies(storageState.cookies);
+        }
+        if (Array.isArray(storageState.origins) && storageState.origins.length > 0) {
+          await context.addInitScript(({ origins }) => {
+            const origin = origins.find((item) => item.origin === window.location.origin);
+            if (!origin) return;
+            for (const item of origin.localStorage ?? []) {
+              window.localStorage.setItem(item.name, item.value);
+            }
+          }, { origins: storageState.origins });
+        }
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+
+      page = context.pages()[0] ?? await context.newPage();
+      page.setDefaultNavigationTimeout(navigationTimeoutMs);
+      lifecycleState = 'running';
+    } catch (error) {
+      await proxyAdapter?.close().catch(() => {});
+      proxyAdapter = null;
+      context = null;
+      page = null;
+      lifecycleState = 'stopped';
+      throw error;
+    }
   }
 
   async function stop() {
-    await context?.close();
-    await proxyAdapter?.close();
+    if (lifecycleState === 'stopped') return;
+    lifecycleState = 'stopping';
+    if (activeOperations > 0) {
+      await new Promise((resolve) => idleWaiters.push(resolve));
+    }
+    await context?.storageState({ path: path.join(storagePath, 'storage-state.json') }).catch(() => {});
+    await context?.close().catch(() => {});
+    await proxyAdapter?.close().catch(() => {});
+    context = null;
+    page = null;
+    proxyAdapter = null;
+    lifecycleState = 'stopped';
+  }
+
+  async function withOperation(operation) {
+    if (lifecycleState !== 'running') throw new Error('Collector browser is not running.');
+    activeOperations += 1;
+    try {
+      return await operation();
+    } finally {
+      activeOperations -= 1;
+      if (activeOperations === 0) {
+        const waiters = idleWaiters;
+        idleWaiters = [];
+        for (const resolve of waiters) resolve();
+      }
+    }
   }
 
   function classifySession(finalUrl, bodyText) {
@@ -439,7 +480,7 @@ export function createCollector({
   }
 
   function getSessionStatus() {
-    return { state: sessionState, lastCheckedAt };
+    return { state: sessionState, lastCheckedAt, browser: lifecycleState, activeOperations };
   }
 
   // Ephemeral image-only extraction for test/QA flows; it does not create a capture job or save product data.
@@ -532,6 +573,14 @@ export function createCollector({
       offerId: data.offerId, product: data, skuImages, galleryImages };
   }
 
-  return { start, stop, capture, extractProductImages, extractProductImagesInMemory,
-    extractProductSkuAuditInput, inspectProduct, getSessionStatus };
+  return {
+    start,
+    stop,
+    capture: (...args) => withOperation(() => capture(...args)),
+    extractProductImages: (...args) => withOperation(() => extractProductImages(...args)),
+    extractProductImagesInMemory: (...args) => withOperation(() => extractProductImagesInMemory(...args)),
+    extractProductSkuAuditInput: (...args) => withOperation(() => extractProductSkuAuditInput(...args)),
+    inspectProduct: (...args) => withOperation(() => inspectProduct(...args)),
+    getSessionStatus,
+  };
 }
