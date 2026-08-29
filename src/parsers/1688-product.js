@@ -278,14 +278,37 @@ export async function parse1688Product(page) {
       }
     }
 
-    const skuOptions = all([
-      '[class*="sku"] button', '[class*="sku"] [class*="item"]',
-      '[class*="sku"] li', '[class*="sku"] img', '[class*="prop"] [class*="item"]',
-    ].join(',')).map((node) => ({
-      text: attr(node, ['title', 'alt']) || text(node),
-      image: node.tagName === 'IMG' ? attr(node, ['src', 'data-src', 'data-lazy-src'])
-        : attr(node.querySelector?.('img'), ['src', 'data-src', 'data-lazy-src']),
-    })).filter((item) => item.text || item.image);
+    // SKU controls have a verified, explicit structure.  Reading every node
+    // whose class merely contains "sku" or "item" also captures the whole
+    // feature group, its label, child images and price/stock fragments.  That
+    // produced one synthetic "all colours" option plus every real colour.
+    const skuGroups = all('#skuSelection .feature-item').map((group) => {
+      const dimensionName = text(group.querySelector('.feature-item-label h3'));
+      const options = Array.from(group.querySelectorAll('.transverse-filter > .sku-filter-button'))
+        .map((button) => ({
+          dimensionName,
+          text: text(button.querySelector('.label-name')) || attr(button, ['title', 'aria-label']) || '',
+          image: attr(button.querySelector('img'), [
+            'data-original', 'data-origin', 'data-lazy-src', 'data-src', 'src',
+          ]),
+        })).filter((item) => item.text);
+      const rows = Array.from(group.querySelectorAll('.expand-view-list > .expand-view-item'))
+        .map((row) => {
+          const label = text(row.querySelector('.item-label')) || attr(row.querySelector('.item-label'), ['title']);
+          const fragments = Array.from(row.querySelectorAll('.item-price-stock')).map(text).filter(Boolean);
+          const priceText = fragments.find((value) => /[¥￥]\s*\d/.test(value)) || '';
+          const stockText = fragments.find((value) => /库存\s*\d/.test(value)) || '';
+          return { dimensionName, text: label || '', priceText, stockText };
+        }).filter((item) => item.text);
+      return { dimensionName, options, rows };
+    }).filter((group) => group.dimensionName);
+    const skuOptions = skuGroups.flatMap((group) => group.options);
+    const domSkuDimensions = skuGroups.map((group) => ({
+      name: group.dimensionName,
+      values: group.options.length ? group.options.map((item) => item.text)
+        : group.rows.map((item) => item.text),
+    })).filter((dimension) => dimension.values.length);
+    const domSkuRows = skuGroups.flatMap((group) => group.rows);
 
     const priceTexts = all('[class*="price"], [class*="Price"], [class*="amount"]')
       .map(text).filter((value) => /[¥￥]|\d+(?:\.\d+)?/.test(value)).slice(0, 100);
@@ -302,6 +325,8 @@ export async function parse1688Product(page) {
       embeddedCandidates,
       attributes,
       skuOptions,
+      domSkuDimensions,
+      domSkuRows,
       priceTexts,
       bodyText: (document.body?.innerText || '').slice(0, 200000),
       sellerLinks: all([
@@ -424,17 +449,18 @@ export async function parse1688Product(page) {
     name: cleanText(sellerText) || null,
     url: embedded.sellerUrls?.[0] ?? sellerLink?.url ?? raw.sellerLinks[0]?.url ?? null,
   };
-  const inferredSkuRowsRaw = raw.skuOptions.flatMap((item) => {
-    const match = cleanText(item.text).match(/^(.+?)[¥￥]\s*(\d+(?:\.\d+)?).*?库存\s*(\d+)/);
-    return match ? [{ skuText: match[1].replace(/^尺码/, ''), price: Number(match[2]), stock: Number(match[3]) }] : [];
+  const inferredSkuRowsRaw = (raw.domSkuRows ?? []).flatMap((item) => {
+    const price = numberFrom(item.priceText);
+    const stock = numberFrom(item.stockText);
+    return item.text && price !== null ? [{ skuText: cleanText(item.text), price, stock,
+      dimensionName: cleanText(item.dimensionName) }] : [];
   });
   const inferredSkuRows = [...new Map(inferredSkuRowsRaw.map((row) => [
     `${row.skuText}\0${row.price}\0${row.stock}`, row,
   ])).values()];
   const sizeValues = unique(inferredSkuRows.map((row) => row.skuText), 100);
-  const colorValues = unique(raw.skuOptions
-    .filter((item) => item.image && cleanText(item.text) && cleanText(item.text) !== '颜色')
-    .map((item) => cleanText(item.text).replace(/^颜色/, '')), 100);
+  const colorOptions = raw.skuOptions.filter((item) => /^(?:颜色|color)$/i.test(cleanText(item.dimensionName)));
+  const colorValues = unique(colorOptions.map((item) => cleanText(item.text)), 100);
   const inferredDimensions = [
     ...(colorValues.length ? [{ name: 'Color', values: colorValues }] : []),
     ...(sizeValues.length ? [{ name: 'Size', values: sizeValues }] : []),
@@ -476,9 +502,11 @@ export async function parse1688Product(page) {
       reason: raw.gallerySnapshot?.reason || hydration.reason || null,
     },
     videos: [],
-    skuDimensions: (candidates.dimensions.length ? candidates.dimensions : inferredDimensions).slice(0, 50),
+    skuDimensions: ((raw.domSkuDimensions ?? []).length ? raw.domSkuDimensions
+      : candidates.dimensions.length ? candidates.dimensions : inferredDimensions).slice(0, 50),
     skuRows: (candidates.skuRows.length ? candidates.skuRows : inferredSkuRows).slice(0, MAX_SKU_ROWS),
     skuOptions: raw.skuOptions.slice(0, 200).map((item) => ({
+      dimensionName: cleanText(item.dimensionName),
       text: cleanText(item.text),
       image: normalizeImageUrl(item.image, raw.url),
     })),

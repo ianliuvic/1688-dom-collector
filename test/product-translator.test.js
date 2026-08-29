@@ -9,7 +9,7 @@ const detail = {
   offer_id: '1069771570442', title: '新款泳衣', description: '两件套', seller_name: '测试工厂',
   raw_data: {
     skuDimensions: [{ name: '颜色', values: ['黑色', '蓝色'] }, { name: '尺码', values: ['S', 'M'] }],
-    skuOptions: [{ text: '黑色', image: 'https://img/black.jpg' }],
+    skuOptions: [{ dimensionName: '颜色', text: '黑色', image: 'https://img/black.jpg' }],
     price: { textCandidates: ['2件起批'] },
   },
   attributes: [{ name: '面料', value: '聚酯纤维' }],
@@ -43,7 +43,7 @@ test('accepts a complete index-preserving translation', () => {
     attributes: [{ index: 0, name: 'Fabric', value: 'Polyester' }],
     skuDimensions: [{ index: 0, name: 'Color', values: ['Black', 'Blue'] },
       { index: 1, name: 'Size', values: ['S', 'M'] }],
-    skuOptions: [{ index: 0, text: 'Black', imageUrl: 'https://img/black.jpg' }],
+    skuOptions: [{ index: 0, dimensionName: '颜色', text: 'Black', imageUrl: 'https://img/black.jpg' }],
     skuRows: [{ index: 0, skuKey: 'black-S', skuText: 'Black S', options: { Color: 'Black', Size: 'S' } }],
     priceTextCandidates: ['Minimum order: 2 pieces'],
   };
@@ -57,7 +57,7 @@ test('rejects a translation that drops or changes SKU identity', () => {
     attributes: [{ index: 0, name: 'Fabric', value: 'Polyester' }],
     skuDimensions: [{ index: 0, name: 'Color', values: ['Black', 'Blue'] },
       { index: 1, name: 'Size', values: ['S', 'M'] }],
-    skuOptions: [{ index: 0, text: 'Black', imageUrl: 'https://img/changed.jpg' }],
+    skuOptions: [{ index: 0, dimensionName: '颜色', text: 'Black', imageUrl: 'https://img/changed.jpg' }],
     skuRows: [{ index: 0, skuKey: 'changed', skuText: 'Black S', options: {} }],
     priceTextCandidates: ['Minimum order: 2 pieces'],
   };

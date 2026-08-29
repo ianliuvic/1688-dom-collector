@@ -165,19 +165,29 @@ function buildSkuMatrix(detail, translation) {
   });
 }
 
-function buildColorOptions(detail, translation, publishingImages) {
+function normalizedImageKey(value) {
+  return clean(value).replace(/[?#].*$/, '')
+    .replace(/_\.webp$/i, '')
+    .replace(/_\d+x\d+[^/]*$/i, '');
+}
+
+function buildColorOptions(detail, translation) {
   const dimension = findDimension(translation, ['color', '颜色']);
   const colors = unique(dimension?.values ?? []);
   const optionImages = new Map();
   for (const option of translation?.sku_options ?? []) {
+    const dimensionName = clean(option?.dimensionName).toLowerCase();
+    if (dimensionName && !['color', '颜色'].includes(dimensionName)) continue;
     const text = clean(option?.text).replace(/^color\s*:\s*/i, '');
     const imageUrl = clean(option?.imageUrl);
     if (text && imageUrl && !/\b(stock|size|\u5e93\u5b58|\u5c3a\u7801)\b/i.test(text)) optionImages.set(text, imageUrl);
   }
-  const defaultImage = publishingImages[0] ?? null;
+  const skuImages = new Map((detail.images ?? [])
+    .filter((image) => image.image_type === 'sku')
+    .map((image) => [normalizedImageKey(image.source_url), image]));
   return colors.map((label, index) => {
     const imageUrl = optionImages.get(label) || '';
-    const matched = publishingImages.find((image) => clean(image.source_url) === imageUrl) ?? defaultImage;
+    const matched = skuImages.get(normalizedImageKey(imageUrl)) ?? null;
     return {
       label,
       value: `color-${index + 1}`,
@@ -197,7 +207,12 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   const publishingImages = selectPublishingImages(detail, translation, options.imageMode);
   const sizeDimension = findDimension(translation, ['size', '尺码']);
   const sizes = unique(sizeDimension?.values ?? []);
-  const colorOptions = buildColorOptions(detail, translation, publishingImages);
+  const colorOptions = buildColorOptions(detail, translation);
+  const swatchImageIds = new Set(colorOptions.map((color) => color.image_source_id).filter(Boolean));
+  const swatchImages = options.imageMode === 'main_only' ? []
+    : (detail.images ?? []).filter((image) => swatchImageIds.has(String(image.id)));
+  const uploadImages = [...publishingImages, ...swatchImages]
+    .filter((image, index, values) => values.findIndex((candidate) => String(candidate.id) === String(image.id)) === index);
   const skuMatrix = buildSkuMatrix(detail, translation);
   const selection = resolveMerchandisingSelection({ options, merchandising, taxonomies });
   const material = selection.material || attributes.get('fabric composition')
@@ -292,7 +307,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
     },
   };
 
-  return { externalId, styleNo, publishingImages, payload };
+  return { externalId, styleNo, publishingImages, swatchImages, uploadImages, payload };
 }
 
 function extensionForMime(mimeType) {
@@ -380,7 +395,7 @@ export async function publishProductToWordPress({ detail, translation, options =
   const wp = wordpressClient(config);
   const media = [];
 
-  for (const [index, image] of draft.publishingImages.entries()) {
+  for (const [index, image] of draft.uploadImages.entries()) {
     if (!image.storage_path) continue;
     const absolutePath = resolveStorageFile(config.storagePath, image.storage_path);
     const binary = await fs.readFile(absolutePath);

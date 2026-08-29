@@ -43,7 +43,7 @@ export function buildProductTranslationSource(detail) {
       index, name: item?.name ?? '', values: Array.isArray(item?.values) ? item.values : [],
     })),
     skuOptions: (raw.skuOptions || []).map((item, index) => ({
-      index, text: item?.text ?? '', imageUrl: item?.image ?? null,
+      index, dimensionName: item?.dimensionName ?? '', text: item?.text ?? '', imageUrl: item?.image ?? null,
     })),
     skuRows: (detail.skus || []).map((item, index) => ({
       index, skuKey: item.sku_key ?? '', skuText: item.sku_text ?? '',
@@ -128,7 +128,9 @@ export function validateProductTranslation(source, translated) {
     }
   }
   for (const [index, item] of translated.skuOptions.entries()) {
-    if (typeof item.text !== 'string' || item.imageUrl !== source.skuOptions[index].imageUrl) {
+    if (typeof item.text !== 'string'
+        || item.dimensionName !== source.skuOptions[index].dimensionName
+        || item.imageUrl !== source.skuOptions[index].imageUrl) {
       throw new Error(`Translation response changed SKU option identity ${index}.`);
     }
   }
@@ -195,7 +197,8 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
     sellerName: '',
     attributes: source.attributes.map((item) => ({ index: item.index, name: '', value: '' })),
     skuDimensions: source.skuDimensions.map((item) => ({ index: item.index, name: '', values: item.values.map(() => '') })),
-    skuOptions: source.skuOptions.map((item) => ({ index: item.index, text: '', imageUrl: item.imageUrl })),
+    skuOptions: source.skuOptions.map((item) => ({ index: item.index,
+      dimensionName: item.dimensionName, text: '', imageUrl: item.imageUrl })),
     skuRows: source.skuRows.map((item) => ({ index: item.index, skuKey: item.skuKey, skuText: '', options: {} })),
     priceTextCandidates: source.priceTextCandidates.map(() => ''),
   };
@@ -237,7 +240,7 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
   }
 
   const translationPrompt = `你是专业的泳装和服装B2B商品数据翻译器。把输入JSON中的属性、SKU和价格文字准确翻译为自然英文，只返回严格JSON。
-要求：严格使用给定输出结构；所有数组数量、index、skuKey、imageUrl和原始顺序保持不变。保留款号、品牌名、数字、S/M/L/XL、罩杯、单位、货币和行业缩写；不得换算价格、库存、尺码或单位。SKU options对象的键和值都翻译，skuText翻译，skuKey原样保留。颜色、印花、部件、单件/套装、现货/预售按原意翻译。空字符串保持为空。不要输出Markdown或JSON之外的内容。
+要求：严格使用给定输出结构；所有数组数量、index、skuKey、imageUrl、dimensionName和原始顺序保持不变。保留款号、品牌名、数字、S/M/L/XL、罩杯、单位、货币和行业缩写；不得换算价格、库存、尺码或单位。SKU options中的text翻译，dimensionName和imageUrl原样保留；SKU rows的options对象键和值都翻译，skuText翻译，skuKey原样保留。颜色、印花、部件、单件/套装、现货/预售按原意翻译。空字符串保持为空。不要输出Markdown或JSON之外的内容。
 输出结构：${JSON.stringify(translationShape)}
 输入JSON：${JSON.stringify({ sellerName: source.sellerName, attributes: source.attributes,
     skuDimensions: source.skuDimensions, skuOptions: source.skuOptions,

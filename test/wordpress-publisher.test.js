@@ -27,7 +27,7 @@ const translation = {
     { skuKey: 'S', skuText: 'S', options: { Size: 'S', Color: 'As Picture' } },
     { skuKey: 'M', skuText: 'M', options: { Size: 'M', Color: 'As Picture' } },
   ],
-  sku_options: [{ text: 'As Picture', imageUrl: 'https://img/2.webp' }],
+  sku_options: [{ dimensionName: 'Color', text: 'As Picture', imageUrl: 'https://img/sku.webp' }],
   image_sources: [{ imageId: '1' }, { imageId: '2' }],
 };
 
@@ -55,6 +55,30 @@ test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
   assert.equal(result.payload.meta.style, 'Bikini Set');
   assert.equal(result.payload.meta.source_currency, 'CNY');
   assert.equal(result.payload.meta.source_price_min, 23.5);
+});
+
+test('maps each color to its own saved SKU image without adding swatches to the Gallery', () => {
+  const variantDetail = {
+    ...detail,
+    images: [...detail.images,
+      { id: '4', image_type: 'sku', sort_order: 0, source_url: 'https://img/black.jpg', storage_path: '/app/storage/product-images/1/black.jpg', mime_type: 'image/jpeg' },
+      { id: '5', image_type: 'sku', sort_order: 1, source_url: 'https://img/blue.jpg', storage_path: '/app/storage/product-images/1/blue.jpg', mime_type: 'image/jpeg' }],
+  };
+  const variantTranslation = {
+    ...translation,
+    sku_dimensions: [{ name: 'Color', values: ['Black', 'Blue'] }, { name: 'Size', values: ['S', 'M'] }],
+    sku_options: [
+      { dimensionName: 'Color', text: 'Black', imageUrl: 'https://img/black.jpg' },
+      { dimensionName: 'Color', text: 'Blue', imageUrl: 'https://img/blue.jpg' },
+    ],
+  };
+  const result = buildWordPressProductDraft({ detail: variantDetail, translation: variantTranslation,
+    options: { status: 'publish', styleNo: 'SWBK150', categoryIds: [35], primaryCategoryId: 35 },
+    taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] } });
+  assert.deepEqual(result.payload.colors.colors.map((color) => color.image_source_id), ['4', '5']);
+  assert.equal(result.publishingImages.length, 3);
+  assert.deepEqual(result.swatchImages.map((image) => image.id), ['4', '5']);
+  assert.equal(result.uploadImages.length, 5);
 });
 
 test('can restrict an emergency WordPress update to the trusted main image', () => {
