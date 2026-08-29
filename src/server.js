@@ -25,8 +25,9 @@ const config = {
   clearStaleBrowserLocks: process.env.CLEAR_STALE_BROWSER_LOCKS === 'true',
   dashscopeApiKey: process.env.DASHSCOPE_API_KEY,
   dashscopeBaseUrl: process.env.DASHSCOPE_BASE_URL,
-  visionModel: process.env.DASHSCOPE_VISION_MODEL || 'qwen3-vl-plus',
+  visionModel: process.env.DASHSCOPE_VISION_MODEL || 'qwen3.8-max',
   complexModel: process.env.DASHSCOPE_COMPLEX_MODEL || 'qwen3.8-max',
+  translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -142,7 +143,8 @@ app.post('/api/product-details/:id/translations', { preHandler: requireApiKey },
     try {
       const translated = await translateProductDetail({ detail, targetLanguage, config: {
         apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
-        complexModel: config.complexModel,
+        complexModel: config.complexModel, storagePath: config.storagePath,
+        maxTranslationImages: config.translationImageLimit,
       } });
       const saved = await db.saveProductTranslation(detail.id, translated);
       job.translationId = saved.id;

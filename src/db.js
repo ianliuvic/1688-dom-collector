@@ -220,6 +220,9 @@ export function createDatabase(databaseUrl) {
         price_text_candidates jsonb NOT NULL DEFAULT '[]'::jsonb,
         source_data jsonb NOT NULL DEFAULT '{}'::jsonb,
         translated_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+        image_sources jsonb NOT NULL DEFAULT '[]'::jsonb,
+        image_count integer NOT NULL DEFAULT 0,
+        naming_strategy text NOT NULL DEFAULT 'visual_rewrite',
         usage jsonb,
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now(),
@@ -227,6 +230,12 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS product_detail_translations_product_idx
         ON product_detail_translations(product_detail_id, target_language, created_at DESC);
+      ALTER TABLE product_detail_translations
+        ADD COLUMN IF NOT EXISTS image_sources jsonb NOT NULL DEFAULT '[]'::jsonb;
+      ALTER TABLE product_detail_translations
+        ADD COLUMN IF NOT EXISTS image_count integer NOT NULL DEFAULT 0;
+      ALTER TABLE product_detail_translations
+        ADD COLUMN IF NOT EXISTS naming_strategy text NOT NULL DEFAULT 'visual_rewrite';
     `);
   }
 
@@ -509,14 +518,17 @@ export function createDatabase(databaseUrl) {
     const saved = await pool.query(`INSERT INTO product_detail_translations
       (product_detail_id, source_language, target_language, model, source_hash,
        title, description, seller_name, attributes, sku_dimensions, sku_options,
-       sku_rows, price_text_candidates, source_data, translated_data, usage)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+       sku_rows, price_text_candidates, source_data, translated_data, image_sources,
+       image_count, naming_strategy, usage)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
       ON CONFLICT (product_detail_id, target_language, source_hash, model)
       DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description,
         seller_name=EXCLUDED.seller_name, attributes=EXCLUDED.attributes,
         sku_dimensions=EXCLUDED.sku_dimensions, sku_options=EXCLUDED.sku_options,
         sku_rows=EXCLUDED.sku_rows, price_text_candidates=EXCLUDED.price_text_candidates,
         source_data=EXCLUDED.source_data, translated_data=EXCLUDED.translated_data,
+        image_sources=EXCLUDED.image_sources, image_count=EXCLUDED.image_count,
+        naming_strategy=EXCLUDED.naming_strategy,
         usage=EXCLUDED.usage, updated_at=now()
       RETURNING *`, [productDetailId, result.sourceLanguage, result.targetLanguage,
       result.model, result.sourceHash, translated.title, translated.description,
@@ -524,7 +536,8 @@ export function createDatabase(databaseUrl) {
       JSON.stringify(translated.skuDimensions), JSON.stringify(translated.skuOptions),
       JSON.stringify(translated.skuRows), JSON.stringify(translated.priceTextCandidates),
       JSON.stringify(result.source), JSON.stringify(translated),
-      result.usage ? JSON.stringify(result.usage) : null]);
+      JSON.stringify(result.imageSources ?? []), result.imageSources?.length ?? 0,
+      result.namingStrategy ?? 'visual_rewrite', result.usage ? JSON.stringify(result.usage) : null]);
     return saved.rows[0];
   }
 

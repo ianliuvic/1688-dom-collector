@@ -37,7 +37,7 @@ export async function analyzeProductImage({ imagePath, sourceUrl = null, offerId
     method: 'POST',
     headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({
-      model: config.model || 'qwen3-vl-plus',
+      model: config.model || 'qwen3.8-max',
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: dataUrl } }] }],
       temperature: 0.1,
       max_tokens: 1200,
@@ -49,5 +49,5 @@ export async function analyzeProductImage({ imagePath, sourceUrl = null, offerId
   try { payload = JSON.parse(body); } catch { payload = { raw: body.slice(0, 2000) }; }
   if (!response.ok) throw new Error(`DashScope vision request failed (${response.status}).`);
   const content = parseContent(payload.choices?.[0]?.message?.content);
-  return { model: config.model || 'qwen3-vl-plus', sourceUrl, offerId, imagePath: resolved, prompt, content, parsed: parseJson(content), usage: payload.usage ?? null };
+  return { model: config.model || 'qwen3.8-max', sourceUrl, offerId, imagePath: resolved, prompt, content, parsed: parseJson(content), usage: payload.usage ?? null };
 }

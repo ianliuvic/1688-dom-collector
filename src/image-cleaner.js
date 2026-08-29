@@ -57,7 +57,7 @@ export async function analyzeGalleryImages({ images, config }) {
 5. has_chinese_text：图片画面中确实可见中文字符。
 不要根据商品相同就推测其他属性，不可见信息不要编造。图片编号从0开始。\n${files.map((_, i) => `图片编号 ${i}`).join('、')}`;
   const content = [{ type: 'text', text: prompt }, ...files.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } }))];
-  const visionModel = config.visionModel || 'qwen3-vl-plus';
+  const visionModel = config.visionModel || 'qwen3.8-max';
   const complexModel = config.complexModel || 'qwen3.8-max';
   const qualityResult = await callVision(content, config, { model: visionModel, maxTokens: 2500, label: 'basic image recognition' });
   const crossImagePrompt = `你是商品Gallery跨图取证审计器。基础识图已由另一模型处理；你只完成需要跨图片推理的两项，并返回严格JSON：

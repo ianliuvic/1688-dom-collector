@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 const ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+const TITLE_NOISE_RE = /\b(?:20\d{2}|new arrival|new style|hot sale|best seller|cross[- ]border|aliexpress|amazon|export|wholesale)\b/i;
+const VARIANT_APPEARANCE_RE = /\b(?:black|white|red|blue|green|pink|yellow|purple|orange|brown|beige|navy|floral|flower|printed|print|patterned|pattern|striped|stripe|polka[ -]?dot|leopard|abstract|color(?:ed|ful)?)\b/i;
 
 function endpointFrom(baseUrl) {
   const base = String(baseUrl || ENDPOINT).replace(/\/+$/, '');
@@ -53,6 +57,45 @@ export function translationSourceHash(source) {
   return crypto.createHash('sha256').update(stableJson(source)).digest('hex');
 }
 
+export function selectTranslationImages(detail, limit = 6) {
+  const selected = (detail.images || []).filter((item) => ['main', 'gallery'].includes(item.image_type))
+    .sort((a, b) => {
+      if (a.image_type === 'main' && b.image_type !== 'main') return -1;
+      if (b.image_type === 'main' && a.image_type !== 'main') return 1;
+      return Number(a.sort_order || 0) - Number(b.sort_order || 0);
+    });
+  const seen = new Set();
+  return selected.filter((item) => {
+    const key = item.source_url || item.storage_path;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, Math.min(Math.max(Number(limit) || 6, 1), 8));
+}
+
+function englishWordCount(value) {
+  return String(value || '').trim().split(/\s+/).filter(Boolean).length;
+}
+
+export function validateGeneratedCatalogCopy(translated) {
+  const title = String(translated.title || '').trim();
+  const description = String(translated.description || '').trim();
+  const titleWords = englishWordCount(title);
+  const descriptionWords = englishWordCount(description);
+  if (/[\u3400-\u9fff]/.test(title) || titleWords < 3 || titleWords > 12 || title.length > 100) {
+    throw new Error('Generated English title is not a concise 3 to 12 word product name.');
+  }
+  if (TITLE_NOISE_RE.test(title) || VARIANT_APPEARANCE_RE.test(title)) {
+    throw new Error('Generated English title contains year, marketplace, sales, color, or print keywords.');
+  }
+  if (/[\u3400-\u9fff]/.test(description) || descriptionWords < 35 || descriptionWords > 120) {
+    throw new Error('Generated English description must be a 35 to 120 word English paragraph.');
+  }
+  if (VARIANT_APPEARANCE_RE.test(description)) {
+    throw new Error('Generated English description contains color or print-specific language.');
+  }
+}
+
 function hasMatchingIndices(sourceItems, translatedItems) {
   if (!Array.isArray(translatedItems) || translatedItems.length !== sourceItems.length) return false;
   return translatedItems.every((item, index) => Number(item?.index) === index);
@@ -98,7 +141,43 @@ export function validateProductTranslation(source, translated) {
   if (translated.priceTextCandidates.some((value) => typeof value !== 'string')) {
     throw new Error('Translation response contains a non-text price candidate.');
   }
+  validateGeneratedCatalogCopy(translated);
   return translated;
+}
+
+async function loadTranslationImages(detail, config) {
+  const storageRoot = path.resolve(config.storagePath || '/app/storage');
+  const selected = selectTranslationImages(detail, config.maxTranslationImages || 6);
+  const loaded = [];
+  for (const [index, item] of selected.entries()) {
+    let url = null;
+    let transport = null;
+    if (item.storage_path) {
+      const imagePath = path.resolve(item.storage_path);
+      if (imagePath.startsWith(`${storageRoot}${path.sep}`)) {
+        try {
+          const bytes = await fs.readFile(imagePath);
+          if (bytes.length <= 15 * 1024 * 1024) {
+            const ext = path.extname(imagePath).toLowerCase();
+            const mime = item.mime_type || ({ '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+              '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' })[ext] || 'image/jpeg';
+            url = `data:${mime};base64,${bytes.toString('base64')}`;
+            transport = 'persistent_storage';
+          }
+        } catch { /* fall back to the retained source URL */ }
+      }
+    }
+    if (!url && /^https:\/\//i.test(item.source_url || '')) {
+      url = item.source_url;
+      transport = 'source_url';
+    }
+    if (!url) continue;
+    loaded.push({ index, imageId: item.id ?? null, imageType: item.image_type,
+      sortOrder: item.sort_order ?? 0, sourceUrl: item.source_url || null,
+      storagePath: item.storage_path || null, transport, url });
+  }
+  if (!loaded.length) throw new Error('No saved main or Gallery image is available for visual product naming.');
+  return loaded;
 }
 
 export async function translateProductDetail({ detail, targetLanguage = 'en', config }) {
@@ -106,6 +185,7 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
   if (targetLanguage !== 'en') throw new Error('Only English translation is currently supported.');
   const source = buildProductTranslationSource(detail);
   const model = config.complexModel || 'qwen3.8-max';
+  const images = await loadTranslationImages(detail, config);
   const outputShape = {
     title: '', description: '', sellerName: '',
     attributes: source.attributes.map((item) => ({ index: item.index, name: '', value: '' })),
@@ -114,30 +194,49 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
     skuRows: source.skuRows.map((item) => ({ index: item.index, skuKey: item.skuKey, skuText: '', options: {} })),
     priceTextCandidates: source.priceTextCandidates.map(() => ''),
   };
-  const prompt = `你是专业的泳装和服装B2B商品数据翻译器。把输入JSON中的中文商品文本准确翻译为自然、简洁、适合国际批发目录的英文，并只返回严格JSON。
+  const prompt = `你是专业的泳装和服装B2B商品内容编辑与翻译器。结合多张商品Gallery图片理解产品，并只返回严格JSON。
 要求：
 1. 严格使用给定输出结构；所有数组数量、index、skuKey、imageUrl和原始顺序必须保持不变。
-2. 不添加卖点，不猜测材质、工艺、品牌、颜色或产品组成；原文含糊时忠实翻译。
-3. 保留款号、品牌名、数字、S/M/L/XL、罩杯、单位、货币和行业缩写；不要换算价格、库存、尺码或单位。
-4. SKU options对象的键和值都翻译；skuText翻译，但skuKey原样保留。
-5. 颜色、印花、部件、单件/套装、现货/预售等用电商行业自然英文表达。
-6. 空字符串保持空字符串。不要输出Markdown、解释、原文对照或JSON之外的内容。
+2. title不是中文标题直译。中文标题可能是年份、平台、外贸、热销和关键词堆叠，只能作为弱参考；根据全部图片重新命名为3至12个英文单词的稳定产品名称。不得含年份、New Arrival、Hot Sale、Cross-Border、AliExpress、Amazon、Export、Wholesale、颜色或印花描述。
+3. description必须重写为35至120个英文单词的单段产品描述。综合多张图片，只描述整个产品稳定的可见特点，例如品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁和套装组成。不得描述任何颜色、印花、图案或单个SKU；不得写促销词、年份、平台、SEO关键词、穿着效果或不可见卖点。
+4. 图片无法证明的材质、工艺、功能、品牌和产品组成不得编造；只有输入属性明确提供时，其他翻译字段才可忠实翻译这些信息。
+5. 保留款号、品牌名、数字、S/M/L/XL、罩杯、单位、货币和行业缩写；不要换算价格、库存、尺码或单位。
+6. attributes、SKU dimensions/options/rows和价格文字按原意准确翻译；SKU options对象的键和值都翻译，但skuKey原样保留。
+7. 空字符串保持空字符串。不要输出Markdown、解释、原文对照或JSON之外的内容。
 目标语言：English。
 输出结构：${JSON.stringify(outputShape)}
 输入JSON：${JSON.stringify(source)}`;
-  const response = await fetch(endpointFrom(config.baseUrl), {
-    method: 'POST',
-    headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0, max_tokens: 12000 }),
-    signal: AbortSignal.timeout(300000),
-  });
-  if (!response.ok) throw new Error(`DashScope product translation failed (${response.status}).`);
-  const payload = await response.json();
-  const raw = contentText(payload.choices?.[0]?.message?.content);
-  const translated = validateProductTranslation(source, parseJson(raw));
+  const imageContent = images.flatMap((image) => ([
+    { type: 'text', text: `商品Gallery图片 ${image.index}` },
+    { type: 'image_url', image_url: { url: image.url } },
+  ]));
+  async function requestTranslation(correction = '') {
+    const content = [{ type: 'text', text: correction ? `${prompt}\n上一次输出未通过校验：${correction}。请完整重新输出。` : prompt },
+      ...imageContent];
+    const response = await fetch(endpointFrom(config.baseUrl), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: 12000 }),
+      signal: AbortSignal.timeout(300000),
+    });
+    if (!response.ok) throw new Error(`DashScope product translation failed (${response.status}).`);
+    const payload = await response.json();
+    const raw = contentText(payload.choices?.[0]?.message?.content);
+    return { payload, raw };
+  }
+  let attempt = await requestTranslation();
+  let translated;
+  try {
+    translated = validateProductTranslation(source, parseJson(attempt.raw));
+  } catch (error) {
+    attempt = await requestTranslation(error.message);
+    translated = validateProductTranslation(source, parseJson(attempt.raw));
+  }
+  const imageSources = images.map(({ url, ...image }) => image);
   return {
-    schemaVersion: 1, sourceLanguage: 'zh-CN', targetLanguage, model,
-    sourceHash: translationSourceHash(source), source, translated,
-    usage: payload.usage ?? null,
+    schemaVersion: 2, sourceLanguage: 'zh-CN', targetLanguage, model,
+    namingStrategy: 'visual_rewrite', imageSources,
+    sourceHash: translationSourceHash({ source, imageSources }), source, translated,
+    usage: attempt.payload.usage ?? null,
   };
 }

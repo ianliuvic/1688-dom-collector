@@ -154,7 +154,7 @@ export async function auditProductSkus({ product, skuImages = [], galleryImages 
   return {
     schemaVersion: 1,
     mode: 'audit_only',
-    models: { vision: config.visionModel || 'qwen3-vl-plus', complex: result.model },
+    models: { vision: config.visionModel || 'qwen3.8-max', complex: result.model },
     auditStatus: requiresReview ? 'issues_detected' : 'clear',
     summary: { ...modelSummary, requiresReview },
     source: { offerId: product.offerId ?? null, title: product.title ?? null,

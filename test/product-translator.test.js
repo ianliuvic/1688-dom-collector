@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildProductTranslationSource, translationSourceHash, validateProductTranslation,
+  buildProductTranslationSource, selectTranslationImages, translationSourceHash,
+  validateGeneratedCatalogCopy, validateProductTranslation,
 } from '../src/product-translator.js';
 
 const detail = {
@@ -13,7 +14,14 @@ const detail = {
   },
   attributes: [{ name: '面料', value: '聚酯纤维' }],
   skus: [{ sku_key: 'black-S', sku_text: '黑色 S', option_data: { 颜色: '黑色', 尺码: 'S' } }],
+  images: [
+    { id: 2, image_type: 'gallery', sort_order: 1, source_url: 'https://img/2.jpg' },
+    { id: 1, image_type: 'main', sort_order: 0, source_url: 'https://img/1.jpg' },
+    { id: 3, image_type: 'sku', sort_order: 0, source_url: 'https://img/sku.jpg' },
+  ],
 };
+
+const description = 'This two-piece bikini set features a triangle top with adjustable shoulder straps and a secure back tie. The coordinating bottoms have a streamlined silhouette with moderate coverage and clean edge finishing. Its balanced construction keeps the design versatile for a broad swimwear assortment.';
 
 test('builds a translation source while preserving product identities', () => {
   const source = buildProductTranslationSource(detail);
@@ -23,10 +31,15 @@ test('builds a translation source while preserving product identities', () => {
   assert.equal(translationSourceHash(source), translationSourceHash(buildProductTranslationSource(detail)));
 });
 
+test('selects main and Gallery images in display order while excluding SKU images', () => {
+  const images = selectTranslationImages(detail);
+  assert.deepEqual(images.map((item) => item.id), [1, 2]);
+});
+
 test('accepts a complete index-preserving translation', () => {
   const source = buildProductTranslationSource(detail);
   const translated = {
-    title: 'New Swimsuit', description: 'Two-piece Set', sellerName: 'Test Factory',
+    title: "Women's Tie-Back Triangle Bikini Set", description, sellerName: 'Test Factory',
     attributes: [{ index: 0, name: 'Fabric', value: 'Polyester' }],
     skuDimensions: [{ index: 0, name: 'Color', values: ['Black', 'Blue'] },
       { index: 1, name: 'Size', values: ['S', 'M'] }],
@@ -40,7 +53,7 @@ test('accepts a complete index-preserving translation', () => {
 test('rejects a translation that drops or changes SKU identity', () => {
   const source = buildProductTranslationSource(detail);
   const invalid = {
-    title: 'New Swimsuit', description: 'Two-piece Set', sellerName: 'Test Factory',
+    title: "Women's Tie-Back Triangle Bikini Set", description, sellerName: 'Test Factory',
     attributes: [{ index: 0, name: 'Fabric', value: 'Polyester' }],
     skuDimensions: [{ index: 0, name: 'Color', values: ['Black', 'Blue'] },
       { index: 1, name: 'Size', values: ['S', 'M'] }],
@@ -49,4 +62,15 @@ test('rejects a translation that drops or changes SKU identity', () => {
     priceTextCandidates: ['Minimum order: 2 pieces'],
   };
   assert.throws(() => validateProductTranslation(source, invalid), /identity/);
+});
+
+test('rejects keyword-stuffed titles and color or print-specific descriptions', () => {
+  assert.throws(() => validateGeneratedCatalogCopy({
+    title: '2027 Hot Sale Printed Bikini',
+    description,
+  }), /keywords/);
+  assert.throws(() => validateGeneratedCatalogCopy({
+    title: "Women's Tie-Back Triangle Bikini Set",
+    description: `${description} It comes in a floral print.`,
+  }), /color or print/);
 });
