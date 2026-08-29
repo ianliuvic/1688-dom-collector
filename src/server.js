@@ -35,6 +35,8 @@ const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 1024 * 1024 });
 const db = createDatabase(config.databaseUrl);
 const collector = createCollector(config);
 let workerRunning = true;
+const skuAuditJobs = new Map();
+let skuAuditQueue = Promise.resolve();
 
 function requireApiKey(request, reply, done) {
   const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
@@ -202,23 +204,47 @@ app.post('/api/sku-audit/live', { preHandler: requireApiKey }, async (request, r
     || offerIds.some((offerId) => !/^\d{10,13}$/.test(String(offerId)))) {
     return reply.code(400).send({ error: 'Provide 1 to 5 valid 1688 detail URLs or numeric offerIds.' });
   }
-  const results = [];
-  for (const url of urls) {
+  const id = crypto.randomUUID();
+  const job = { id, status: 'queued', urls, createdAt: new Date().toISOString(),
+    startedAt: null, completedAt: null, results: null, error: null };
+  skuAuditJobs.set(id, job);
+  while (skuAuditJobs.size > 100) skuAuditJobs.delete(skuAuditJobs.keys().next().value);
+  skuAuditQueue = skuAuditQueue.catch(() => {}).then(async () => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    const results = [];
     try {
-      const source = await collector.extractProductSkuAuditInput(url);
-      if (source.status !== 'completed') { results.push({ url, ...source }); continue; }
-      const audit = await auditProductSkus({
-        product: source.product, skuImages: source.skuImages, galleryImages: source.galleryImages,
-        config: { apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
-          visionModel: config.visionModel, complexModel: config.complexModel },
-      });
-      results.push({ url, offerId: source.offerId, title: source.title,
-        skuImageCount: source.skuImages.length, galleryContextCount: source.galleryImages.length, ...audit });
+      for (const url of urls) {
+        try {
+          const source = await collector.extractProductSkuAuditInput(url);
+          if (source.status !== 'completed') { results.push({ url, ...source }); continue; }
+          const audit = await auditProductSkus({
+            product: source.product, skuImages: source.skuImages, galleryImages: source.galleryImages,
+            config: { apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+              visionModel: config.visionModel, complexModel: config.complexModel },
+          });
+          results.push({ url, offerId: source.offerId, title: source.title,
+            skuImageCount: source.skuImages.length, galleryContextCount: source.galleryImages.length, ...audit });
+        } catch (error) {
+          results.push({ url, status: 'failed', error: error.message });
+        }
+      }
+      job.results = results;
+      job.status = results.every((item) => item.status === 'failed') ? 'failed' : 'completed';
+      job.error = job.status === 'failed' ? 'All requested audits failed.' : null;
     } catch (error) {
-      results.push({ url, status: 'failed', error: error.message });
+      job.status = 'failed';
+      job.error = error.message;
+    } finally {
+      job.completedAt = new Date().toISOString();
     }
-  }
-  return { results };
+  });
+  return reply.code(202).send(job);
+});
+
+app.get('/api/sku-audit/jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = skuAuditJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
 app.post('/api/plugin-session/check', { preHandler: requireApiKey }, async (_request, reply) => {

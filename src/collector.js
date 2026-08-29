@@ -514,21 +514,20 @@ export function createCollector({
         return `data:${mime};base64,${bytes.toString('base64')}`;
       } catch { return null; }
     }
-    const skuImages = [];
     const seenSkuUrls = new Set();
+    const skuImageInputs = [];
     for (const [optionIndex, option] of (data.skuOptions || []).entries()) {
       if (!option.image || seenSkuUrls.has(option.image)) continue;
       seenSkuUrls.add(option.image);
-      const dataUrl = await readImage(option.image);
-      if (dataUrl) skuImages.push({ kind: 'sku', optionIndex, optionText: option.text || '',
-        sourceUrl: option.image, dataUrl });
+      skuImageInputs.push({ kind: 'sku', optionIndex, optionText: option.text || '', sourceUrl: option.image });
     }
+    const skuImages = (await Promise.all(skuImageInputs.map(async (item) => ({
+      ...item, dataUrl: await readImage(item.sourceUrl),
+    })))).filter((item) => item.dataUrl);
     const galleryUrls = [...new Set([data.mainImage, ...(data.images || [])].filter(Boolean))].slice(0, 4);
-    const galleryImages = [];
-    for (const [index, sourceUrl] of galleryUrls.entries()) {
-      const dataUrl = await readImage(sourceUrl);
-      if (dataUrl) galleryImages.push({ kind: 'gallery', index, sourceUrl, dataUrl });
-    }
+    const galleryImages = (await Promise.all(galleryUrls.map(async (sourceUrl, index) => ({
+      kind: 'gallery', index, sourceUrl, dataUrl: await readImage(sourceUrl),
+    })))).filter((item) => item.dataUrl);
     return { status: 'completed', finalUrl: inspected.finalUrl, title: inspected.title,
       offerId: data.offerId, product: data, skuImages, galleryImages };
   }
