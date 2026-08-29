@@ -328,8 +328,22 @@ function wordpressPublishOptions(body = {}) {
     tagMode: ['auto', 'manual'].includes(body.tagMode) ? body.tagMode : '',
     primaryCategoryId: Number(body.primaryCategoryId) || 0,
     material: typeof body.material === 'string' ? body.material : '',
+    imageMode: body.imageMode === 'main_only' ? 'main_only' : 'translated',
   };
 }
+
+app.post('/api/product-details/:id/gallery-debug', {
+  preHandler: [requireApiKey, requireCollectorMode],
+}, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  try {
+    return await collector.inspectProductImageDom(detail.source_url);
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: detail.id }, 'Gallery DOM inspection failed');
+    return reply.code(502).send({ error: 'gallery_debug_failed', message: error.message });
+  }
+});
 
 app.get('/api/product-details/:id/wordpress', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);

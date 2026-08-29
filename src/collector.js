@@ -513,6 +513,44 @@ export function createCollector({
     return { status: 'completed', finalUrl, title, data };
   }
 
+  // Read image DOM structure for parser diagnostics. This does not save data,
+  // download images, click controls, or modify the product record.
+  async function inspectProductImageDom(url) {
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(5000);
+    const finalUrl = page.url();
+    const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    sessionState = classifySession(finalUrl, bodyText);
+    lastCheckedAt = new Date().toISOString();
+    if (sessionState === 'requires_auth') return { status: 'requires_auth', finalUrl, images: [] };
+    const images = await page.evaluate(() => Array.from(document.images).slice(0, 300).map((image, index) => {
+      const sources = {};
+      for (const name of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-origin',
+        'data-ks-lazyload', 'data-image', 'data-image-url', 'srcset']) {
+        const value = image.getAttribute(name);
+        if (value) sources[name] = value;
+      }
+      const ancestors = [];
+      let node = image;
+      for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+        ancestors.push({ tag: node.tagName, id: node.id || '', className: String(node.className || '').slice(0, 500) });
+      }
+      const rect = image.getBoundingClientRect();
+      return {
+        index,
+        sources,
+        alt: image.alt || '',
+        title: image.title || '',
+        naturalWidth: image.naturalWidth || 0,
+        naturalHeight: image.naturalHeight || 0,
+        renderedWidth: Math.round(rect.width),
+        renderedHeight: Math.round(rect.height),
+        ancestors,
+      };
+    }));
+    return { status: 'completed', finalUrl, images };
+  }
+
   // Read product images into memory through the logged-in browser context; no files or jobs are created.
   async function extractProductImagesInMemory(url) {
     const inspected = await inspectProduct(url);
@@ -581,6 +619,7 @@ export function createCollector({
     extractProductImagesInMemory: (...args) => withOperation(() => extractProductImagesInMemory(...args)),
     extractProductSkuAuditInput: (...args) => withOperation(() => extractProductSkuAuditInput(...args)),
     inspectProduct: (...args) => withOperation(() => inspectProduct(...args)),
+    inspectProductImageDom: (...args) => withOperation(() => inspectProductImageDom(...args)),
     getSessionStatus,
   };
 }

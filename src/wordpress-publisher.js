@@ -102,7 +102,7 @@ function optionValue(options, names) {
   return '';
 }
 
-function selectPublishingImages(detail, translation) {
+function selectPublishingImages(detail, translation, imageMode = 'translated') {
   const available = new Map((detail.images ?? []).map((image) => [String(image.id), image]));
   const translatedSources = translation?.image_sources ?? [];
   const selected = translatedSources
@@ -115,6 +115,11 @@ function selectPublishingImages(detail, translation) {
       if (a.image_type !== b.image_type) return a.image_type === 'main' ? -1 : 1;
       return Number(a.sort_order) - Number(b.sort_order);
     });
+
+  if (imageMode === 'main_only') {
+    const main = fallback.find((image) => image.image_type === 'main') ?? fallback[0];
+    return main ? [main] : [];
+  }
 
   const source = selected.length ? selected : fallback;
   const seen = new Set();
@@ -183,7 +188,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   const attributes = translatedAttributeMap(translation);
   const styleNo = clean(options.styleNo);
   if (!styleNo) throw new Error('A wearhongxiu style number allocation is required.');
-  const publishingImages = selectPublishingImages(detail, translation);
+  const publishingImages = selectPublishingImages(detail, translation, options.imageMode);
   const sizeDimension = findDimension(translation, ['size', '尺码']);
   const sizes = unique(sizeDimension?.values ?? []);
   const colorOptions = buildColorOptions(detail, translation, publishingImages);

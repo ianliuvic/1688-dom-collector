@@ -56,6 +56,18 @@ test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
   assert.equal(result.payload.meta.source_price_min, 23.5);
 });
 
+test('can restrict an emergency WordPress update to the trusted main image', () => {
+  const result = buildWordPressProductDraft({
+    detail,
+    translation,
+    taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] },
+    options: { status: 'publish', styleNo: 'SWBK999', imageMode: 'main_only',
+      categoryIds: [35], primaryCategoryId: 35 },
+  });
+  assert.equal(result.payload.images.length, 1);
+  assert.equal(result.payload.images[0].image_type, 'main');
+});
+
 test('uses the highest source SKU price and marks retail stock only when every SKU is in stock', () => {
   const inStock = { ...detail, price_max: '20', skus: detail.skus.map((sku, index) => ({ ...sku, price: index ? '25' : '23.5', stock: '2' })) };
   const result = buildWordPressProductDraft({ detail: inStock, translation,
