@@ -496,5 +496,43 @@ export function createCollector({
       offerId: data.offerId, images };
   }
 
-  return { start, stop, capture, extractProductImages, extractProductImagesInMemory, inspectProduct, getSessionStatus };
+  // Ephemeral SKU audit input: DOM data plus SKU/Gallery image bytes in memory only.
+  async function extractProductSkuAuditInput(url) {
+    const inspected = await inspectProduct(url);
+    if (inspected.status !== 'completed') return inspected;
+    const data = inspected.data;
+    async function readImage(sourceUrl) {
+      if (!sourceUrl) return null;
+      try {
+        const response = await context.request.get(sourceUrl, {
+          headers: { referer: 'https://detail.1688.com/', 'user-agent': 'Mozilla/5.0' }, timeout: 20000,
+        });
+        if (!response.ok()) return null;
+        const mime = response.headers()['content-type']?.split(';')[0] || 'image/jpeg';
+        if (!mime.startsWith('image/')) return null;
+        const bytes = await response.body();
+        return `data:${mime};base64,${bytes.toString('base64')}`;
+      } catch { return null; }
+    }
+    const skuImages = [];
+    const seenSkuUrls = new Set();
+    for (const [optionIndex, option] of (data.skuOptions || []).entries()) {
+      if (!option.image || seenSkuUrls.has(option.image)) continue;
+      seenSkuUrls.add(option.image);
+      const dataUrl = await readImage(option.image);
+      if (dataUrl) skuImages.push({ kind: 'sku', optionIndex, optionText: option.text || '',
+        sourceUrl: option.image, dataUrl });
+    }
+    const galleryUrls = [...new Set([data.mainImage, ...(data.images || [])].filter(Boolean))].slice(0, 4);
+    const galleryImages = [];
+    for (const [index, sourceUrl] of galleryUrls.entries()) {
+      const dataUrl = await readImage(sourceUrl);
+      if (dataUrl) galleryImages.push({ kind: 'gallery', index, sourceUrl, dataUrl });
+    }
+    return { status: 'completed', finalUrl: inspected.finalUrl, title: inspected.title,
+      offerId: data.offerId, product: data, skuImages, galleryImages };
+  }
+
+  return { start, stop, capture, extractProductImages, extractProductImagesInMemory,
+    extractProductSkuAuditInput, inspectProduct, getSessionStatus };
 }

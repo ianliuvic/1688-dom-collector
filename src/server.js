@@ -6,6 +6,7 @@ import { createDatabase } from './db.js';
 import { createCollector, isAllowed1688Url } from './collector.js';
 import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
+import { auditProductSkus } from './sku-auditor.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -24,6 +25,7 @@ const config = {
   dashscopeApiKey: process.env.DASHSCOPE_API_KEY,
   dashscopeBaseUrl: process.env.DASHSCOPE_BASE_URL,
   visionModel: process.env.DASHSCOPE_VISION_MODEL || 'qwen3-vl-plus',
+  complexModel: process.env.DASHSCOPE_COMPLEX_MODEL || 'qwen3.8-max',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -141,7 +143,8 @@ app.post('/api/product-details/:id/image-audit', { preHandler: requireApiKey }, 
   try {
     const result = await auditProductGallery({ detail, config: {
       apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
-      model: config.visionModel, storagePath: config.storagePath,
+      visionModel: config.visionModel, complexModel: config.complexModel,
+      storagePath: config.storagePath,
     } });
     return result;
   } catch (error) {
@@ -157,7 +160,8 @@ app.post('/api/image-audit/test', { preHandler: requireApiKey }, async (request,
   try {
     return await analyzeGalleryImages({ images: request.body.images, config: {
       apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
-      model: config.visionModel, storagePath: config.storagePath,
+      visionModel: config.visionModel, complexModel: config.complexModel,
+      storagePath: config.storagePath,
     } });
   } catch (error) {
     request.log.error({ err: error }, 'test gallery audit failed');
@@ -178,9 +182,38 @@ app.post('/api/image-audit/live', { preHandler: requireApiKey }, async (request,
       if (source.status !== 'completed') { results.push({ url, ...source }); continue; }
       const analysis = await analyzeGalleryImages({ images: source.images, config: {
         apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
-        model: config.visionModel, storagePath: config.storagePath,
+        visionModel: config.visionModel, complexModel: config.complexModel,
+        storagePath: config.storagePath,
       } });
       results.push({ url, offerId: source.offerId, title: source.title, imageCount: source.images.length, ...analysis });
+    } catch (error) {
+      results.push({ url, status: 'failed', error: error.message });
+    }
+  }
+  return { results };
+});
+
+app.post('/api/sku-audit/live', { preHandler: requireApiKey }, async (request, reply) => {
+  const suppliedUrls = Array.isArray(request.body?.urls) ? request.body.urls : [];
+  const offerIds = Array.isArray(request.body?.offerIds) ? request.body.offerIds : [];
+  const urls = [...suppliedUrls, ...offerIds.map((offerId) => `https://detail.1688.com/offer/${offerId}.html`)];
+  if (!urls.length || urls.length > 5 || urls.some((url) => typeof url !== 'string'
+    || !isAllowed1688Url(url) || !new URL(url).hostname.startsWith('detail.'))
+    || offerIds.some((offerId) => !/^\d{10,13}$/.test(String(offerId)))) {
+    return reply.code(400).send({ error: 'Provide 1 to 5 valid 1688 detail URLs or numeric offerIds.' });
+  }
+  const results = [];
+  for (const url of urls) {
+    try {
+      const source = await collector.extractProductSkuAuditInput(url);
+      if (source.status !== 'completed') { results.push({ url, ...source }); continue; }
+      const audit = await auditProductSkus({
+        product: source.product, skuImages: source.skuImages, galleryImages: source.galleryImages,
+        config: { apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+          visionModel: config.visionModel, complexModel: config.complexModel },
+      });
+      results.push({ url, offerId: source.offerId, title: source.title,
+        skuImageCount: source.skuImages.length, galleryContextCount: source.galleryImages.length, ...audit });
     } catch (error) {
       results.push({ url, status: 'failed', error: error.message });
     }
