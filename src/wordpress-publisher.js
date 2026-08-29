@@ -333,8 +333,10 @@ export async function prepareWordPressProductDraft({
   const taxonomies = await wp('/wp-json/hx/v1/products/taxonomies');
   const needsCategoryModel = !(Array.isArray(options.categoryIds) && options.categoryIds.length)
     || clean(options.categoryMode) === 'auto' || clean(options.categoryMode) === 'primary_only';
-  const needsTagModel = !(Array.isArray(options.tagIds) && options.tagIds.length)
-    && !(Array.isArray(options.tags) && options.tags.length) || clean(options.tagMode) === 'auto';
+  const tagMode = clean(options.tagMode);
+  const needsTagModel = tagMode === 'auto' || (tagMode !== 'manual'
+    && !(Array.isArray(options.tagIds) && options.tagIds.length)
+    && !(Array.isArray(options.tags) && options.tags.length));
   const needsMaterialModel = !clean(options.material);
   const merchandising = (needsCategoryModel || needsTagModel || needsMaterialModel)
     ? await analyzeProductMerchandising({ detail, translation, taxonomies, config: {
