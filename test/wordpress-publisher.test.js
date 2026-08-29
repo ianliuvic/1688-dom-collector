@@ -38,8 +38,8 @@ test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
   assert.equal(result.payload.style_no, 'SWBK142');
   assert.equal(result.payload.status, 'publish');
   assert.deepEqual(result.payload.category_ids, [35]);
-  assert.equal(result.payload.images.length, 2);
-  assert.equal(result.payload.images.some((image) => image.source_url.includes('logo')), false);
+  assert.equal(result.payload.images.length, 3);
+  assert.equal(result.payload.images.some((image) => image.source_url.includes('logo')), true);
   assert.deepEqual(result.payload.sizes.sizes.map((size) => size.value), ['S', 'M']);
   assert.equal(result.payload.colors.colors[0].label, 'As Picture');
   assert.equal(result.payload.sku_matrix.rows[0].source_stock, 9999);

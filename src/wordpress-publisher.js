@@ -121,7 +121,9 @@ function selectPublishingImages(detail, translation, imageMode = 'translated') {
     return main ? [main] : [];
   }
 
-  const source = selected.length ? selected : fallback;
+  // Model input is deliberately bounded, but WordPress should receive every
+  // image from the verified product Gallery after the prioritized subset.
+  const source = selected.length ? [...selected, ...fallback] : fallback;
   const seen = new Set();
   return source.filter((image) => {
     const key = clean(image.source_url);

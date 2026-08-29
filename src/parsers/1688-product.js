@@ -129,12 +129,12 @@ export async function parse1688Product(page) {
     };
     scan(assignedJson);
 
-    const images = all('img').filter((image) => {
-      const width = image.naturalWidth || image.width || 0;
-      const height = image.naturalHeight || image.height || 0;
-      return width >= 300 && height >= 300;
-    }).map((image) => attr(image, [
-      'src', 'data-src', 'data-lazy-src', 'data-original', 'data-ks-lazyload',
+    // The current 1688 detail template keeps product images in this exact
+    // carousel. Never fall back to every large page image: review avatars,
+    // recommendations and shop decorations can all be high resolution.
+    const images = all('.od-gallery-list img.preview-img').map((image) => attr(image, [
+      'data-original', 'data-origin', 'data-lazy-src', 'data-src',
+      'data-ks-lazyload', 'src',
     ]));
 
     const attributes = [];
@@ -251,8 +251,10 @@ export async function parse1688Product(page) {
 
   const bodyMoq = raw.bodyText.match(/(?:起批量|最小起订量|起订量|MOQ)\s*[：:]?\s*(\d+)/i);
   const ldImages = Array.isArray(productLd.image) ? productLd.image : [productLd.image];
+  const exactGallery = raw.images.filter(Boolean);
   const normalizedImages = unique([
-    raw.mainImage, ...ldImages, ...candidates.images, ...raw.images,
+    raw.mainImage,
+    ...(exactGallery.length ? exactGallery : ldImages),
   ].map((value) => normalizeImageUrl(value, raw.url)), MAX_IMAGES);
   const imageKeys = new Set();
   const images = normalizedImages.filter((url) => {
