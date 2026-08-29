@@ -71,7 +71,7 @@ export async function hydrate1688ProductGallery(page, {
   }
 
   await gallery.scrollIntoViewIfNeeded().catch(() => {});
-  const seen = new Set();
+  const seen = new Map();
   let stableRounds = 0;
   let previousSignature = '';
   let last = { domImageCount: 0, expectedSlotCount: 0, unresolvedSlotCount: 0 };
@@ -108,18 +108,21 @@ export async function hydrate1688ProductGallery(page, {
       const images = Array.from(document.querySelectorAll(imageSelector));
       for (const image of images) image.scrollIntoView({ block: 'nearest', inline: 'nearest' });
       const urls = images.map(candidate).filter(Boolean);
-      const listItems = Array.from(container.querySelectorAll('li'));
-      const expectedSlotCount = listItems.length || images.length;
       return {
         urls,
         domImageCount: images.length,
-        expectedSlotCount,
-        unresolvedSlotCount: Math.max(0, expectedSlotCount - urls.length),
+        expectedSlotCount: images.length,
+        unresolvedSlotCount: Math.max(0, images.length - urls.length),
       };
     }, { gallerySelector: GALLERY_SELECTOR, imageSelector: GALLERY_IMAGE_SELECTOR, roundIndex: round });
     if (!metrics) break;
 
-    for (const url of metrics.urls) seen.add(url);
+    for (const url of metrics.urls) {
+      const key = url.replace(/[?#].*$/, '')
+        .replace(/_\.webp$/i, '')
+        .replace(/_\d+x\d+[^/]*$/i, '');
+      if (!seen.has(key)) seen.set(key, url);
+    }
     last = metrics;
 
     const thumbnails = page.locator(GALLERY_IMAGE_SELECTOR);
@@ -131,7 +134,7 @@ export async function hydrate1688ProductGallery(page, {
     }
     await page.waitForTimeout(350);
 
-    const signature = [...seen].sort().join('\n');
+    const signature = [...seen.keys()].sort().join('\n');
     if (signature && signature === previousSignature && last.unresolvedSlotCount === 0) stableRounds += 1;
     else stableRounds = 0;
     previousSignature = signature;
@@ -142,7 +145,7 @@ export async function hydrate1688ProductGallery(page, {
     source: 'exact_dom_gallery',
     complete: seen.size > 0 && stableRounds >= stableRoundsRequired && last.unresolvedSlotCount === 0,
     stable: stableRounds >= stableRoundsRequired,
-    urls: [...seen],
+    urls: [...seen.values()],
     domImageCount: last.domImageCount,
     expectedSlotCount: Math.max(last.expectedSlotCount, seen.size),
     unresolvedSlotCount: last.unresolvedSlotCount,
