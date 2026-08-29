@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { analyzeProductMerchandising } from './product-merchandiser.js';
 
 function clean(value) {
   return value == null ? '' : String(value).trim();
@@ -14,6 +15,67 @@ function numberOrNull(value) {
   if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function roundCurrency(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+export function getSourceMaximumPrice(detail) {
+  const candidates = [detail?.price_min, detail?.price_max];
+  for (const sku of detail?.skus ?? []) candidates.push(sku?.price);
+  for (const tier of detail?.price_tiers ?? []) {
+    candidates.push(tier?.price, tier?.unit_price, tier?.price_value);
+  }
+  const numbers = candidates.map(numberOrNull).filter((value) => value !== null && value >= 0);
+  return numbers.length ? Math.max(...numbers) : null;
+}
+
+export function buildWearHongxiuPricing(detail) {
+  const sourceMax = getSourceMaximumPrice(detail);
+  if (sourceMax === null) throw new Error('A valid non-negative 1688 maximum price is required for pricing.');
+  const exchangeRate = 6.5;
+  const tiers = [
+    { label: '50-299 pcs', min_quantity: 50, max_quantity: 299, cny_markup: 20, price: roundCurrency((sourceMax + 20) / exchangeRate) },
+    { label: '300-999 pcs', min_quantity: 300, max_quantity: 999, cny_markup: 15, price: roundCurrency((sourceMax + 15) / exchangeRate) },
+    { label: '≥1000 pcs', min_quantity: 1000, max_quantity: null, cny_markup: 10, price: roundCurrency((sourceMax + 10) / exchangeRate) },
+  ];
+  return { currency: 'USD', source_currency: 'CNY', source_max_price: sourceMax,
+    exchange_rate_cny_per_usd: exchangeRate, formula: '(source maximum CNY price + tier markup) / 6.5', tiers };
+}
+
+function allSkuRowsInStock(rows) {
+  return rows.length > 0 && rows.every((row) => row.source_stock !== null && row.source_stock > 0);
+}
+
+function taxonomyById(taxonomies, id) {
+  return (taxonomies?.categories ?? []).find((item) => Number(item.id) === Number(id)) ?? null;
+}
+
+export function resolveMerchandisingSelection({ options = {}, merchandising = null, taxonomies = null }) {
+  const manualCategories = Array.isArray(options.categoryIds) ? options.categoryIds.map(Number).filter(Boolean) : [];
+  const categoryMode = clean(options.categoryMode)
+    || (manualCategories.length ? 'manual' : 'auto');
+  const recommendedPrimary = Number(merchandising?.primaryCategoryId) || 0;
+  let primaryCategoryId = Number(options.primaryCategoryId) || recommendedPrimary || manualCategories[0] || 0;
+  let categoryIds;
+  if (categoryMode === 'manual') categoryIds = manualCategories;
+  else if (categoryMode === 'primary_only') categoryIds = primaryCategoryId ? [primaryCategoryId] : [];
+  else categoryIds = (merchandising?.categoryIds ?? []).map(Number).filter(Boolean);
+  if (primaryCategoryId && !categoryIds.includes(primaryCategoryId)) categoryIds.unshift(primaryCategoryId);
+
+  const manualTags = unique([...(options.tags ?? [])]);
+  const tagMode = clean(options.tagMode) || ((options.tagIds?.length || manualTags.length) ? 'manual' : 'auto');
+  return {
+    primaryCategoryId,
+    primaryCategory: clean(taxonomyById(taxonomies, primaryCategoryId)?.name),
+    categoryIds: [...new Set(categoryIds)],
+    tagIds: tagMode === 'manual' ? (options.tagIds ?? []).map(Number).filter(Boolean) : [],
+    tags: tagMode === 'manual' ? manualTags : unique(merchandising?.tags ?? []),
+    material: clean(options.material) || clean(merchandising?.material),
+    categoryMode,
+    tagMode,
+  };
 }
 
 function translatedAttributeMap(translation) {
@@ -114,7 +176,7 @@ function buildColorOptions(detail, translation, publishingImages) {
   });
 }
 
-export function buildWordPressProductDraft({ detail, translation, options = {} }) {
+export function buildWordPressProductDraft({ detail, translation, options = {}, merchandising = null, taxonomies = null }) {
   if (!detail?.id || !detail?.offer_id) throw new Error('A saved product detail with offer_id is required.');
   if (!translation?.id || !clean(translation.title)) throw new Error('An English product translation is required.');
 
@@ -126,7 +188,11 @@ export function buildWordPressProductDraft({ detail, translation, options = {} }
   const sizes = unique(sizeDimension?.values ?? []);
   const colorOptions = buildColorOptions(detail, translation, publishingImages);
   const skuMatrix = buildSkuMatrix(detail, translation);
-  const material = attributes.get('fabric composition') || attributes.get('fabric name') || '';
+  const selection = resolveMerchandisingSelection({ options, merchandising, taxonomies });
+  const material = selection.material || attributes.get('fabric composition')
+    || attributes.get('fabric name') || 'Polyester';
+  const pricing = buildWearHongxiuPricing(detail);
+  const hasAllSkuStock = allSkuRowsInStock(skuMatrix);
   const sourceCurrency = clean(detail.currency) || 'CNY';
   const externalId = `1688:${detail.offer_id}`;
 
@@ -137,24 +203,26 @@ export function buildWordPressProductDraft({ detail, translation, options = {} }
     description: clean(translation.description),
     status: clean(options.status) || 'draft',
     source_updated_at: detail.last_crawled_at || '',
-    category_ids: Array.isArray(options.categoryIds) ? options.categoryIds.map(Number).filter(Boolean) : [],
-    tag_ids: Array.isArray(options.tagIds) ? options.tagIds.map(Number).filter(Boolean) : [],
-    tags: Array.isArray(options.tags) ? unique(options.tags) : [],
+    category_ids: selection.categoryIds,
+    tag_ids: selection.tagIds,
+    tags: selection.tags,
     meta: {
       sku: styleNo,
       title: clean(translation.title),
       description: clean(translation.description),
-      style: '',
-      sample_available: false,
-      sample_price: '',
-      sample_lead_time: '',
-      lead_time: '',
-      moq: detail.moq == null ? '' : `${detail.moq} pcs`,
-      bulk_lead_time: '',
+      style: selection.primaryCategory,
+      primary_category_id: selection.primaryCategoryId ? String(selection.primaryCategoryId) : '',
+      primary_category: selection.primaryCategory,
+      sample_available: hasAllSkuStock,
+      sample_price: '50.00',
+      sample_lead_time: hasAllSkuStock ? '3 working days' : '7 to 14 working days',
+      lead_time: hasAllSkuStock ? '3 working days' : '7 to 14 working days',
+      moq: '50 pcs',
+      bulk_lead_time: '~28 days',
       material,
-      fabric_weight: '',
-      customizable: false,
-      customization: 'Not specified',
+      fabric_weight: '200gsm',
+      customizable: true,
+      customization: 'Yes',
       stripe_price_id: '',
       source_type: '1688',
       notes: '',
@@ -178,7 +246,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {} }
       sort_order: Number(image.sort_order) || 0,
       alt: `${clean(translation.title)}${index ? ` view ${index + 1}` : ''}`,
     })),
-    bulk_pricing: null,
+    bulk_pricing: pricing,
     sizes: sizes.length ? {
       default: sizes[0],
       sizes: sizes.map((value) => ({ label: value, value })),
@@ -206,6 +274,10 @@ export function buildWordPressProductDraft({ detail, translation, options = {} }
       price_min: numberOrNull(detail.price_min),
       price_max: numberOrNull(detail.price_max),
       collected_at: detail.last_crawled_at || '',
+      merchandising: merchandising ? {
+        model: merchandising.model || '', confidence: merchandising.confidence ?? null,
+        category_mode: selection.categoryMode, tag_mode: selection.tagMode,
+      } : null,
     },
   };
 
@@ -243,6 +315,22 @@ function wordpressClient(config) {
   };
 }
 
+export async function prepareWordPressProductDraft({ detail, translation, options = {}, config }) {
+  const wp = wordpressClient(config);
+  const taxonomies = await wp('/wp-json/hx/v1/products/taxonomies');
+  const needsCategoryModel = !(Array.isArray(options.categoryIds) && options.categoryIds.length)
+    || clean(options.categoryMode) === 'auto' || clean(options.categoryMode) === 'primary_only';
+  const needsTagModel = !(Array.isArray(options.tagIds) && options.tagIds.length)
+    && !(Array.isArray(options.tags) && options.tags.length) || clean(options.tagMode) === 'auto';
+  const needsMaterialModel = !clean(options.material);
+  const merchandising = (needsCategoryModel || needsTagModel || needsMaterialModel)
+    ? await analyzeProductMerchandising({ detail, translation, taxonomies, config: {
+      apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+      complexModel: config.complexModel, storagePath: config.storagePath,
+    } }) : null;
+  return buildWordPressProductDraft({ detail, translation, options, merchandising, taxonomies });
+}
+
 function resolveStorageFile(storagePath, filename) {
   const root = path.resolve(storagePath);
   const resolved = path.resolve(filename);
@@ -253,7 +341,7 @@ function resolveStorageFile(storagePath, filename) {
 }
 
 export async function publishProductToWordPress({ detail, translation, options = {}, config }) {
-  const draft = buildWordPressProductDraft({ detail, translation, options });
+  const draft = await prepareWordPressProductDraft({ detail, translation, options, config });
   const wp = wordpressClient(config);
   const media = [];
 
@@ -316,5 +404,5 @@ export async function publishProductToWordPress({ detail, translation, options =
     body: JSON.stringify(payload),
     timeoutMs: 120000,
   });
-  return { payload, media, wordpress: result };
+  return { draft, payload, media, wordpress: result };
 }

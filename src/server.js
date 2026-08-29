@@ -8,7 +8,7 @@ import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
 import { translateProductDetail } from './product-translator.js';
-import { buildWordPressProductDraft, publishProductToWordPress } from './wordpress-publisher.js';
+import { prepareWordPressProductDraft, publishProductToWordPress } from './wordpress-publisher.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -190,6 +190,10 @@ function wordpressPublishOptions(body = {}) {
     categoryIds: Array.isArray(body.categoryIds) ? body.categoryIds : [],
     tagIds: Array.isArray(body.tagIds) ? body.tagIds : [],
     tags: Array.isArray(body.tags) ? body.tags : [],
+    categoryMode: ['auto', 'primary_only', 'manual'].includes(body.categoryMode) ? body.categoryMode : '',
+    tagMode: ['auto', 'manual'].includes(body.tagMode) ? body.tagMode : '',
+    primaryCategoryId: Number(body.primaryCategoryId) || 0,
+    material: typeof body.material === 'string' ? body.material : '',
   };
 }
 
@@ -205,8 +209,8 @@ app.post('/api/product-details/:id/wordpress/preview', { preHandler: requireApiK
   const translation = await db.getLatestProductTranslation(detail.id, 'en');
   if (!translation) return reply.code(409).send({ error: 'english_translation_required' });
   try {
-    const draft = buildWordPressProductDraft({
-      detail, translation, options: wordpressPublishOptions(request.body),
+    const draft = await prepareWordPressProductDraft({
+      detail, translation, options: wordpressPublishOptions(request.body), config,
     });
     return { payload: draft.payload, publishingImageCount: draft.publishingImages.length };
   } catch (error) {
@@ -231,8 +235,8 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
     job.startedAt = new Date().toISOString();
     let draft;
     try {
-      draft = buildWordPressProductDraft({ detail, translation, options });
       const published = await publishProductToWordPress({ detail, translation, options, config });
+      draft = published.draft;
       const wp = published.wordpress;
       const syncHash = crypto.createHash('sha256').update(JSON.stringify(published.payload)).digest('hex');
       const saved = await db.saveWordPressPublication(detail.id, {
