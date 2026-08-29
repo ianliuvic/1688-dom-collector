@@ -116,10 +116,7 @@ function selectPublishingImages(detail, translation) {
       return Number(a.sort_order) - Number(b.sort_order);
     });
 
-  // Translation only sees a bounded image subset for model efficiency. Keep
-  // that subset first, then append every remaining captured Gallery image so
-  // the WordPress product is not accidentally limited to the model input.
-  const source = selected.length ? [...selected, ...fallback] : fallback;
+  const source = selected.length ? selected : fallback;
   const seen = new Set();
   return source.filter((image) => {
     const key = clean(image.source_url);

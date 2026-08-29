@@ -129,49 +129,13 @@ export async function parse1688Product(page) {
     };
     scan(assignedJson);
 
-    const galleryContainerSelector = [
-      '[class*="gallery"]', '[class*="Gallery"]',
-      '[class*="thumb"]', '[class*="Thumb"]',
-      '[class*="thumbnail"]', '[class*="Thumbnail"]',
-      '[class*="offer-picture"]', '[class*="offerPicture"]',
-      '[class*="offer-image"]', '[class*="offerImage"]',
-      '[class*="main-image"]', '[class*="mainImage"]',
-      '[class*="img-list"]', '[class*="imgList"]',
-    ].join(',');
-    const imageSource = (image) => attr(image, [
-      'data-original', 'data-origin', 'data-lazy-src', 'data-src',
-      'data-ks-lazyload', 'data-image', 'data-image-url', 'src',
-    ]);
-    const galleryContainers = all(galleryContainerSelector);
-    const galleryNodes = [...new Set(galleryContainers.flatMap((container) => [
-      ...(container.tagName === 'IMG' ? [container] : []),
-      ...Array.from(container.querySelectorAll?.('img') ?? []),
-    ]))];
-    const galleryImages = galleryNodes.flatMap((image) => {
-      const values = [imageSource(image), image.getAttribute?.('srcset')];
-      return values.flatMap((value) => {
-        if (!value) return [];
-        const urls = String(value).match(/(?:https?:)?\/\/[^\s,'"()]+/g);
-        return urls?.length ? urls : [value];
-      });
-    });
-    for (const container of galleryContainers) {
-      const values = [
-        container.getAttribute?.('style'),
-        ...Array.from(container.attributes ?? [])
-          .filter((item) => /image|pic|photo|src/i.test(item.name))
-          .map((item) => item.value),
-      ];
-      for (const value of values) {
-        galleryImages.push(...(String(value || '').match(/(?:https?:)?\/\/[^\s,'"()]+/g) ?? []));
-      }
-    }
-
     const images = all('img').filter((image) => {
       const width = image.naturalWidth || image.width || 0;
       const height = image.naturalHeight || image.height || 0;
-      return Boolean(image.closest?.(galleryContainerSelector)) || (width >= 300 && height >= 300);
-    }).map(imageSource);
+      return width >= 300 && height >= 300;
+    }).map((image) => attr(image, [
+      'src', 'data-src', 'data-lazy-src', 'data-original', 'data-ks-lazyload',
+    ]));
 
     const attributes = [];
     for (const row of all([
@@ -206,7 +170,6 @@ export async function parse1688Product(page) {
       title: meta('meta[property="og:title"]') || document.title,
       description: meta('meta[name="description"]') || meta('meta[property="og:description"]'),
       mainImage: meta('meta[property="og:image"]'),
-      galleryImages,
       images,
       jsonLd,
       embeddedCandidates,
@@ -289,7 +252,7 @@ export async function parse1688Product(page) {
   const bodyMoq = raw.bodyText.match(/(?:起批量|最小起订量|起订量|MOQ)\s*[：:]?\s*(\d+)/i);
   const ldImages = Array.isArray(productLd.image) ? productLd.image : [productLd.image];
   const normalizedImages = unique([
-    raw.mainImage, ...ldImages, ...(raw.galleryImages ?? []), ...candidates.images, ...raw.images,
+    raw.mainImage, ...ldImages, ...candidates.images, ...raw.images,
   ].map((value) => normalizeImageUrl(value, raw.url)), MAX_IMAGES);
   const imageKeys = new Set();
   const images = normalizedImages.filter((url) => {
