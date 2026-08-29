@@ -236,6 +236,29 @@ export function createDatabase(databaseUrl) {
         ADD COLUMN IF NOT EXISTS image_count integer NOT NULL DEFAULT 0;
       ALTER TABLE product_detail_translations
         ADD COLUMN IF NOT EXISTS naming_strategy text NOT NULL DEFAULT 'visual_rewrite';
+      CREATE TABLE IF NOT EXISTS product_wordpress_publications (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL UNIQUE REFERENCES product_details(id) ON DELETE CASCADE,
+        translation_id bigint REFERENCES product_detail_translations(id) ON DELETE SET NULL,
+        external_id text NOT NULL,
+        style_no text,
+        wp_post_id bigint,
+        wp_url text,
+        wp_edit_url text,
+        wp_status text,
+        sync_hash text,
+        payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+        result jsonb NOT NULL DEFAULT '{}'::jsonb,
+        last_error text,
+        first_published_at timestamptz,
+        last_synced_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS product_wordpress_publications_post_idx
+        ON product_wordpress_publications(wp_post_id);
+      CREATE INDEX IF NOT EXISTS product_wordpress_publications_external_idx
+        ON product_wordpress_publications(external_id);
     `);
   }
 
@@ -550,6 +573,51 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function getLatestProductTranslation(productDetailId, targetLanguage = 'en') {
+    const result = await pool.query(`SELECT * FROM product_detail_translations
+      WHERE product_detail_id=$1 AND target_language=$2
+      ORDER BY updated_at DESC, created_at DESC LIMIT 1`, [productDetailId, targetLanguage]);
+    return result.rows[0] ?? null;
+  }
+
+  async function getWordPressPublication(productDetailId) {
+    const result = await pool.query(
+      'SELECT * FROM product_wordpress_publications WHERE product_detail_id=$1',
+      [productDetailId],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async function saveWordPressPublication(productDetailId, values) {
+    const payload = values.payload ?? {};
+    const result = values.result ?? {};
+    const syncHash = values.syncHash ?? null;
+    const saved = await pool.query(`INSERT INTO product_wordpress_publications
+      (product_detail_id, translation_id, external_id, style_no, wp_post_id, wp_url,
+       wp_edit_url, wp_status, sync_hash, payload, result, last_error,
+       first_published_at, last_synced_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+        CASE WHEN $5::bigint IS NULL THEN NULL ELSE now() END,
+        CASE WHEN $5::bigint IS NULL THEN NULL ELSE now() END)
+      ON CONFLICT (product_detail_id) DO UPDATE SET
+        translation_id=EXCLUDED.translation_id, external_id=EXCLUDED.external_id,
+        style_no=EXCLUDED.style_no, wp_post_id=COALESCE(EXCLUDED.wp_post_id, product_wordpress_publications.wp_post_id),
+        wp_url=COALESCE(EXCLUDED.wp_url, product_wordpress_publications.wp_url),
+        wp_edit_url=COALESCE(EXCLUDED.wp_edit_url, product_wordpress_publications.wp_edit_url),
+        wp_status=COALESCE(EXCLUDED.wp_status, product_wordpress_publications.wp_status),
+        sync_hash=EXCLUDED.sync_hash, payload=EXCLUDED.payload, result=EXCLUDED.result,
+        last_error=EXCLUDED.last_error,
+        first_published_at=COALESCE(product_wordpress_publications.first_published_at, EXCLUDED.first_published_at),
+        last_synced_at=CASE WHEN EXCLUDED.wp_post_id IS NULL
+          THEN product_wordpress_publications.last_synced_at ELSE now() END,
+        updated_at=now()
+      RETURNING *`, [productDetailId, values.translationId ?? null, values.externalId,
+      values.styleNo ?? null, values.wpPostId ?? null, values.wpUrl ?? null,
+      values.wpEditUrl ?? null, values.wpStatus ?? null, syncHash,
+      JSON.stringify(payload), JSON.stringify(result), values.lastError ?? null]);
+    return saved.rows[0];
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -557,7 +625,8 @@ export function createDatabase(databaseUrl) {
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
     saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail, listProductDetails,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
-    saveProductTranslation, listProductTranslations, ping };
+    saveProductTranslation, listProductTranslations, getLatestProductTranslation,
+    getWordPressPublication, saveWordPressPublication, ping };
 }
 
 function parseScore(value) {

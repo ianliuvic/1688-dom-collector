@@ -8,6 +8,7 @@ import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
 import { translateProductDetail } from './product-translator.js';
+import { buildWordPressProductDraft, publishProductToWordPress } from './wordpress-publisher.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -28,6 +29,9 @@ const config = {
   visionModel: process.env.DASHSCOPE_VISION_MODEL || 'qwen3.8-max',
   complexModel: process.env.DASHSCOPE_COMPLEX_MODEL || 'qwen3.8-max',
   translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
+  wordpressBaseUrl: process.env.WORDPRESS_BASE_URL,
+  wordpressUsername: process.env.WORDPRESS_USERNAME,
+  wordpressApplicationPassword: process.env.WORDPRESS_APPLICATION_PASSWORD,
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -40,8 +44,10 @@ let workerRunning = true;
 const skuAuditJobs = new Map();
 const imageAuditJobs = new Map();
 const translationJobs = new Map();
+const wordpressJobs = new Map();
 let multimodalAuditQueue = Promise.resolve();
 let translationQueue = Promise.resolve();
+let wordpressQueue = Promise.resolve();
 
 function requireApiKey(request, reply, done) {
   const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
@@ -172,6 +178,90 @@ app.get('/api/product-details/:id/translations', { preHandler: requireApiKey }, 
 
 app.get('/api/translation-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = translationJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+function wordpressPublishOptions(body = {}) {
+  const allowedStatuses = new Set(['draft', 'pending', 'publish', 'private']);
+  const status = allowedStatuses.has(body.status) ? body.status : 'draft';
+  return {
+    status,
+    styleNo: typeof body.styleNo === 'string' ? body.styleNo : '',
+    categoryIds: Array.isArray(body.categoryIds) ? body.categoryIds : [],
+    tagIds: Array.isArray(body.tagIds) ? body.tagIds : [],
+    tags: Array.isArray(body.tags) ? body.tags : [],
+  };
+}
+
+app.get('/api/product-details/:id/wordpress', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  return db.getWordPressPublication(detail.id);
+});
+
+app.post('/api/product-details/:id/wordpress/preview', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const translation = await db.getLatestProductTranslation(detail.id, 'en');
+  if (!translation) return reply.code(409).send({ error: 'english_translation_required' });
+  try {
+    const draft = buildWordPressProductDraft({
+      detail, translation, options: wordpressPublishOptions(request.body),
+    });
+    return { payload: draft.payload, publishingImageCount: draft.publishingImages.length };
+  } catch (error) {
+    return reply.code(422).send({ error: 'wordpress_payload_failed', message: error.message });
+  }
+});
+
+app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const translation = await db.getLatestProductTranslation(detail.id, 'en');
+  if (!translation) return reply.code(409).send({ error: 'english_translation_required' });
+  const id = crypto.randomUUID();
+  const options = wordpressPublishOptions(request.body);
+  const job = { id, productDetailId: detail.id, offerId: detail.offer_id,
+    status: 'queued', publishStatus: options.status, createdAt: new Date().toISOString(),
+    startedAt: null, completedAt: null, publicationId: null, result: null, error: null };
+  wordpressJobs.set(id, job);
+  while (wordpressJobs.size > 100) wordpressJobs.delete(wordpressJobs.keys().next().value);
+  wordpressQueue = wordpressQueue.catch(() => {}).then(async () => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    let draft;
+    try {
+      draft = buildWordPressProductDraft({ detail, translation, options });
+      const published = await publishProductToWordPress({ detail, translation, options, config });
+      const wp = published.wordpress;
+      const syncHash = crypto.createHash('sha256').update(JSON.stringify(published.payload)).digest('hex');
+      const saved = await db.saveWordPressPublication(detail.id, {
+        translationId: translation.id, externalId: draft.externalId, styleNo: draft.styleNo,
+        wpPostId: wp.post_id ?? null, wpUrl: wp.permalink ?? null, wpEditUrl: wp.edit_link ?? null,
+        wpStatus: wp.status ?? options.status, syncHash, payload: published.payload, result: wp,
+        lastError: null,
+      });
+      job.publicationId = saved.id;
+      job.result = { publication: saved, wordpress: wp, mediaCount: published.media.length };
+      job.status = 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = error.message;
+      if (draft) {
+        await db.saveWordPressPublication(detail.id, {
+          translationId: translation.id, externalId: draft.externalId, styleNo: draft.styleNo,
+          payload: draft.payload, result: {}, lastError: error.message,
+        }).catch(() => {});
+      }
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  });
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = wordpressJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
