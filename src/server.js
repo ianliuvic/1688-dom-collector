@@ -36,7 +36,8 @@ const db = createDatabase(config.databaseUrl);
 const collector = createCollector(config);
 let workerRunning = true;
 const skuAuditJobs = new Map();
-let skuAuditQueue = Promise.resolve();
+const imageAuditJobs = new Map();
+let multimodalAuditQueue = Promise.resolve();
 
 function requireApiKey(request, reply, done) {
   const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
@@ -177,22 +178,47 @@ app.post('/api/image-audit/live', { preHandler: requireApiKey }, async (request,
     || !isAllowed1688Url(url) || !new URL(url).hostname.startsWith('detail.'))) {
     return reply.code(400).send({ error: 'urls must contain 1 to 5 HTTPS 1688 detail URLs.' });
   }
-  const results = [];
-  for (const url of urls) {
+  const id = crypto.randomUUID();
+  const job = { id, status: 'queued', urls, createdAt: new Date().toISOString(),
+    startedAt: null, completedAt: null, results: null, error: null };
+  imageAuditJobs.set(id, job);
+  while (imageAuditJobs.size > 100) imageAuditJobs.delete(imageAuditJobs.keys().next().value);
+  multimodalAuditQueue = multimodalAuditQueue.catch(() => {}).then(async () => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    const results = [];
     try {
-      const source = await collector.extractProductImagesInMemory(url);
-      if (source.status !== 'completed') { results.push({ url, ...source }); continue; }
-      const analysis = await analyzeGalleryImages({ images: source.images, config: {
-        apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
-        visionModel: config.visionModel, complexModel: config.complexModel,
-        storagePath: config.storagePath,
-      } });
-      results.push({ url, offerId: source.offerId, title: source.title, imageCount: source.images.length, ...analysis });
+      for (const url of urls) {
+        try {
+          const source = await collector.extractProductImagesInMemory(url);
+          if (source.status !== 'completed') { results.push({ url, ...source }); continue; }
+          const analysis = await analyzeGalleryImages({ images: source.images, config: {
+            apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+            visionModel: config.visionModel, complexModel: config.complexModel,
+            storagePath: config.storagePath,
+          } });
+          results.push({ url, offerId: source.offerId, title: source.title,
+            imageCount: source.images.length, ...analysis });
+        } catch (error) {
+          results.push({ url, status: 'failed', error: error.message });
+        }
+      }
+      job.results = results;
+      job.status = results.every((item) => item.status === 'failed') ? 'failed' : 'completed';
+      job.error = job.status === 'failed' ? 'All requested audits failed.' : null;
     } catch (error) {
-      results.push({ url, status: 'failed', error: error.message });
+      job.status = 'failed';
+      job.error = error.message;
+    } finally {
+      job.completedAt = new Date().toISOString();
     }
-  }
-  return { results };
+  });
+  return reply.code(202).send(job);
+});
+
+app.get('/api/image-audit/jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = imageAuditJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
 app.post('/api/sku-audit/live', { preHandler: requireApiKey }, async (request, reply) => {
@@ -209,7 +235,7 @@ app.post('/api/sku-audit/live', { preHandler: requireApiKey }, async (request, r
     startedAt: null, completedAt: null, results: null, error: null };
   skuAuditJobs.set(id, job);
   while (skuAuditJobs.size > 100) skuAuditJobs.delete(skuAuditJobs.keys().next().value);
-  skuAuditQueue = skuAuditQueue.catch(() => {}).then(async () => {
+  multimodalAuditQueue = multimodalAuditQueue.catch(() => {}).then(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
     const results = [];
