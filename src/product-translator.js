@@ -186,57 +186,79 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
   const source = buildProductTranslationSource(detail);
   const model = config.complexModel || 'qwen3.8-max';
   const images = await loadTranslationImages(detail, config);
-  const outputShape = {
-    title: '', description: '', sellerName: '',
+  const translationShape = {
+    sellerName: '',
     attributes: source.attributes.map((item) => ({ index: item.index, name: '', value: '' })),
     skuDimensions: source.skuDimensions.map((item) => ({ index: item.index, name: '', values: item.values.map(() => '') })),
     skuOptions: source.skuOptions.map((item) => ({ index: item.index, text: '', imageUrl: item.imageUrl })),
     skuRows: source.skuRows.map((item) => ({ index: item.index, skuKey: item.skuKey, skuText: '', options: {} })),
     priceTextCandidates: source.priceTextCandidates.map(() => ''),
   };
-  const prompt = `你是专业的泳装和服装B2B商品内容编辑与翻译器。结合多张商品Gallery图片理解产品，并只返回严格JSON。
-要求：
-1. 严格使用给定输出结构；所有数组数量、index、skuKey、imageUrl和原始顺序必须保持不变。
-2. title不是中文标题直译。中文标题可能是年份、平台、外贸、热销和关键词堆叠，只能作为弱参考；根据全部图片重新命名为3至12个英文单词的稳定产品名称。不得含年份、New Arrival、Hot Sale、Cross-Border、AliExpress、Amazon、Export、Wholesale、颜色或印花描述。
-3. description必须重写为35至120个英文单词的单段产品描述。综合多张图片，只描述整个产品稳定的可见特点，例如品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁和套装组成。不得描述任何颜色、印花、图案或单个SKU；不得写促销词、年份、平台、SEO关键词、穿着效果或不可见卖点。
-4. 图片无法证明的材质、工艺、功能、品牌和产品组成不得编造；只有输入属性明确提供时，其他翻译字段才可忠实翻译这些信息。
-5. 保留款号、品牌名、数字、S/M/L/XL、罩杯、单位、货币和行业缩写；不要换算价格、库存、尺码或单位。
-6. attributes、SKU dimensions/options/rows和价格文字按原意准确翻译；SKU options对象的键和值都翻译，但skuKey原样保留。
-7. 空字符串保持空字符串。不要输出Markdown、解释、原文对照或JSON之外的内容。
-目标语言：English。
-输出结构：${JSON.stringify(outputShape)}
-输入JSON：${JSON.stringify(source)}`;
   const imageContent = images.flatMap((image) => ([
     { type: 'text', text: `商品Gallery图片 ${image.index}` },
     { type: 'image_url', image_url: { url: image.url } },
   ]));
-  async function requestTranslation(correction = '') {
-    const content = [{ type: 'text', text: correction ? `${prompt}\n上一次输出未通过校验：${correction}。请完整重新输出。` : prompt },
-      ...imageContent];
+
+  async function callModel(content, maxTokens, label) {
     const response = await fetch(endpointFrom(config.baseUrl), {
       method: 'POST',
       headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: 12000 }),
-      signal: AbortSignal.timeout(300000),
+      body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: maxTokens }),
+      signal: AbortSignal.timeout(360000),
     });
-    if (!response.ok) throw new Error(`DashScope product translation failed (${response.status}).`);
+    if (!response.ok) throw new Error(`DashScope ${label} failed (${response.status}).`);
     const payload = await response.json();
     const raw = contentText(payload.choices?.[0]?.message?.content);
     return { payload, raw };
   }
-  let attempt = await requestTranslation();
-  let translated;
+
+  const visualPrompt = `你是专业的泳装和服装B2B商品内容编辑。综合全部Gallery图片识别同一个产品，只返回严格JSON：{"title":"","description":""}。
+title必须根据图片重新命名，不能直译1688中文标题。使用3至12个英文单词的稳定产品名称；不得含年份、New Arrival、Hot Sale、Cross-Border、AliExpress、Amazon、Export、Wholesale、颜色、印花或图案。
+description必须是35至120个英文单词的单段产品级描述。只写多张图片共同体现的稳定可见特点，例如品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁和套装组成。不得描述颜色、印花、图案、单个SKU、促销、年份、平台、SEO关键词、穿着效果、材质、功能或不可见信息。
+中文标题仅可作为产品类别的弱提示，图片证据优先。不要输出Markdown或JSON之外的内容。
+中文标题弱提示：${JSON.stringify(source.title)}`;
+  async function requestVisualCopy(correction = '') {
+    const text = correction ? `${visualPrompt}\n上一次输出未通过校验：${correction}。请重新输出。` : visualPrompt;
+    return callModel([{ type: 'text', text }, ...imageContent], 1600, 'visual product copy generation');
+  }
+  let visualAttempt = await requestVisualCopy();
+  let visualCopy = parseJson(visualAttempt.raw);
   try {
-    translated = validateProductTranslation(source, parseJson(attempt.raw));
+    validateGeneratedCatalogCopy(visualCopy || {});
   } catch (error) {
-    attempt = await requestTranslation(error.message);
-    translated = validateProductTranslation(source, parseJson(attempt.raw));
+    visualAttempt = await requestVisualCopy(error.message);
+    visualCopy = parseJson(visualAttempt.raw);
+    validateGeneratedCatalogCopy(visualCopy || {});
+  }
+
+  const translationPrompt = `你是专业的泳装和服装B2B商品数据翻译器。把输入JSON中的属性、SKU和价格文字准确翻译为自然英文，只返回严格JSON。
+要求：严格使用给定输出结构；所有数组数量、index、skuKey、imageUrl和原始顺序保持不变。保留款号、品牌名、数字、S/M/L/XL、罩杯、单位、货币和行业缩写；不得换算价格、库存、尺码或单位。SKU options对象的键和值都翻译，skuText翻译，skuKey原样保留。颜色、印花、部件、单件/套装、现货/预售按原意翻译。空字符串保持为空。不要输出Markdown或JSON之外的内容。
+输出结构：${JSON.stringify(translationShape)}
+输入JSON：${JSON.stringify({ sellerName: source.sellerName, attributes: source.attributes,
+    skuDimensions: source.skuDimensions, skuOptions: source.skuOptions,
+    skuRows: source.skuRows, priceTextCandidates: source.priceTextCandidates })}`;
+  async function requestStructuredTranslation(correction = '') {
+    const text = correction ? `${translationPrompt}\n上一次输出未通过校验：${correction}。请完整重新输出。` : translationPrompt;
+    return callModel(text, 10000, 'structured product translation');
+  }
+  let translationAttempt = await requestStructuredTranslation();
+  let structured = parseJson(translationAttempt.raw);
+  let translated = { title: visualCopy.title, description: visualCopy.description, ...(structured || {}) };
+  try {
+    translated = validateProductTranslation(source, translated);
+  } catch (error) {
+    translationAttempt = await requestStructuredTranslation(error.message);
+    structured = parseJson(translationAttempt.raw);
+    translated = validateProductTranslation(source, {
+      title: visualCopy.title, description: visualCopy.description, ...(structured || {}),
+    });
   }
   const imageSources = images.map(({ url, ...image }) => image);
   return {
     schemaVersion: 2, sourceLanguage: 'zh-CN', targetLanguage, model,
     namingStrategy: 'visual_rewrite', imageSources,
     sourceHash: translationSourceHash({ source, imageSources }), source, translated,
-    usage: attempt.payload.usage ?? null,
+    usage: { visual: visualAttempt.payload.usage ?? null,
+      translation: translationAttempt.payload.usage ?? null },
   };
 }
