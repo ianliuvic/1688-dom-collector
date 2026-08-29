@@ -121,6 +121,10 @@ function selectPublishingImages(detail, translation, imageMode = 'translated') {
     return main ? [main] : [];
   }
 
+  if (detail?.raw_data?.gallery?.complete !== true) {
+    throw new Error('A complete, verified 1688 product Gallery is required before full-image publishing.');
+  }
+
   // Model input is deliberately bounded, but WordPress should receive every
   // image from the verified product Gallery after the prioritized subset.
   const source = selected.length ? [...selected, ...fallback] : fallback;

@@ -6,6 +6,7 @@ const detail = {
   id: '1', offer_id: '1068935307931', canonical_url: 'https://detail.1688.com/offer/1068935307931.html',
   currency: 'CNY', price_min: '23.50', price_max: '23.50', moq: null,
   seller_name: '兴城市沐风制衣厂', seller_url: 'https://example.1688.com/', last_crawled_at: '2026-08-29T00:00:00Z',
+  raw_data: { gallery: { source: 'exact_dom_gallery', complete: true, imageCount: 3 } },
   images: [
     { id: '1', image_type: 'main', sort_order: 0, source_url: 'https://img/1.webp', storage_path: '/app/storage/product-images/1/1.webp', mime_type: 'image/webp' },
     { id: '2', image_type: 'gallery', sort_order: 1, source_url: 'https://img/2.webp', storage_path: '/app/storage/product-images/1/2.webp', mime_type: 'image/webp' },
@@ -66,6 +67,15 @@ test('can restrict an emergency WordPress update to the trusted main image', () 
   });
   assert.equal(result.payload.images.length, 1);
   assert.equal(result.payload.images[0].image_type, 'main');
+});
+
+test('blocks full-image publishing when Gallery completeness was not verified', () => {
+  assert.throws(() => buildWordPressProductDraft({
+    detail: { ...detail, raw_data: { gallery: { complete: false } } },
+    translation,
+    taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] },
+    options: { status: 'publish', styleNo: 'SWBK998', categoryIds: [35], primaryCategoryId: 35 },
+  }), /complete, verified 1688 product Gallery/);
 });
 
 test('uses the highest source SKU price and marks retail stock only when every SKU is in stock', () => {

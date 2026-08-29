@@ -37,8 +37,129 @@ function normalizeTier(tier) {
   return price === null ? null : { minQuantity, maxQuantity, price };
 }
 
+const GALLERY_SELECTOR = '.od-gallery-list';
+const GALLERY_IMAGE_SELECTOR = '.od-gallery-list img.preview-img';
+
+/**
+ * Materialize the exact 1688 product carousel before parsing it.
+ *
+ * The carousel is lazy rendered and may keep thumbnails outside the viewport
+ * unresolved.  We scroll the carousel itself, bring every current thumbnail
+ * into view, and retain URLs seen across virtualized DOM updates.  The
+ * resulting snapshot is deliberately scoped to `.od-gallery-list`; no image
+ * elsewhere on the page is ever considered a product Gallery candidate.
+ */
+export async function hydrate1688ProductGallery(page, {
+  waitTimeoutMs = 12000,
+  maxRounds = 10,
+  stableRoundsRequired = 3,
+} = {}) {
+  if (!page?.locator || !page?.evaluate) {
+    return { source: 'not_supported', complete: false, urls: [], reason: 'page_api_unavailable' };
+  }
+
+  const gallery = page.locator(GALLERY_SELECTOR).first();
+  const attached = await gallery.waitFor({ state: 'attached', timeout: waitTimeoutMs })
+    .then(() => true).catch(() => false);
+  if (!attached) {
+    const snapshot = { source: 'safe_fallback', complete: false, stable: false,
+      urls: [], domImageCount: 0, expectedSlotCount: 0, unresolvedSlotCount: 0,
+      rounds: 0, reason: 'exact_gallery_not_found' };
+    await page.evaluate((value) => { window.__collectorExactGallerySnapshot = value; }, snapshot)
+      .catch(() => {});
+    return snapshot;
+  }
+
+  await gallery.scrollIntoViewIfNeeded().catch(() => {});
+  const seen = new Set();
+  let stableRounds = 0;
+  let previousSignature = '';
+  let last = { domImageCount: 0, expectedSlotCount: 0, unresolvedSlotCount: 0 };
+  let rounds = 0;
+
+  for (let round = 0; round < maxRounds; round += 1) {
+    rounds = round + 1;
+    const metrics = await page.evaluate(({ gallerySelector, imageSelector, roundIndex }) => {
+      const container = document.querySelector(gallerySelector);
+      if (!container) return null;
+      const scrollable = [container, ...container.querySelectorAll('*')]
+        .find((node) => node.scrollHeight > node.clientHeight + 2
+          || node.scrollWidth > node.clientWidth + 2) || container;
+      const positions = [0, 0.25, 0.5, 0.75, 1, 1, 0.75, 0.5, 0.25, 0];
+      const fraction = positions[roundIndex] ?? 0;
+      scrollable.scrollTop = Math.round((scrollable.scrollHeight - scrollable.clientHeight) * fraction);
+      scrollable.scrollLeft = Math.round((scrollable.scrollWidth - scrollable.clientWidth) * fraction);
+
+      const candidate = (image) => {
+        const values = [];
+        for (const name of ['data-original', 'data-origin', 'data-lazy-src', 'data-src',
+          'data-ks-lazyload', 'src']) {
+          const value = image.getAttribute(name);
+          if (value) values.push(value);
+        }
+        if (image.currentSrc) values.push(image.currentSrc);
+        for (const value of String(image.getAttribute('srcset') || '').split(',')) {
+          const url = value.trim().split(/\s+/)[0];
+          if (url) values.push(url);
+        }
+        return values.find((value) => value && !value.startsWith('data:')
+          && !/transparent|placeholder|loading/i.test(value)) || null;
+      };
+      const images = Array.from(document.querySelectorAll(imageSelector));
+      for (const image of images) image.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const urls = images.map(candidate).filter(Boolean);
+      const listItems = Array.from(container.querySelectorAll('li'));
+      const expectedSlotCount = listItems.length || images.length;
+      return {
+        urls,
+        domImageCount: images.length,
+        expectedSlotCount,
+        unresolvedSlotCount: Math.max(0, expectedSlotCount - urls.length),
+      };
+    }, { gallerySelector: GALLERY_SELECTOR, imageSelector: GALLERY_IMAGE_SELECTOR, roundIndex: round });
+    if (!metrics) break;
+
+    for (const url of metrics.urls) seen.add(url);
+    last = metrics;
+
+    const thumbnails = page.locator(GALLERY_IMAGE_SELECTOR);
+    const count = Math.min(await thumbnails.count().catch(() => 0), 100);
+    for (let index = 0; index < count; index += 1) {
+      const thumbnail = thumbnails.nth(index);
+      await thumbnail.scrollIntoViewIfNeeded().catch(() => {});
+      await thumbnail.hover({ timeout: 1000 }).catch(() => {});
+    }
+    await page.waitForTimeout(350);
+
+    const signature = [...seen].sort().join('\n');
+    if (signature && signature === previousSignature && last.unresolvedSlotCount === 0) stableRounds += 1;
+    else stableRounds = 0;
+    previousSignature = signature;
+    if (stableRounds >= stableRoundsRequired) break;
+  }
+
+  const snapshot = {
+    source: 'exact_dom_gallery',
+    complete: seen.size > 0 && stableRounds >= stableRoundsRequired && last.unresolvedSlotCount === 0,
+    stable: stableRounds >= stableRoundsRequired,
+    urls: [...seen],
+    domImageCount: last.domImageCount,
+    expectedSlotCount: Math.max(last.expectedSlotCount, seen.size),
+    unresolvedSlotCount: last.unresolvedSlotCount,
+    rounds,
+    reason: seen.size ? null : 'exact_gallery_images_unresolved',
+  };
+  await page.evaluate((value) => { window.__collectorExactGallerySnapshot = value; }, snapshot)
+    .catch(() => {});
+  return snapshot;
+}
+
 /** Extract a deliberately bounded, normalized product record from a loaded 1688 page. */
 export async function parse1688Product(page) {
+  const hydration = await hydrate1688ProductGallery(page).catch(() => ({
+    source: 'safe_fallback', complete: false, stable: false, urls: [],
+    reason: 'gallery_hydration_failed',
+  }));
   const raw = await page.evaluate(() => {
     const text = (node) => node?.textContent?.replace(/\s+/g, ' ').trim() || '';
     const attr = (node, names) => {
@@ -132,10 +253,12 @@ export async function parse1688Product(page) {
     // The current 1688 detail template keeps product images in this exact
     // carousel. Never fall back to every large page image: review avatars,
     // recommendations and shop decorations can all be high resolution.
-    const images = all('.od-gallery-list img.preview-img').map((image) => attr(image, [
+    const domImages = all('.od-gallery-list img.preview-img').map((image) => attr(image, [
       'data-original', 'data-origin', 'data-lazy-src', 'data-src',
       'data-ks-lazyload', 'src',
     ]));
+    const gallerySnapshot = window.__collectorExactGallerySnapshot || null;
+    const images = [...(gallerySnapshot?.urls || []), ...domImages];
 
     const attributes = [];
     for (const row of all([
@@ -171,6 +294,7 @@ export async function parse1688Product(page) {
       description: meta('meta[name="description"]') || meta('meta[property="og:description"]'),
       mainImage: meta('meta[property="og:image"]'),
       images,
+      gallerySnapshot,
       jsonLd,
       embeddedCandidates,
       attributes,
@@ -337,6 +461,17 @@ export async function parse1688Product(page) {
     mainImage: [raw.mainImage, ldImages[0], ...images]
       .map((value) => normalizeImageUrl(value, raw.url)).find(Boolean) ?? null,
     images,
+    gallery: {
+      source: raw.gallerySnapshot?.source || hydration.source || (exactGallery.length ? 'exact_dom_gallery' : 'safe_fallback'),
+      complete: Boolean(raw.gallerySnapshot?.complete ?? hydration.complete),
+      stable: Boolean(raw.gallerySnapshot?.stable ?? hydration.stable),
+      imageCount: images.length,
+      exactImageCount: exactGallery.length,
+      expectedSlotCount: Number(raw.gallerySnapshot?.expectedSlotCount ?? hydration.expectedSlotCount) || 0,
+      unresolvedSlotCount: Number(raw.gallerySnapshot?.unresolvedSlotCount ?? hydration.unresolvedSlotCount) || 0,
+      rounds: Number(raw.gallerySnapshot?.rounds ?? hydration.rounds) || 0,
+      reason: raw.gallerySnapshot?.reason || hydration.reason || null,
+    },
     videos: [],
     skuDimensions: (candidates.dimensions.length ? candidates.dimensions : inferredDimensions).slice(0, 50),
     skuRows: (candidates.skuRows.length ? candidates.skuRows : inferredSkuRows).slice(0, MAX_SKU_ROWS),
