@@ -181,8 +181,8 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   if (!translation?.id || !clean(translation.title)) throw new Error('An English product translation is required.');
 
   const attributes = translatedAttributeMap(translation);
-  const sourceItemNumber = attributes.get('item no.') || attributes.get('item number') || '';
-  const styleNo = clean(options.styleNo) || sourceItemNumber || `1688-${detail.offer_id}`;
+  const styleNo = clean(options.styleNo);
+  if (!styleNo) throw new Error('A wearhongxiu style number allocation is required.');
   const publishingImages = selectPublishingImages(detail, translation);
   const sizeDimension = findDimension(translation, ['size', '尺码']);
   const sizes = unique(sizeDimension?.values ?? []);
@@ -315,7 +315,9 @@ function wordpressClient(config) {
   };
 }
 
-export async function prepareWordPressProductDraft({ detail, translation, options = {}, config }) {
+export async function prepareWordPressProductDraft({
+  detail, translation, options = {}, config, reserveStyleNumber = false,
+}) {
   const wp = wordpressClient(config);
   const taxonomies = await wp('/wp-json/hx/v1/products/taxonomies');
   const needsCategoryModel = !(Array.isArray(options.categoryIds) && options.categoryIds.length)
@@ -328,7 +330,24 @@ export async function prepareWordPressProductDraft({ detail, translation, option
       apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
       complexModel: config.complexModel, storagePath: config.storagePath,
     } }) : null;
-  return buildWordPressProductDraft({ detail, translation, options, merchandising, taxonomies });
+  const selection = resolveMerchandisingSelection({ options, merchandising, taxonomies });
+  let styleNo = clean(options.styleNo);
+  if (!styleNo) {
+    if (!selection.primaryCategoryId) throw new Error('A primary category is required before allocating a style number.');
+    const allocated = await wp('/wp-json/hx/v1/products/style-number', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        external_id: `1688:${detail.offer_id}`,
+        primary_category_id: selection.primaryCategoryId,
+        reserve: reserveStyleNumber,
+      }),
+    });
+    styleNo = clean(allocated.style_no);
+  }
+  return buildWordPressProductDraft({
+    detail, translation, options: { ...options, styleNo }, merchandising, taxonomies,
+  });
 }
 
 function resolveStorageFile(storagePath, filename) {
@@ -341,7 +360,9 @@ function resolveStorageFile(storagePath, filename) {
 }
 
 export async function publishProductToWordPress({ detail, translation, options = {}, config }) {
-  const draft = await prepareWordPressProductDraft({ detail, translation, options, config });
+  const draft = await prepareWordPressProductDraft({
+    detail, translation, options, config, reserveStyleNumber: true,
+  });
   const wp = wordpressClient(config);
   const media = [];
 

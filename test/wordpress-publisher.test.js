@@ -32,10 +32,10 @@ const translation = {
 
 test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
   const result = buildWordPressProductDraft({ detail, translation,
-    options: { status: 'publish', categoryIds: [35], primaryCategoryId: 35, tags: ['Halter Neck'] },
+    options: { status: 'publish', styleNo: 'SWBK142', categoryIds: [35], primaryCategoryId: 35, tags: ['Halter Neck'] },
     taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] } });
   assert.equal(result.payload.external_id, '1688:1068935307931');
-  assert.equal(result.payload.style_no, 'RL26010840');
+  assert.equal(result.payload.style_no, 'SWBK142');
   assert.equal(result.payload.status, 'publish');
   assert.deepEqual(result.payload.category_ids, [35]);
   assert.equal(result.payload.images.length, 2);
@@ -59,9 +59,16 @@ test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
 test('uses the highest source SKU price and marks retail stock only when every SKU is in stock', () => {
   const inStock = { ...detail, price_max: '20', skus: detail.skus.map((sku, index) => ({ ...sku, price: index ? '25' : '23.5', stock: '2' })) };
   const result = buildWordPressProductDraft({ detail: inStock, translation,
-    options: { categoryIds: [35], primaryCategoryId: 35 },
+    options: { styleNo: 'SWBK143', categoryIds: [35], primaryCategoryId: 35 },
     taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] } });
   assert.equal(buildWearHongxiuPricing(inStock).source_max_price, 25);
   assert.equal(result.payload.meta.sample_available, true);
   assert.equal(result.payload.bulk_pricing.tiers[0].price, 6.92);
+});
+
+test('requires an allocated wearhongxiu style number instead of reusing the 1688 item number', () => {
+  assert.throws(() => buildWordPressProductDraft({ detail, translation,
+    options: { categoryIds: [35], primaryCategoryId: 35 },
+    taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] } }),
+  /style number allocation/);
 });
