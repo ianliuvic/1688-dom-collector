@@ -11,6 +11,7 @@ import { auditProductSkus } from './sku-auditor.js';
 import { translateProductDetail } from './product-translator.js';
 import { prepareWordPressProductDraft, publishProductToWordPress } from './wordpress-publisher.js';
 import { createLoginManager } from './login-manager.js';
+import { createConcurrentQueue } from './concurrent-queue.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -31,6 +32,7 @@ const config = {
   visionModel: process.env.DASHSCOPE_VISION_MODEL || 'qwen3.8-max',
   complexModel: process.env.DASHSCOPE_COMPLEX_MODEL || 'qwen3.8-max',
   translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
+  translationConcurrency: Math.min(Math.max(Number(process.env.TRANSLATION_CONCURRENCY) || 1, 1), 10),
   modelImageTransport: process.env.MODEL_IMAGE_TRANSPORT === 'persistent_storage'
     ? 'persistent_storage' : 'source_url',
   wordpressBaseUrl: process.env.WORDPRESS_BASE_URL,
@@ -58,7 +60,10 @@ const imageAuditJobs = new Map();
 const translationJobs = new Map();
 const wordpressJobs = new Map();
 let multimodalAuditQueue = Promise.resolve();
-let translationQueue = Promise.resolve();
+const translationQueue = createConcurrentQueue({
+  concurrency: config.translationConcurrency,
+  onTaskError: (error) => app.log.error({ err: error }, 'unhandled translation queue error'),
+});
 let wordpressQueue = Promise.resolve();
 
 function requireApiKey(request, reply, done) {
@@ -271,7 +276,7 @@ app.post('/api/product-details/:id/translations', { preHandler: requireApiKey },
     startedAt: null, completedAt: null, translationId: null, result: null, error: null };
   translationJobs.set(id, job);
   while (translationJobs.size > 100) translationJobs.delete(translationJobs.keys().next().value);
-  translationQueue = translationQueue.catch(() => {}).then(async () => {
+  translationQueue.enqueue(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
     try {
