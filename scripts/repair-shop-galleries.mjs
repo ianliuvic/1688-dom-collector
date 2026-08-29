@@ -135,6 +135,11 @@ async function advanceRecaptures() {
       item.recaptureStatus = 'completed';
       item.stage = 'waiting_for_main_publish';
     } catch (error) {
+      if (error.statusCode === 404) {
+        item.wordpressJobId = null;
+        item.stage = 'waiting_for_main_publish';
+        return;
+      }
       if (isTransient(error)) return;
       item.stage = 'failed';
       item.error = error.message;
@@ -193,7 +198,14 @@ async function advanceWordPressRepairs() {
 }
 
 async function main() {
-  await initialize();
+  try {
+    progress = JSON.parse(await fs.readFile(repairProgressPath, 'utf8'));
+    progress.status = 'running';
+    progress.completedAt = null;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    await initialize();
+  }
   await queueRecaptures();
   let lastLogAt = 0;
   while (!stopping) {
