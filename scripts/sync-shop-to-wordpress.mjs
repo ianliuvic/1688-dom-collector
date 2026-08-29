@@ -7,6 +7,7 @@ const shopId = process.env.SYNC_SHOP_ID;
 const publishStatus = process.env.SYNC_PUBLISH_STATUS || 'publish';
 const progressPath = process.env.SYNC_PROGRESS_PATH;
 const pollMs = Math.max(Number(process.env.SYNC_POLL_MS) || 15000, 5000);
+const resumeEnabled = !['0', 'false', 'no'].includes(String(process.env.SYNC_RESUME || 'true').toLowerCase());
 
 if (!apiKey) throw new Error('COLLECTOR_API_KEY is required.');
 if (!shopId) throw new Error('SYNC_SHOP_ID is required.');
@@ -71,6 +72,65 @@ function failItem(item, stage, error) {
   item.lastFailedAt = now();
 }
 
+function isTransientError(error) {
+  if ([408, 425, 429, 500, 502, 503, 504].includes(Number(error?.statusCode))) return true;
+  const message = String(error?.message || error || '').toLowerCase();
+  return [
+    'fetch failed',
+    'gateway time-out',
+    'gateway timeout',
+    'timed out',
+    'timeout',
+    'econnreset',
+    'econnrefused',
+    'socket hang up',
+    'network',
+  ].some((fragment) => message.includes(fragment));
+}
+
+function resetLostJob(item, stage) {
+  item.error = null;
+  item.failedStage = null;
+  if (stage === 'translation') {
+    item.translationJobId = null;
+    item.translationCompleted = false;
+    item.stage = 'captured';
+  } else if (stage === 'publish') {
+    item.wordpressJobId = null;
+    item.stage = 'translated';
+  }
+}
+
+function recoverExistingItem(item) {
+  // Published products are immutable checkpoints. Everything else can safely
+  // be rebuilt because translations are versioned and WordPress upserts by
+  // the external product identity.
+  if (item.stage === 'published') return;
+
+  const errorText = String(item.error || '').toLowerCase();
+  const recoverableFailure = item.stage === 'failed' && (
+    errorText.includes('not_found')
+    || errorText.includes('fetch failed')
+    || errorText.includes('gateway time-out')
+    || errorText.includes('gateway timeout')
+    || errorText.includes('timeout')
+    || errorText.includes('network')
+  );
+
+  if (recoverableFailure) {
+    if (item.failedStage === 'capture') {
+      item.stage = item.detailId ? 'captured' : 'new';
+      if (!item.detailId) item.captureJobId = null;
+    } else if (item.failedStage === 'translation') {
+      resetLostJob(item, 'translation');
+    } else if (item.failedStage === 'publish') {
+      resetLostJob(item, 'publish');
+    }
+    item.error = null;
+    item.failedStage = null;
+  }
+}
+
 async function queueCapture(item) {
   const job = await api('/api/product-details', {
     method: 'POST',
@@ -118,6 +178,15 @@ async function queuePublish(item) {
 
 async function advanceItem(item) {
   try {
+    if (item.stage === 'new') {
+      try {
+        await queueCapture(item);
+      } catch (error) {
+        if (!isTransientError(error)) failItem(item, 'capture', error);
+      }
+      return;
+    }
+
     if (item.stage === 'capturing') {
       const job = await api(`/api/jobs/${item.captureJobId}`);
       if (['queued', 'running'].includes(job.status)) return;
@@ -132,7 +201,7 @@ async function advanceItem(item) {
       try {
         await queueTranslation(item);
       } catch (error) {
-        failItem(item, 'translation', error);
+        if (!isTransientError(error)) failItem(item, 'translation', error);
       }
       return;
     }
@@ -152,7 +221,7 @@ async function advanceItem(item) {
       try {
         await queuePublish(item);
       } catch (error) {
-        failItem(item, 'publish', error);
+        if (!isTransientError(error)) failItem(item, 'publish', error);
       }
       return;
     }
@@ -174,8 +243,20 @@ async function advanceItem(item) {
     const stage = item.stage === 'capturing' ? 'capture'
       : item.stage === 'translating' ? 'translation'
         : item.stage === 'publishing' ? 'publish' : item.stage;
-    if (error.statusCode === 404 && stage === 'translation') item.translationJobId = null;
-    if (error.statusCode === 404 && stage === 'publish') item.wordpressJobId = null;
+    if (error.statusCode === 404 && stage === 'capture') {
+      try {
+        await resolveDetail(item);
+      } catch {
+        item.captureJobId = null;
+        item.stage = 'new';
+      }
+      return;
+    }
+    if (error.statusCode === 404 && ['translation', 'publish'].includes(stage)) {
+      resetLostJob(item, stage);
+      return;
+    }
+    if (isTransientError(error)) return;
     failItem(item, stage, error);
   }
 }
@@ -248,8 +329,48 @@ async function initialize() {
   logProgress('All first-pass product detail jobs have been queued.');
 }
 
+async function resume() {
+  const raw = await fs.readFile(progressPath, 'utf8');
+  const existing = JSON.parse(raw);
+  if (String(existing.shopId) !== String(shopId)) {
+    throw new Error(`Progress shop ${existing.shopId} does not match requested shop ${shopId}.`);
+  }
+  progress = existing;
+  progress.status = 'running';
+  progress.completedAt = null;
+  progress.fatalError = null;
+
+  for (const item of Object.values(progress.items)) recoverExistingItem(item);
+
+  // Captures are durable, but a prior network failure may have hidden the
+  // completed response. Resolve SQL first and only enqueue a new capture if
+  // no saved detail exists.
+  for (const item of Object.values(progress.items).filter((entry) => entry.stage === 'new')) {
+    try {
+      await resolveDetail(item);
+    } catch {
+      await queueCapture(item).catch((error) => {
+        if (!isTransientError(error)) failItem(item, 'capture', error);
+      });
+    }
+  }
+
+  await saveProgress();
+  logProgress('Existing synchronization progress was recovered.');
+}
+
 async function main() {
-  await initialize();
+  let resumed = false;
+  if (resumeEnabled) {
+    try {
+      await fs.access(progressPath);
+      await resume();
+      resumed = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  if (!resumed) await initialize();
   let lastLogAt = 0;
   while (!stopping) {
     const active = Object.values(progress.items).filter((item) => !['published', 'failed'].includes(item.stage));
