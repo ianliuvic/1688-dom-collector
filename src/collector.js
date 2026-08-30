@@ -264,23 +264,30 @@ export function createCollector({
     const screenshotPath = path.join(jobPath, 'page.png');
 
     if (job.options?.mode === 'product_detail') {
-      await page.goto(job.url, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(5000);
-      const finalUrl = page.url();
-      const title = await page.title();
-      const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
-      sessionState = classifySession(finalUrl, bodyText);
-      lastCheckedAt = new Date().toISOString();
-      await fs.writeFile(domPath, await page.content(), 'utf8');
-      if (sessionState === 'requires_auth') {
-        return { status: 'requires_auth', title, finalUrl, domPath, screenshotPath: null,
-          extractedData: null, error: 'Login or human verification is required.' };
+      const detailPage = await context.newPage();
+      detailPage.setDefaultNavigationTimeout(navigationTimeoutMs);
+      try {
+        await detailPage.goto(job.url, { waitUntil: 'domcontentloaded' });
+        await detailPage.waitForTimeout(5000);
+        const finalUrl = detailPage.url();
+        const title = await detailPage.title();
+        const bodyText = await detailPage.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+        const detailSessionState = classifySession(finalUrl, bodyText);
+        sessionState = detailSessionState;
+        lastCheckedAt = new Date().toISOString();
+        await fs.writeFile(domPath, await detailPage.content(), 'utf8');
+        if (detailSessionState === 'requires_auth') {
+          return { status: 'requires_auth', title, finalUrl, domPath, screenshotPath: null,
+            extractedData: null, error: 'Login or human verification is required.' };
+        }
+        const extractedData = await parse1688Product(detailPage);
+        extractedData.localImages = await downloadProductImages(extractedData, storagePath, job.id, context);
+        await fs.writeFile(path.join(jobPath, 'product.json'), JSON.stringify(extractedData, null, 2), 'utf8');
+        return { status: 'completed', title, finalUrl, domPath, screenshotPath: null,
+          extractedData, error: null };
+      } finally {
+        await detailPage.close().catch(() => {});
       }
-      const extractedData = await parse1688Product(page);
-      extractedData.localImages = await downloadProductImages(extractedData, storagePath, job.id, context);
-      await fs.writeFile(path.join(jobPath, 'product.json'), JSON.stringify(extractedData, null, 2), 'utf8');
-      return { status: 'completed', title, finalUrl, domPath, screenshotPath: null,
-        extractedData, error: null };
     }
 
     if (job.options?.mode === 'shop_contact') {

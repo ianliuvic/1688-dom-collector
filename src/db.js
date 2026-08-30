@@ -350,19 +350,23 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
-  async function claimNextJob() {
+  async function claimNextJob(queue = 'general') {
+    if (!['general', 'product_detail'].includes(queue)) throw new Error('Unsupported capture queue.');
     const result = await pool.query(`
       UPDATE capture_jobs
       SET status = 'running', started_at = now(), error = NULL
       WHERE id = (
         SELECT id FROM capture_jobs
-        WHERE status = 'queued'
+        WHERE status = 'queued' AND (
+          ($1 = 'product_detail' AND options->>'mode' = 'product_detail')
+          OR ($1 = 'general' AND COALESCE(options->>'mode', '') <> 'product_detail')
+        )
         ORDER BY created_at
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       )
       RETURNING *
-    `);
+    `, [queue]);
     return result.rows[0] ?? null;
   }
 
@@ -484,7 +488,7 @@ export function createDatabase(databaseUrl) {
   async function listShopProducts(shopId, limit = 100) {
     const result = await pool.query(
       'SELECT * FROM shop_products WHERE shop_id = $1 ORDER BY last_crawled_at DESC LIMIT $2',
-      [shopId, Math.min(Math.max(Number(limit) || 100, 1), 1000)],
+      [shopId, Math.min(Math.max(Number(limit) || 100, 1), 5000)],
     );
     return result.rows;
   }

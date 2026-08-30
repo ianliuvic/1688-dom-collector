@@ -46,6 +46,7 @@ const config = {
   productsRagApiUrl: process.env.PRODUCTS_RAG_API_URL || '',
   productsRagAdminToken: process.env.PRODUCTS_RAG_ADMIN_TOKEN || '',
   productsRagSyncConcurrency: Math.min(Math.max(Number(process.env.PRODUCTS_RAG_SYNC_CONCURRENCY) || 2, 1), 5),
+  detailCaptureConcurrency: Math.min(Math.max(Number(process.env.DETAIL_CAPTURE_CONCURRENCY) || 1, 1), 5),
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -58,7 +59,7 @@ const loginManager = createLoginManager(config);
 const ragClient = createRagClient(config);
 let workerRunning = true;
 let workerEnabled = true;
-let workerActive = false;
+let workerActiveCount = 0;
 let browserMode = 'collector';
 let browserTransition = null;
 let modeSwitchQueue = Promise.resolve();
@@ -125,7 +126,7 @@ function requireNovncAuth(request, reply, done) {
 }
 
 async function waitForWorkerIdle() {
-  while (workerActive) await new Promise((resolve) => setTimeout(resolve, 100));
+  while (workerActiveCount > 0) await new Promise((resolve) => setTimeout(resolve, 100));
 }
 
 async function performBrowserModeSwitch(target) {
@@ -172,7 +173,9 @@ function getBrowserModeStatus() {
     mode: browserMode,
     transition: browserTransition,
     workerEnabled,
-    workerActive,
+    workerActive: workerActiveCount > 0,
+    workerActiveCount,
+    detailCaptureConcurrency: config.detailCaptureConcurrency,
     collector: collector.getSessionStatus(),
     login: loginManager.getStatus(),
     loginUrl: `https://${process.env.LOGIN_PUBLIC_HOST || 'collector.yiswim.cloud'}/login/vnc.html?autoconnect=1&resize=remote&path=login/websockify`,
@@ -1038,22 +1041,22 @@ app.get('/api/jobs/:id/dom', { preHandler: requireApiKey }, async (request, repl
   }
 });
 
-async function workerLoop() {
+async function workerLoop(queue, workerIndex = 0) {
   while (workerRunning) {
     if (!workerEnabled) {
       await new Promise((resolve) => setTimeout(resolve, 250));
       continue;
     }
-    workerActive = true;
+    workerActiveCount += 1;
     let job;
     try {
-      job = await db.claimNextJob();
+      job = await db.claimNextJob(queue);
     } catch (error) {
-      workerActive = false;
+      workerActiveCount -= 1;
       throw error;
     }
     if (!job) {
-      workerActive = false;
+      workerActiveCount -= 1;
       await new Promise((resolve) => setTimeout(resolve, 2000));
       continue;
     }
@@ -1105,7 +1108,7 @@ async function workerLoop() {
         extractedData: null, error: error.message,
       });
     } finally {
-      workerActive = false;
+      workerActiveCount -= 1;
     }
     await new Promise((resolve) => setTimeout(resolve, config.minCaptureIntervalMs));
   }
@@ -1133,7 +1136,10 @@ try {
 }
 await collector.start();
 await app.listen({ port: config.port, host: '0.0.0.0' });
-workerLoop().catch((error) => {
+const workers = [workerLoop('general', 0),
+  ...Array.from({ length: config.detailCaptureConcurrency }, (_, index) =>
+    workerLoop('product_detail', index + 1))];
+Promise.all(workers).catch((error) => {
   app.log.fatal(error, 'worker stopped');
   process.exitCode = 1;
 });
