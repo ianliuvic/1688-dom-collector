@@ -4,7 +4,7 @@ import path from 'node:path';
 import Fastify from 'fastify';
 import fastifyHttpProxy from '@fastify/http-proxy';
 import { createDatabase } from './db.js';
-import { createCollector, isAllowed1688Url } from './collector.js';
+import { createCollector, is1688ShopUrl, isAllowed1688Url } from './collector.js';
 import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
@@ -976,8 +976,7 @@ app.post('/api/shop-scans', { preHandler: [requireApiKey, requireCollectorMode] 
   const sortType = request.body?.sortType ?? 'wangpu_score';
   const allPages = request.body?.allPages === true;
   const maxPages = request.body?.maxPages ?? 1000;
-  if (typeof url !== 'string' || !isAllowed1688Url(url)
-      || !new URL(url).hostname.startsWith('shop')) {
+  if (typeof url !== 'string' || !isAllowed1688Url(url) || !is1688ShopUrl(url)) {
     return reply.code(400).send({ error: 'A valid HTTPS 1688 shop URL is required.' });
   }
   if (memberId !== undefined
@@ -1007,8 +1006,7 @@ app.post('/api/shop-scans', { preHandler: [requireApiKey, requireCollectorMode] 
 
 app.post('/api/shop-scans/all', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const url = request.body?.url;
-  if (typeof url !== 'string' || !isAllowed1688Url(url)
-      || !new URL(url).hostname.startsWith('shop')) {
+  if (typeof url !== 'string' || !isAllowed1688Url(url) || !is1688ShopUrl(url)) {
     return reply.code(400).send({ error: 'A valid HTTPS 1688 shop URL is required.' });
   }
   const job = await db.createJob(crypto.randomUUID(), url, {
