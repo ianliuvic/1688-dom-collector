@@ -136,6 +136,7 @@ function recoverExistingItem(item) {
   if (item.stage === 'failed'
       && errorText.includes('no saved main or gallery image is available')) {
     item.captureJobId = null;
+    item.captureAttempts = 0;
     item.detailId = null;
     item.translationJobId = null;
     item.translationCompleted = false;
