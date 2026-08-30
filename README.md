@@ -34,6 +34,15 @@ This framework does not bypass CAPTCHAs, signatures, access controls, or platfor
 | `BROWSER_HEADLESS` | no | `false` |
 | `SCREENSHOT_MODE` | no | `errors` (`never`, `errors`, or `always`) |
 | `CLEAR_STALE_BROWSER_LOCKS` | no | `false`; one-shot recovery only while all profile users are stopped |
+| `DEEPSEEK_API_KEY` | yes for AI analysis/translation/publishing | empty; configure manually |
+| `DEEPSEEK_BASE_URL` | no | `https://api.deepseek.com` |
+| `DEEPSEEK_VISION_MODEL` | no | `deepseek-v4-flash-vision-exp` |
+| `DEEPSEEK_COMPLEX_MODEL` | no | `deepseek-v4-flash-vision-exp` |
+
+The DeepSeek model handles Gallery/SKU audits, English catalog generation, and
+WordPress merchandising. The separate products RAG service continues to use
+its existing `qwen3-vl-embedding` configuration; this model switch does not
+change or rebuild embeddings.
 
 ## API
 

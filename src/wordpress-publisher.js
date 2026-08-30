@@ -417,7 +417,7 @@ export async function prepareWordPressProductDraft({
   const needsMaterialModel = !clean(options.material);
   const merchandising = (needsCategoryModel || needsTagModel || needsMaterialModel)
     ? await analyzeProductMerchandising({ detail, translation, taxonomies, config: {
-      apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+      apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
       complexModel: config.complexModel, storagePath: config.storagePath,
       modelImageTransport: config.modelImageTransport,
     } }) : null;

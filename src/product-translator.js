@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+const ENDPOINT = 'https://api.deepseek.com/chat/completions';
 const TITLE_NOISE_RE = /\b(?:20\d{2}|new arrival|new style|hot sale|best seller|cross[- ]border|aliexpress|amazon|export|wholesale)\b/i;
 const VARIANT_APPEARANCE_RE = /\b(?:black|white|red|blue|green|pink|yellow|purple|orange|brown|beige|navy|floral|flower|printed|print|patterned|pattern|striped|stripe|polka[ -]?dot|leopard|abstract|color(?:ed|ful)?)\b/i;
 
@@ -188,10 +188,10 @@ async function loadTranslationImages(detail, config) {
 }
 
 export async function translateProductDetail({ detail, targetLanguage = 'en', config }) {
-  if (!config?.apiKey) throw new Error('DASHSCOPE_API_KEY is not configured.');
+  if (!config?.apiKey) throw new Error('DEEPSEEK_API_KEY is not configured.');
   if (targetLanguage !== 'en') throw new Error('Only English translation is currently supported.');
   const source = buildProductTranslationSource(detail);
-  const model = config.complexModel || 'qwen3.8-max';
+  const model = config.complexModel || 'deepseek-v4-flash-vision-exp';
   const images = await loadTranslationImages(detail, config);
   const translationShape = {
     sellerName: '',
@@ -214,7 +214,7 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
       body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: maxTokens }),
       signal: AbortSignal.timeout(360000),
     });
-    if (!response.ok) throw new Error(`DashScope ${label} failed (${response.status}).`);
+    if (!response.ok) throw new Error(`DeepSeek ${label} failed (${response.status}).`);
     const payload = await response.json();
     const raw = contentText(payload.choices?.[0]?.message?.content);
     return { payload, raw };

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const DEFAULT_ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+const DEFAULT_ENDPOINT = 'https://api.deepseek.com/chat/completions';
 const DEFAULT_PROMPT = '请分析这张1688商品主图。仅返回JSON，字段包括：product_type（产品类型）、color（主要颜色）、design_details（可见设计细节数组）、material_cues（可见材质线索数组）、pattern（图案）、quality_notes（做工/品质可见特征数组）、confidence（0到1的小数）。不要编造图片中不可见的信息。';
 
 function endpointFrom(baseUrl) {
@@ -24,7 +24,7 @@ function parseJson(text) {
 
 export async function analyzeProductImage({ imagePath, sourceUrl = null, offerId = null, prompt = DEFAULT_PROMPT, config = {} }) {
   const apiKey = config.apiKey;
-  if (!apiKey) throw new Error('DASHSCOPE_API_KEY is not configured.');
+  if (!apiKey) throw new Error('DEEPSEEK_API_KEY is not configured.');
   const resolved = path.resolve(imagePath);
   const storageRoot = path.resolve(config.storagePath || '/app/storage');
   if (!resolved.startsWith(`${storageRoot}${path.sep}`)) throw new Error('Image path is outside persistent storage.');
@@ -37,7 +37,7 @@ export async function analyzeProductImage({ imagePath, sourceUrl = null, offerId
     method: 'POST',
     headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({
-      model: config.model || 'qwen3.8-max',
+      model: config.model || 'deepseek-v4-flash-vision-exp',
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: dataUrl } }] }],
       temperature: 0.1,
       max_tokens: 1200,
@@ -47,7 +47,7 @@ export async function analyzeProductImage({ imagePath, sourceUrl = null, offerId
   const body = await response.text();
   let payload;
   try { payload = JSON.parse(body); } catch { payload = { raw: body.slice(0, 2000) }; }
-  if (!response.ok) throw new Error(`DashScope vision request failed (${response.status}).`);
+  if (!response.ok) throw new Error(`DeepSeek vision request failed (${response.status}).`);
   const content = parseContent(payload.choices?.[0]?.message?.content);
-  return { model: config.model || 'qwen3.8-max', sourceUrl, offerId, imagePath: resolved, prompt, content, parsed: parseJson(content), usage: payload.usage ?? null };
+  return { model: config.model || 'deepseek-v4-flash-vision-exp', sourceUrl, offerId, imagePath: resolved, prompt, content, parsed: parseJson(content), usage: payload.usage ?? null };
 }

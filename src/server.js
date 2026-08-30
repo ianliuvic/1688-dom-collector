@@ -30,10 +30,10 @@ const config = {
   screenshotMode: ['never', 'errors', 'always'].includes(process.env.SCREENSHOT_MODE)
     ? process.env.SCREENSHOT_MODE : 'errors',
   clearStaleBrowserLocks: process.env.CLEAR_STALE_BROWSER_LOCKS === 'true',
-  dashscopeApiKey: process.env.DASHSCOPE_API_KEY,
-  dashscopeBaseUrl: process.env.DASHSCOPE_BASE_URL,
-  visionModel: process.env.DASHSCOPE_VISION_MODEL || 'qwen3.8-max',
-  complexModel: process.env.DASHSCOPE_COMPLEX_MODEL || 'qwen3.8-max',
+  modelApiKey: process.env.DEEPSEEK_API_KEY,
+  modelBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
+  visionModel: process.env.DEEPSEEK_VISION_MODEL || 'deepseek-v4-flash-vision-exp',
+  complexModel: process.env.DEEPSEEK_COMPLEX_MODEL || 'deepseek-v4-flash-vision-exp',
   translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
   translationConcurrency: Math.min(Math.max(Number(process.env.TRANSLATION_CONCURRENCY) || 1, 1), 10),
   savedAuditConcurrency: Math.min(Math.max(Number(process.env.SAVED_AUDIT_CONCURRENCY) || 3, 1), 5),
@@ -100,8 +100,10 @@ function trimTerminalJobs(jobMap, maxEntries = 2000) {
 
 function isExternalModelAccessError(error) {
   const message = String(error?.message || error || '').toLowerCase();
-  return message.includes('failed (403)') || message.includes('accessdenied')
-    || message.includes('arrearage') || message.includes('unpurchased');
+  return message.includes('failed (401)') || message.includes('failed (402)')
+    || message.includes('failed (403)') || message.includes('accessdenied')
+    || message.includes('arrearage') || message.includes('unpurchased')
+    || message.includes('insufficient balance') || message.includes('insufficient_balance');
 }
 
 function requireApiKey(request, reply, done) {
@@ -208,8 +210,8 @@ function getBrowserModeStatus() {
 
 function auditModelConfig() {
   return {
-    apiKey: config.dashscopeApiKey,
-    baseUrl: config.dashscopeBaseUrl,
+    apiKey: config.modelApiKey,
+    baseUrl: config.modelBaseUrl,
     visionModel: config.visionModel,
     complexModel: config.complexModel,
     storagePath: config.storagePath,
@@ -545,7 +547,7 @@ app.post('/api/product-details/:id/translations', { preHandler: requireApiKey },
     job.startedAt = new Date().toISOString();
     try {
       const translated = await translateProductDetail({ detail, targetLanguage, config: {
-        apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+        apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
         complexModel: config.complexModel, storagePath: config.storagePath,
         maxTranslationImages: config.translationImageLimit,
         modelImageTransport: config.modelImageTransport,
@@ -816,7 +818,7 @@ app.post('/api/product-details/:id/vision', { preHandler: requireApiKey }, async
     const result = await analyzeProductImage({
       imagePath: firstImage.storage_path, sourceUrl: firstImage.source_url,
       offerId: detail.offer_id, prompt: request.body?.prompt, config: {
-        apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+        apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
         model: config.visionModel, storagePath: config.storagePath,
       },
     });
@@ -880,7 +882,7 @@ app.post('/api/image-audit/test', { preHandler: requireApiKey }, async (request,
   }
   try {
     return await analyzeGalleryImages({ images: request.body.images, config: {
-      apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+      apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
       visionModel: config.visionModel, complexModel: config.complexModel,
       storagePath: config.storagePath,
     } });
@@ -911,7 +913,7 @@ app.post('/api/image-audit/live', { preHandler: [requireApiKey, requireCollector
           const source = await collector.extractProductImagesInMemory(url);
           if (source.status !== 'completed') { results.push({ url, ...source }); continue; }
           const analysis = await analyzeGalleryImages({ images: source.images, config: {
-            apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+            apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
             visionModel: config.visionModel, complexModel: config.complexModel,
             storagePath: config.storagePath,
           } });
@@ -964,7 +966,7 @@ app.post('/api/sku-audit/live', { preHandler: [requireApiKey, requireCollectorMo
           if (source.status !== 'completed') { results.push({ url, ...source }); continue; }
           const audit = await auditProductSkus({
             product: source.product, skuImages: source.skuImages, galleryImages: source.galleryImages,
-            config: { apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
+            config: { apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
               visionModel: config.visionModel, complexModel: config.complexModel },
           });
           results.push({ url, offerId: source.offerId, title: source.title,

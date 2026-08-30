@@ -1,4 +1,4 @@
-const ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+const ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
 const AVAILABILITY_RE = /(现货|有货|预售|缺货|补货|下单|联系客服|咨询客服|拍下|备注|随机发|不退不换)/i;
 const MODEL_CODE_RE = /(?:^|[\s_-])(?:[A-Z]{1,5}\d{2,}|\d{3,}[A-Z]{0,4})(?:$|[\s_-])/i;
@@ -103,14 +103,14 @@ export function auditSkuRules(product = {}) {
 }
 
 async function callComplexModel(content, config) {
-  const model = config.complexModel || 'qwen3.8-max';
+  const model = config.complexModel || 'deepseek-v4-flash-vision-exp';
   const response = await fetch(endpointFrom(config.baseUrl), {
     method: 'POST',
     headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: 5000 }),
     signal: AbortSignal.timeout(240000),
   });
-  if (!response.ok) throw new Error(`DashScope SKU audit failed (${response.status}).`);
+  if (!response.ok) throw new Error(`DeepSeek SKU audit failed (${response.status}).`);
   const payload = await response.json();
   const raw = contentText(payload.choices?.[0]?.message?.content);
   return { model, raw, parsed: parseJson(raw), usage: payload.usage ?? null };
@@ -118,7 +118,7 @@ async function callComplexModel(content, config) {
 
 /** Analyze irregular 1688 variants without changing, filtering, or normalizing the source data. */
 export async function auditProductSkus({ product, skuImages = [], galleryImages = [], config }) {
-  if (!config?.apiKey) throw new Error('DASHSCOPE_API_KEY is not configured.');
+  if (!config?.apiKey) throw new Error('DEEPSEEK_API_KEY is not configured.');
   const rules = auditSkuRules(product);
   const imageParts = [];
   const imageManifest = [];
@@ -148,13 +148,13 @@ export async function auditProductSkus({ product, skuImages = [], galleryImages 
     warnings: [{ code: 'model_response_not_json', severity: 'review', scope: 'product', evidence: result.raw.slice(0, 500), confidence: 1 }] };
   const modelWarnings = Array.isArray(modelAudit.warnings) ? modelAudit.warnings : [];
   const warnings = [...rules.warnings.map((warning) => ({ ...warning, source: 'rules' })),
-    ...modelWarnings.map((warning) => ({ ...warning, source: 'qwen3.8-max' }))];
+    ...modelWarnings.map((warning) => ({ ...warning, source: result.model }))];
   const modelSummary = modelAudit.summary && typeof modelAudit.summary === 'object' ? modelAudit.summary : {};
   const requiresReview = warnings.length > 0 || Object.values(modelSummary).some((value) => value === true);
   return {
     schemaVersion: 1,
     mode: 'audit_only',
-    models: { vision: config.visionModel || 'qwen3.8-max', complex: result.model },
+    models: { vision: config.visionModel || 'deepseek-v4-flash-vision-exp', complex: result.model },
     auditStatus: requiresReview ? 'issues_detected' : 'clear',
     summary: { ...modelSummary, requiresReview },
     source: { offerId: product.offerId ?? null, title: product.title ?? null,

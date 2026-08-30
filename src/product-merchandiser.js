@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const DEFAULT_ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+const DEFAULT_ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
 function clean(value) {
   return value == null ? '' : String(value).trim();
@@ -83,12 +83,12 @@ export function validateMerchandisingProfile(profile, taxonomies) {
 }
 
 export async function analyzeProductMerchandising({ detail, translation, taxonomies, config }) {
-  if (!config?.apiKey) throw new Error('DASHSCOPE_API_KEY is not configured.');
+  if (!config?.apiKey) throw new Error('DEEPSEEK_API_KEY is not configured.');
   const categories = (taxonomies.categories || []).map(({ id, name, parent }) => ({ id, name, parent }));
   if (!categories.length) throw new Error('WordPress has no product categories available for matching.');
   const existingTags = (taxonomies.tags || []).map(({ id, name }) => ({ id, name }));
   const images = await loadImages(detail, config, 4);
-  const model = config.complexModel || 'qwen3.8-max';
+  const model = config.complexModel || 'deepseek-v4-flash-vision-exp';
   const source = {
     englishTitle: translation.title,
     englishDescription: translation.description,
@@ -130,7 +130,7 @@ PRODUCT DATA: ${JSON.stringify(source)}`;
     body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: 1800 }),
     signal: AbortSignal.timeout(360000),
   });
-  if (!response.ok) throw new Error(`DashScope merchandising classification failed (${response.status}).`);
+  if (!response.ok) throw new Error(`DeepSeek merchandising classification failed (${response.status}).`);
   const body = await response.json();
   const profile = validateMerchandisingProfile(
     parseJson(contentText(body.choices?.[0]?.message?.content)), taxonomies,
