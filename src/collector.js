@@ -123,6 +123,36 @@ async function downloadProductImages(data, storagePath, jobId, requestContext = 
         if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 350));
       }
     }
+    // Product media on the Alibaba CDN is public and does not require the
+    // logged-in browser session.  A flaky SOCKS/browser request context can
+    // therefore fall back to a direct server request, but only for an URL
+    // already verified by the exact product Gallery/SKU parser above.
+    let directFallbackAllowed = false;
+    try {
+      const imageHost = new URL(source.url).hostname.toLowerCase();
+      directFallbackAllowed = imageHost === 'alicdn.com' || imageHost.endsWith('.alicdn.com')
+        || imageHost === '1688.com' || imageHost.endsWith('.1688.com');
+    } catch { /* malformed source URLs are never fetched directly */ }
+    if (!downloaded && requestContext?.request && directFallbackAllowed) {
+      for (let attempt = 1; attempt <= 2 && !downloaded; attempt += 1) {
+        try {
+          const response = await fetch(source.url, {
+            headers,
+            signal: AbortSignal.timeout(30000),
+          });
+          if (!response.ok) throw new Error(`Image fallback failed with HTTP ${response.status}.`);
+          const contentType = response.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
+          if (!contentType.startsWith('image/')) {
+            throw new Error('Image fallback returned a non-image response.');
+          }
+          const bytes = Buffer.from(await response.arrayBuffer());
+          if (!bytes.length) throw new Error('Image fallback returned an empty body.');
+          downloaded = { contentType, bytes };
+        } catch {
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+        }
+      }
+    }
     if (!downloaded) continue;
     const extension = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
       'image/gif': 'gif' })[downloaded.contentType] || 'bin';
