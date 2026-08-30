@@ -95,6 +95,21 @@ function isTransientError(error) {
   ].some((fragment) => message.includes(fragment));
 }
 
+function isExternalModelAccessError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('failed (403)') || message.includes('accessdenied')
+    || message.includes('arrearage') || message.includes('unpurchased');
+}
+
+function pauseForExternalModel(item, stage, error) {
+  item.error = error?.message || String(error);
+  item.failedStage = stage;
+  progress.status = 'blocked_external_model';
+  progress.fatalError = item.error;
+  progress.blockedAt = now();
+  stopping = true;
+}
+
 function resetLostJob(item, stage) {
   item.error = null;
   item.failedStage = null;
@@ -122,6 +137,10 @@ function recoverExistingItem(item) {
     || errorText.includes('gateway timeout')
     || errorText.includes('timeout')
     || errorText.includes('network')
+    || errorText.includes('failed (403)')
+    || errorText.includes('accessdenied')
+    || errorText.includes('arrearage')
+    || errorText.includes('unpurchased')
   );
 
   if (recoverableFailure) {
@@ -259,7 +278,9 @@ async function advanceItem(item) {
       const job = await api(`/api/translation-jobs/${item.translationJobId}`);
       if (['queued', 'running'].includes(job.status)) return;
       if (job.status !== 'completed') {
-        failItem(item, 'translation', new Error(job.error || `Translation ended with ${job.status}.`));
+        const error = new Error(job.error || `Translation ended with ${job.status}.`);
+        if (isExternalModelAccessError(error)) pauseForExternalModel(item, 'translation', error);
+        else failItem(item, 'translation', error);
         return;
       }
       item.translationCompleted = true;
@@ -279,7 +300,9 @@ async function advanceItem(item) {
       const job = await api(`/api/wordpress-jobs/${item.wordpressJobId}`);
       if (['queued', 'running'].includes(job.status)) return;
       if (job.status !== 'completed') {
-        failItem(item, 'publish', new Error(job.error || `Publishing ended with ${job.status}.`));
+        const error = new Error(job.error || `Publishing ended with ${job.status}.`);
+        if (isExternalModelAccessError(error)) pauseForExternalModel(item, 'publish', error);
+        else failItem(item, 'publish', error);
         return;
       }
       item.stage = 'published';
