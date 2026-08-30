@@ -85,6 +85,14 @@ const ragSyncQueue = createConcurrentQueue({
 });
 let wordpressQueue = Promise.resolve();
 
+function trimTerminalJobs(jobMap, maxEntries = 2000) {
+  if (jobMap.size <= maxEntries) return;
+  for (const [id, job] of jobMap) {
+    if (!['queued', 'running'].includes(job?.status)) jobMap.delete(id);
+    if (jobMap.size <= maxEntries) break;
+  }
+}
+
 function requireApiKey(request, reply, done) {
   const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
   const expected = config.adminApiKey;
@@ -511,7 +519,7 @@ app.post('/api/product-details/:id/translations', { preHandler: requireApiKey },
     model: config.complexModel, status: 'queued', createdAt: new Date().toISOString(),
     startedAt: null, completedAt: null, translationId: null, result: null, error: null };
   translationJobs.set(id, job);
-  while (translationJobs.size > 100) translationJobs.delete(translationJobs.keys().next().value);
+  trimTerminalJobs(translationJobs);
   translationQueue.enqueue(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
@@ -619,7 +627,7 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
     status: 'queued', publishStatus: options.status, createdAt: new Date().toISOString(),
     startedAt: null, completedAt: null, publicationId: null, result: null, error: null };
   wordpressJobs.set(id, job);
-  while (wordpressJobs.size > 100) wordpressJobs.delete(wordpressJobs.keys().next().value);
+  trimTerminalJobs(wordpressJobs);
   wordpressQueue = wordpressQueue.catch(() => {}).then(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
@@ -679,9 +687,7 @@ app.post('/api/wordpress/publication-dates/backfill', { preHandler: requireApiKe
     from1688ListingTime: 0, fromFirstSeenAt: 0,
     createdAt: new Date().toISOString(), startedAt: null, completedAt: null, errors: [] };
   wordpressPublicationDateJobs.set(id, job);
-  while (wordpressPublicationDateJobs.size > 100) {
-    wordpressPublicationDateJobs.delete(wordpressPublicationDateJobs.keys().next().value);
-  }
+  trimTerminalJobs(wordpressPublicationDateJobs);
   wordpressQueue = wordpressQueue.catch(() => {}).then(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
@@ -726,9 +732,7 @@ app.post('/api/wordpress/prices/audit-and-repair', { preHandler: requireApiKey }
     storedChanged: 0, publishedAffected: 0, wordpressUpdated: 0, failed: 0,
     createdAt: new Date().toISOString(), startedAt: null, completedAt: null, errors: [] };
   wordpressPriceRepairJobs.set(id, job);
-  while (wordpressPriceRepairJobs.size > 100) {
-    wordpressPriceRepairJobs.delete(wordpressPriceRepairJobs.keys().next().value);
-  }
+  trimTerminalJobs(wordpressPriceRepairJobs);
   wordpressQueue = wordpressQueue.catch(() => {}).then(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
@@ -876,7 +880,7 @@ app.post('/api/image-audit/live', { preHandler: [requireApiKey, requireCollector
   const job = { id, status: 'queued', urls, createdAt: new Date().toISOString(),
     startedAt: null, completedAt: null, results: null, error: null };
   imageAuditJobs.set(id, job);
-  while (imageAuditJobs.size > 100) imageAuditJobs.delete(imageAuditJobs.keys().next().value);
+  trimTerminalJobs(imageAuditJobs);
   multimodalAuditQueue = multimodalAuditQueue.catch(() => {}).then(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
@@ -928,7 +932,7 @@ app.post('/api/sku-audit/live', { preHandler: [requireApiKey, requireCollectorMo
   const job = { id, status: 'queued', urls, createdAt: new Date().toISOString(),
     startedAt: null, completedAt: null, results: null, error: null };
   skuAuditJobs.set(id, job);
-  while (skuAuditJobs.size > 100) skuAuditJobs.delete(skuAuditJobs.keys().next().value);
+  trimTerminalJobs(skuAuditJobs);
   multimodalAuditQueue = multimodalAuditQueue.catch(() => {}).then(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
