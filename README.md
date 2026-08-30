@@ -27,6 +27,7 @@ This framework does not bypass CAPTCHAs, signatures, access controls, or platfor
 | `MIN_CAPTURE_INTERVAL_MS` | no | `15000` |
 | `NAVIGATION_TIMEOUT_MS` | no | `45000` |
 | `SAVED_AUDIT_CONCURRENCY` | no | `3` (maximum `5`); queued/running saved audits recover after restart |
+| `SAVED_AUDITS_START_PAUSED` | no | `false`; set `true` to deploy without consuming a saved-audit backlog |
 | `WORDPRESS_PUBLISH_CONCURRENCY` | no | `3` (maximum `5`); maintenance jobs remain serialized |
 | `PROXY_SERVER` | no | - |
 | `PROXY_USERNAME` | no | - |

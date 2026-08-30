@@ -37,6 +37,7 @@ const config = {
   translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
   translationConcurrency: Math.min(Math.max(Number(process.env.TRANSLATION_CONCURRENCY) || 1, 1), 10),
   savedAuditConcurrency: Math.min(Math.max(Number(process.env.SAVED_AUDIT_CONCURRENCY) || 3, 1), 5),
+  savedAuditsStartPaused: process.env.SAVED_AUDITS_START_PAUSED === 'true',
   wordpressPublishConcurrency: Math.min(Math.max(Number(process.env.WORDPRESS_PUBLISH_CONCURRENCY) || 3, 1), 5),
   modelImageTransport: process.env.MODEL_IMAGE_TRANSPORT === 'persistent_storage'
     ? 'persistent_storage' : 'source_url',
@@ -1183,6 +1184,7 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 await db.migrate();
+if (config.savedAuditsStartPaused) savedAuditQueue.pause();
 try {
   const recoveredAuditCount = await recoverSavedProductAudits();
   app.log.info({ recoveredAuditCount, concurrency: config.savedAuditConcurrency },
