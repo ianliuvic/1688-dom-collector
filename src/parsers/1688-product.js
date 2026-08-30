@@ -466,10 +466,14 @@ export async function parse1688Product(page) {
   const bodyMoq = raw.bodyText.match(/(?:起批量|最小起订量|起订量|MOQ)\s*[：:]?\s*(\d+)/i);
   const ldImages = Array.isArray(productLd.image) ? productLd.image : [productLd.image];
   const exactGallery = raw.images.filter(Boolean);
-  const normalizedImages = unique([
-    raw.mainImage,
-    ...(exactGallery.length ? exactGallery : ldImages),
-  ].map((value) => normalizeImageUrl(value, raw.url)), MAX_IMAGES);
+  // The rendered Gallery is the product-scoped source of truth.  Page-level
+  // og:image / JSON-LD can point at a shop banner, recommendation, placeholder,
+  // or a differently transformed URL, so never prepend those candidates when
+  // the exact Gallery is available.
+  const normalizedImages = unique((exactGallery.length
+    ? exactGallery
+    : [raw.mainImage, ...ldImages])
+    .map((value) => normalizeImageUrl(value, raw.url)), MAX_IMAGES);
   const imageKeys = new Set();
   const images = normalizedImages.filter((url) => {
     const key = url.replace(/[?#].*$/, '').replace(/_\.webp$/i, '').replace(/_\d+x\d+[^/]*$/i, '');
@@ -556,7 +560,7 @@ export async function parse1688Product(page) {
       textCandidates: unique(raw.priceTexts.filter((value) => value.length <= 120 && /[¥￥]/.test(value)), 20),
     },
     moq: bodyMoq ? Number(bodyMoq[1]) : null,
-    mainImage: [raw.mainImage, ldImages[0], ...images]
+    mainImage: [...images, raw.mainImage, ldImages[0]]
       .map((value) => normalizeImageUrl(value, raw.url)).find(Boolean) ?? null,
     images,
     gallery: {

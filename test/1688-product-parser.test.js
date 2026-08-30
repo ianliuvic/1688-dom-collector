@@ -57,7 +57,7 @@ test('uses the exact product carousel and does not append unrelated page candida
 
   const product = await parse1688Product(page);
   assert.deepEqual(product.images, [
-    'https://cbu01.alicdn.com/img/ibank/main.jpg',
+    'https://cbu01.alicdn.com/img/ibank/main.jpg_.webp',
     'https://cbu01.alicdn.com/img/ibank/product-two.jpg_.webp',
   ]);
   assert.equal(product.images.some((url) => url.includes('review-avatar')), false);
@@ -106,4 +106,37 @@ test('prefers a hydrated exact Gallery snapshot and exposes completeness diagnos
   assert.equal(product.gallery.complete, true);
   assert.equal(product.gallery.source, 'exact_dom_gallery');
   assert.equal(product.gallery.imageCount, 1);
+});
+
+test('uses the first exact Gallery image as main image and excludes unrelated og:image', async () => {
+  const page = {
+    evaluate: async () => ({
+      url: 'https://detail.1688.com/offer/1234567890123.html',
+      canonicalUrl: null,
+      title: 'Test product',
+      description: '',
+      mainImage: 'https://cbu01.alicdn.com/img/ibank/unrelated-cat.jpg',
+      images: [
+        'https://cbu01.alicdn.com/img/ibank/product-front.jpg_.webp',
+        'https://cbu01.alicdn.com/img/ibank/product-back.jpg_.webp',
+      ],
+      gallerySnapshot: {
+        source: 'exact_dom_gallery', complete: true, stable: true,
+        expectedSlotCount: 2, unresolvedSlotCount: 0, rounds: 4,
+      },
+      jsonLd: [],
+      embeddedCandidates: {
+        prices: [], tiers: [], skuRows: [], dimensions: [], attributes: [], images: [],
+      },
+      attributes: [], skuOptions: [], priceTexts: [], bodyText: '', sellerLinks: [], sellerTexts: [],
+    }),
+  };
+
+  const product = await parse1688Product(page);
+  assert.equal(product.mainImage, 'https://cbu01.alicdn.com/img/ibank/product-front.jpg_.webp');
+  assert.deepEqual(product.images, [
+    'https://cbu01.alicdn.com/img/ibank/product-front.jpg_.webp',
+    'https://cbu01.alicdn.com/img/ibank/product-back.jpg_.webp',
+  ]);
+  assert.equal(product.images.some((url) => url.includes('unrelated-cat')), false);
 });
