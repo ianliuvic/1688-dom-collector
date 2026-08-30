@@ -27,6 +27,8 @@ test('builds product, ordered gallery and distinct SKU image entities for RAG', 
   const publication = { wp_post_id: 900, wp_status: 'publish', style_no: 'SWBK900',
     wp_url: 'https://wearhongxiu.com/product/example', payload: {
       meta: { primary_category: 'Bikini' }, tags: ['Ruched'], status: 'publish',
+      images: [{ url: 'https://wearhongxiu.com/wp-content/uploads/SWBK900-1.webp',
+        source_url: 'https://img/1.jpg', attachment_id: 901 }],
     } };
 
   const product = buildRagProduct({ detail, translation, publication });
@@ -34,6 +36,11 @@ test('builds product, ordered gallery and distinct SKU image entities for RAG', 
   assert.equal(product.active, true);
   assert.equal(product.title, 'Ruched Bikini Set');
   assert.equal(product.mainImageUrl, 'https://img/1.jpg');
+  assert.equal(product.wpImageUrl,
+    'https://wearhongxiu.com/wp-content/uploads/SWBK900-1.webp');
+  assert.equal(product.wpImageId, 901);
+  assert.equal(product.metadata.wpMainImageUrl,
+    'https://wearhongxiu.com/wp-content/uploads/SWBK900-1.webp');
   assert.deepEqual(product.galleryImages.map((item) => item.imageUrl),
     ['https://img/1.jpg', 'https://img/2.jpg']);
   assert.equal(product.skuImages.length, 1);

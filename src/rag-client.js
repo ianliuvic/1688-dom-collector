@@ -54,6 +54,15 @@ function galleryImageEntities(detail) {
   })), (item) => item.imageUrl);
 }
 
+function publishedMainImage(publication) {
+  const images = Array.isArray(publication?.payload?.images) ? publication.payload.images : [];
+  const first = images.find((image) => clean(image?.url));
+  const url = normalizedUrl(first?.url || publication?.result?.featured_image_url);
+  const id = Number(first?.attachment_id || publication?.result?.featured_media_id
+    || publication?.result?.featured_media) || null;
+  return { url, id };
+}
+
 export function buildRagProduct({ detail, translation = null, publication = null, active = null }) {
   if (!detail?.offer_id) throw new Error('A saved product detail with offer_id is required for RAG sync.');
   const payload = publication?.payload ?? {};
@@ -68,6 +77,7 @@ export function buildRagProduct({ detail, translation = null, publication = null
     || publication?.result?.primary_category || detail.raw_data?.category);
   const galleryImages = galleryImageEntities(detail);
   const mainImage = galleryImages[0]?.imageUrl || '';
+  const wpMainImage = publishedMainImage(publication);
   const wpStatus = clean(publication?.wp_status || publication?.result?.status || payload.status);
   const isActive = active == null ? Boolean(publication?.wp_post_id && wpStatus === 'publish') : Boolean(active);
   const skuLabels = translatedSkuLabels(translation);
@@ -76,8 +86,9 @@ export function buildRagProduct({ detail, translation = null, publication = null
     canonicalProductId: `1688:${detail.offer_id}`,
     sourcePlatform: '1688', sourceProductId: String(detail.offer_id),
     productDetailId: Number(detail.id), wpPostId: Number(publication?.wp_post_id) || null,
+    wpImageId: wpMainImage.id,
     styleNo: clean(publication?.style_no || payload.style_no), title, description, category,
-    wpUrl: clean(publication?.wp_url), wpImageUrl: normalizedUrl(publication?.result?.featured_image_url),
+    wpUrl: clean(publication?.wp_url), wpImageUrl: wpMainImage.url,
     mainImageUrl: mainImage, active: isActive, attributes, tags,
     skuText: skuLabels.length ? skuLabels : sourceLabels,
     galleryImages,
@@ -88,6 +99,8 @@ export function buildRagProduct({ detail, translation = null, publication = null
       currency: clean(detail.currency), priceMin: detail.price_min, priceMax: detail.price_max,
       moq: detail.moq, stockTotal: (detail.skus ?? []).reduce((sum, sku) => sum + (Number(sku.stock) || 0), 0),
       attributes, tags, wordpressStatus: wpStatus || null,
+      wpMainImageUrl: wpMainImage.url || null,
+      wpMainImageId: wpMainImage.id,
       imageAudit: detail.latestImageAudit?.summary ?? null,
       skuAudit: detail.latestSkuAudit?.summary ?? null,
       lastCrawledAt: detail.last_crawled_at,
