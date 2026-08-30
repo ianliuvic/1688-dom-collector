@@ -14,6 +14,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
 import { buildRagProduct, createRagClient } from './rag-client.js';
+import { analyzeProductDuplicates } from './duplicate-analyzer.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -210,6 +211,21 @@ async function imageDataUrl(image) {
 
 function normalizedImageUrl(value) {
   return String(value || '').trim().replace(/^http:/, 'https:').replace(/[?#].*$/, '');
+}
+
+async function cleanupRejectedProductImages(imageFiles = []) {
+  const storageRoot = path.resolve(config.storagePath);
+  const productImageRoot = path.resolve(config.storagePath, 'product-images');
+  const parents = new Set();
+  for (const image of imageFiles) {
+    if (!image?.storagePath) continue;
+    const filePath = path.resolve(image.storagePath);
+    if (!filePath.startsWith(`${productImageRoot}${path.sep}`)
+        || !filePath.startsWith(`${storageRoot}${path.sep}`)) continue;
+    await fs.unlink(filePath).catch(() => {});
+    parents.add(path.dirname(filePath));
+  }
+  for (const parent of parents) await fs.rmdir(parent).catch(() => {});
 }
 
 async function savedSkuAuditInput(detail) {
@@ -1046,29 +1062,43 @@ async function workerLoop() {
 
     try {
       const result = await collector.capture(job);
-      await db.completeJob(job.id, result);
       if (result.extractedData?.pageType === 'shop') {
         await db.upsertShopProfile(result.extractedData);
       } else if (result.extractedData?.pageType === 'shop-offer-collection') {
         await db.saveShopScan(job.id, result.extractedData);
       } else if (job.options?.mode === 'product_detail'
           && result.extractedData?.pageType === 'product') {
-        const saved = await db.saveProductDetail(
-          result.extractedData, job.url, result.extractedData.localImages ?? [],
-        );
-        try {
-          await scheduleSavedProductAudits(saved.productDetailId, { trigger: 'capture' });
-        } catch (error) {
-          app.log.error({ err: error, productDetailId: saved.productDetailId },
-            'failed to schedule automatic product audits');
-        }
-        try {
-          await scheduleProductRagSync(saved.productDetailId, { trigger: 'capture' });
-        } catch (error) {
-          app.log.error({ err: error, productDetailId: saved.productDetailId },
-            'failed to schedule automatic products RAG sync');
+        const duplicateAnalysis = await analyzeProductDuplicates({
+          data: result.extractedData,
+          imageFiles: result.extractedData.localImages ?? [],
+          database: db,
+          ragClient,
+        });
+        result.extractedData.duplicateAnalysis = duplicateAnalysis;
+        if (duplicateAnalysis.decision === 'reject') {
+          await cleanupRejectedProductImages(result.extractedData.localImages ?? []);
+          result.extractedData.localImages = [];
+          result.status = 'rejected_duplicate';
+          result.error = null;
+        } else {
+          const saved = await db.saveProductDetail(
+            result.extractedData, job.url, result.extractedData.localImages ?? [], duplicateAnalysis,
+          );
+          try {
+            await scheduleSavedProductAudits(saved.productDetailId, { trigger: 'capture' });
+          } catch (error) {
+            app.log.error({ err: error, productDetailId: saved.productDetailId },
+              'failed to schedule automatic product audits');
+          }
+          try {
+            await scheduleProductRagSync(saved.productDetailId, { trigger: 'capture' });
+          } catch (error) {
+            app.log.error({ err: error, productDetailId: saved.productDetailId },
+              'failed to schedule automatic products RAG sync');
+          }
         }
       }
+      await db.completeJob(job.id, result);
     } catch (error) {
       app.log.error({ err: error, jobId: job.id }, 'capture failed');
       await db.completeJob(job.id, {
@@ -1097,6 +1127,12 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 await db.migrate();
+try {
+  const hashBackfill = await db.backfillProductImageHashes();
+  app.log.info(hashBackfill, 'product image hashes ready for duplicate detection');
+} catch (error) {
+  app.log.error({ err: error }, 'product image hash backfill failed; new captures will still be hashed');
+}
 await collector.start();
 await app.listen({ port: config.port, host: '0.0.0.0' });
 workerLoop().catch((error) => {

@@ -133,5 +133,13 @@ export function createRagClient(config) {
         body: JSON.stringify({ canonicalProductId, sourceProductId, sourcePlatform: '1688' }),
       });
     },
+    async findSimilarProducts({ sourceProductId, title, imageUrls, topK = 10, minScore = 0.78 }) {
+      if (!enabled) throw new Error('Products RAG integration is not configured.');
+      return requestWithRetry(`${baseUrl}/api/products_rag/admin/products/similar`, {
+        method: 'POST', headers: headers(),
+        body: JSON.stringify({ sourcePlatform: '1688', sourceProductId, title,
+          imageUrls, topK, minScore }),
+      });
+    },
   };
 }

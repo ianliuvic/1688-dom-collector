@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import pg from 'pg';
 import { deriveVerifiedProductPrice } from './parsers/1688-product.js';
 
@@ -135,6 +137,17 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS product_details_title_idx ON product_details (title);
       CREATE INDEX IF NOT EXISTS product_details_last_crawled_idx ON product_details (last_crawled_at);
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS gallery_content_fingerprint text;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS gallery_image_count integer NOT NULL DEFAULT 0;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS gallery_verified_complete boolean NOT NULL DEFAULT false;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS duplicate_status text NOT NULL DEFAULT 'not_checked';
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS duplicate_analysis jsonb NOT NULL DEFAULT '{}'::jsonb;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS duplicate_checked_at timestamptz;
+      CREATE INDEX IF NOT EXISTS product_details_gallery_fingerprint_idx
+        ON product_details (gallery_content_fingerprint)
+        WHERE gallery_content_fingerprint IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS product_details_duplicate_status_idx
+        ON product_details (duplicate_status);
       CREATE TABLE IF NOT EXISTS product_detail_images (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -147,6 +160,11 @@ export function createDatabase(databaseUrl) {
         UNIQUE (product_detail_id, image_type, sort_order, source_url)
       );
       CREATE INDEX IF NOT EXISTS product_detail_images_product_idx ON product_detail_images (product_detail_id);
+      ALTER TABLE product_detail_images ADD COLUMN IF NOT EXISTS content_sha256 text;
+      ALTER TABLE product_detail_images ADD COLUMN IF NOT EXISTS byte_size bigint;
+      CREATE INDEX IF NOT EXISTS product_detail_images_content_sha_idx
+        ON product_detail_images (content_sha256)
+        WHERE content_sha256 IS NOT NULL;
       CREATE TABLE IF NOT EXISTS product_detail_skus (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -471,7 +489,7 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
-  async function saveProductDetail(data, sourceUrl, imageFiles = []) {
+  async function saveProductDetail(data, sourceUrl, imageFiles = [], duplicateAnalysis = null) {
     if (!data || data.pageType !== 'product' || !sourceUrl) return null;
     const client = await pool.connect();
     try {
@@ -480,16 +498,23 @@ export function createDatabase(databaseUrl) {
         ? await client.query('SELECT id FROM product_details WHERE offer_id = $1 OR source_url = $2 LIMIT 1', [String(data.offerId), sourceUrl])
         : await client.query('SELECT id FROM product_details WHERE source_url = $1 LIMIT 1', [sourceUrl]);
       const price = data.price ?? {};
+      const galleryProfile = duplicateAnalysis?.galleryProfile ?? {};
       let detailId;
       if (existing.rows[0]) {
         detailId = existing.rows[0].id;
         await client.query(`UPDATE product_details SET offer_id=$1, source_url=$2, canonical_url=$3,
           title=$4, description=$5, currency=$6, price_min=$7, price_max=$8, moq=$9,
-          seller_name=$10, seller_url=$11, raw_data=$12, last_crawled_at=now() WHERE id=$13`, [
+          seller_name=$10, seller_url=$11, raw_data=$12,
+          gallery_content_fingerprint=$13, gallery_image_count=$14,
+          gallery_verified_complete=$15, duplicate_status=$16, duplicate_analysis=$17,
+          duplicate_checked_at=$18, last_crawled_at=now() WHERE id=$19`, [
           data.offerId ? String(data.offerId) : null, sourceUrl, data.canonicalUrl ?? null,
           data.title ?? null, data.description ?? null, data.currency ?? null,
           price.min ?? null, price.max ?? null, data.moq ?? null,
-          data.seller?.name ?? null, data.seller?.url ?? null, JSON.stringify(data), detailId,
+          data.seller?.name ?? null, data.seller?.url ?? null, JSON.stringify(data),
+          galleryProfile.fingerprint ?? null, galleryProfile.sourceImageCount ?? 0,
+          Boolean(galleryProfile.verifiedComplete), duplicateAnalysis?.status ?? 'not_checked',
+          JSON.stringify(duplicateAnalysis ?? {}), duplicateAnalysis?.checkedAt ?? null, detailId,
         ]);
         await client.query('DELETE FROM product_detail_images WHERE product_detail_id=$1', [detailId]);
         await client.query('DELETE FROM product_detail_skus WHERE product_detail_id=$1', [detailId]);
@@ -497,21 +522,29 @@ export function createDatabase(databaseUrl) {
         await client.query('DELETE FROM product_detail_price_tiers WHERE product_detail_id=$1', [detailId]);
       } else {
         const inserted = await client.query(`INSERT INTO product_details
-          (offer_id, source_url, canonical_url, title, description, currency, price_min, price_max, moq, seller_name, seller_url, raw_data)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`, [
+          (offer_id, source_url, canonical_url, title, description, currency, price_min, price_max,
+           moq, seller_name, seller_url, raw_data, gallery_content_fingerprint,
+           gallery_image_count, gallery_verified_complete, duplicate_status,
+           duplicate_analysis, duplicate_checked_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`, [
           data.offerId ? String(data.offerId) : null, sourceUrl, data.canonicalUrl ?? null,
           data.title ?? null, data.description ?? null, data.currency ?? null,
           price.min ?? null, price.max ?? null, data.moq ?? null,
           data.seller?.name ?? null, data.seller?.url ?? null, JSON.stringify(data),
+          galleryProfile.fingerprint ?? null, galleryProfile.sourceImageCount ?? 0,
+          Boolean(galleryProfile.verifiedComplete), duplicateAnalysis?.status ?? 'not_checked',
+          JSON.stringify(duplicateAnalysis ?? {}), duplicateAnalysis?.checkedAt ?? null,
         ]);
         detailId = inserted.rows[0].id;
       }
       for (const image of imageFiles) {
         await client.query(`INSERT INTO product_detail_images
-          (product_detail_id, image_type, sort_order, source_url, storage_path, mime_type, downloaded_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [detailId, image.type, image.sortOrder ?? 0,
+          (product_detail_id, image_type, sort_order, source_url, storage_path, mime_type,
+           downloaded_at, content_sha256, byte_size)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [detailId, image.type, image.sortOrder ?? 0,
           image.sourceUrl, image.storagePath ?? null, image.mimeType ?? null,
-          image.storagePath ? new Date() : null]);
+          image.storagePath ? new Date() : null, image.contentSha256 ?? null,
+          image.byteSize ?? null]);
       }
       for (const [index, sku] of (data.skuRows ?? []).entries()) {
         await client.query(`INSERT INTO product_detail_skus
@@ -580,6 +613,81 @@ export function createDatabase(databaseUrl) {
     const result = await pool.query(`SELECT * FROM product_details
       ORDER BY last_crawled_at DESC LIMIT $1`, [safeLimit]);
     return result.rows;
+  }
+
+  async function findExactGalleryDuplicates({ offerId, fingerprint, imageCount }) {
+    if (!fingerprint || Number(imageCount) < 2) return [];
+    const result = await pool.query(`SELECT id AS product_detail_id, offer_id, source_url,
+      canonical_url, title, gallery_content_fingerprint AS gallery_fingerprint,
+      gallery_image_count, gallery_image_count AS matched_image_count
+      FROM product_details
+      WHERE gallery_content_fingerprint=$1
+        AND gallery_verified_complete=true
+        AND gallery_image_count=$2
+        AND ($3::text IS NULL OR offer_id IS DISTINCT FROM $3::text)
+      ORDER BY last_crawled_at DESC LIMIT 10`, [fingerprint, Number(imageCount), offerId ? String(offerId) : null]);
+    return result.rows;
+  }
+
+  async function findGalleryHashCandidates({ offerId, contentHashes, currentImageCount, limit = 10 }) {
+    const hashes = [...new Set((contentHashes ?? []).filter(Boolean))];
+    if (!hashes.length) return [];
+    const safeLimit = Math.min(Math.max(Number(limit) || 10, 1), 50);
+    const result = await pool.query(`SELECT details.id AS product_detail_id, details.offer_id,
+      details.source_url, details.canonical_url, details.title, details.gallery_image_count,
+      details.gallery_content_fingerprint AS gallery_fingerprint,
+      count(DISTINCT images.content_sha256)::int AS matched_image_count,
+      $2::int AS current_image_count
+      FROM product_details details
+      JOIN product_detail_images images ON images.product_detail_id=details.id
+      WHERE images.image_type IN ('main','gallery')
+        AND images.content_sha256=ANY($1::text[])
+        AND ($3::text IS NULL OR details.offer_id IS DISTINCT FROM $3::text)
+      GROUP BY details.id
+      ORDER BY matched_image_count DESC, details.last_crawled_at DESC
+      LIMIT $4`, [hashes, Number(currentImageCount) || 0, offerId ? String(offerId) : null, safeLimit]);
+    return result.rows;
+  }
+
+  async function backfillProductImageHashes() {
+    const missing = await pool.query(`SELECT id, storage_path FROM product_detail_images
+      WHERE storage_path IS NOT NULL AND content_sha256 IS NULL ORDER BY id`);
+    let hashed = 0;
+    for (const image of missing.rows) {
+      try {
+        const bytes = await fs.readFile(image.storage_path);
+        const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+        await pool.query(`UPDATE product_detail_images SET content_sha256=$2, byte_size=$3
+          WHERE id=$1`, [image.id, digest, bytes.length]);
+        hashed += 1;
+      } catch { /* Missing legacy files remain unhashed and cannot cause a false exact match. */ }
+    }
+
+    const products = await pool.query(`SELECT details.id, details.raw_data,
+      array_remove(array_agg(images.content_sha256 ORDER BY
+        CASE WHEN images.image_type='main' THEN 0 ELSE 1 END,
+        images.sort_order, images.id), NULL) AS hashes
+      FROM product_details details
+      LEFT JOIN product_detail_images images ON images.product_detail_id=details.id
+        AND images.image_type IN ('main','gallery')
+      GROUP BY details.id`);
+    let fingerprinted = 0;
+    for (const product of products.rows) {
+      const raw = product.raw_data ?? {};
+      const sourceUrls = [...new Set([raw.mainImage, ...(raw.images ?? [])].filter(Boolean))];
+      const hashes = [...(product.hashes ?? [])].sort();
+      const gallery = raw.gallery ?? {};
+      const verified = gallery.source === 'exact_dom_gallery' && gallery.complete === true
+        && gallery.stable === true && Number(gallery.unresolvedSlotCount || 0) === 0
+        && sourceUrls.length > 0 && hashes.length === sourceUrls.length;
+      const fingerprint = verified
+        ? crypto.createHash('sha256').update(hashes.join('\n')).digest('hex') : null;
+      await pool.query(`UPDATE product_details SET gallery_content_fingerprint=$2,
+        gallery_image_count=$3, gallery_verified_complete=$4 WHERE id=$1`,
+      [product.id, fingerprint, hashes.length, verified]);
+      if (fingerprint) fingerprinted += 1;
+    }
+    return { hashed, fingerprinted, products: products.rowCount };
   }
 
   async function saveProductVision(productDetailId, imageId, result) {
@@ -888,6 +996,7 @@ export function createDatabase(databaseUrl) {
 
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
     saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail, listProductDetails,
+    findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,

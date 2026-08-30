@@ -115,7 +115,9 @@ async function downloadProductImages(data, storagePath, jobId, requestContext = 
       const bytes = requestContext?.request ? await response.body() : Buffer.from(await response.arrayBuffer());
       await fs.writeFile(filePath, bytes);
       files.push({ type: source.type, sortOrder: source.sortOrder ?? files.length, sourceUrl: source.url,
-        storagePath: filePath, mimeType: contentType });
+        storagePath: filePath, mimeType: contentType,
+        contentSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+        byteSize: bytes.length });
     } catch { /* preserve the source URL even when an individual image is blocked */ }
   }
   return files;
