@@ -671,8 +671,16 @@ export function createDatabase(databaseUrl) {
           }
         }
         const publishedSourceMax = row.publication_payload?.bulk_pricing?.source_max_price;
+        const publishedMetaMin = row.publication_payload?.meta?.source_price_min;
+        const publishedMetaMax = row.publication_payload?.meta?.source_price_max;
+        const publishedSourceMin = row.publication_payload?.source?.price_min;
+        const publishedSourceRangeMax = row.publication_payload?.source?.price_max;
         const needsWordPressSync = row.is_published
-          && (publishedSourceMax == null || Number(publishedSourceMax) !== Number(derived.max));
+          && (publishedSourceMax == null || Number(publishedSourceMax) !== Number(derived.max)
+            || Number(publishedMetaMin) !== Number(derived.min)
+            || Number(publishedMetaMax) !== Number(derived.max)
+            || Number(publishedSourceMin) !== Number(derived.min)
+            || Number(publishedSourceRangeMax) !== Number(derived.max));
         items.push({ productDetailId: row.id, published: row.is_published, changed, verified: true,
           needsWordPressSync, previousMin, previousMax, min: derived.min, max: derived.max,
           source: derived.source });

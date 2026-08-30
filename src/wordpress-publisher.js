@@ -341,7 +341,7 @@ export async function syncWordPressProductPricing({ detail, publication, config 
   if (!existingPayload?.external_id || !existingPayload?.title) {
     throw new Error('The saved WordPress publication payload is incomplete.');
   }
-  const payload = { ...existingPayload, bulk_pricing: buildWearHongxiuPricing(detail) };
+  const payload = refreshWordPressProductPricingPayload(existingPayload, detail);
   const wp = wordpressClient(config);
   const result = await wp('/wp-json/hx/v1/products/sync', {
     method: 'POST',
@@ -350,6 +350,26 @@ export async function syncWordPressProductPricing({ detail, publication, config 
     timeoutMs: 120000,
   });
   return { payload, wordpress: result };
+}
+
+export function refreshWordPressProductPricingPayload(existingPayload, detail) {
+  const pricing = buildWearHongxiuPricing(detail);
+  const sourceMin = numberOrNull(detail?.price_min);
+  const sourceMax = numberOrNull(detail?.price_max);
+  return {
+    ...existingPayload,
+    bulk_pricing: pricing,
+    meta: {
+      ...(existingPayload?.meta ?? {}),
+      source_price_min: sourceMin,
+      source_price_max: sourceMax,
+    },
+    source: {
+      ...(existingPayload?.source ?? {}),
+      price_min: sourceMin,
+      price_max: sourceMax,
+    },
+  };
 }
 
 function extensionForMime(mimeType) {

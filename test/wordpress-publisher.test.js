@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildWordPressProductDraft, buildWearHongxiuPricing,
-  normalizePublicationDate } from '../src/wordpress-publisher.js';
+  normalizePublicationDate, refreshWordPressProductPricingPayload } from '../src/wordpress-publisher.js';
 
 const detail = {
   id: '1', offer_id: '1068935307931', canonical_url: 'https://detail.1688.com/offer/1068935307931.html',
@@ -129,6 +129,28 @@ test('does not trust an unverified global page price over exact saved SKU prices
   const pricing = buildWearHongxiuPricing(polluted);
   assert.equal(pricing.source_max_price, 27);
   assert.deepEqual(pricing.tiers.map((tier) => tier.price), [7.23, 6.46, 5.69]);
+});
+
+test('refreshes every saved source-price field during a price-only WordPress repair', () => {
+  const existing = {
+    external_id: '1688:example', title: 'Example',
+    bulk_pricing: { source_max_price: 999 },
+    meta: { source_price_min: 1, source_price_max: 999, material: 'Polyester' },
+    source: { price_min: 1, price_max: 999, platform: '1688' },
+  };
+  const repairedDetail = {
+    ...detail, price_min: '26', price_max: '28',
+    raw_data: { price: { verified: true } },
+    skus: detail.skus.map((sku) => ({ ...sku, price: '28' })),
+  };
+  const payload = refreshWordPressProductPricingPayload(existing, repairedDetail);
+  assert.equal(payload.bulk_pricing.source_max_price, 28);
+  assert.equal(payload.meta.source_price_min, 26);
+  assert.equal(payload.meta.source_price_max, 28);
+  assert.equal(payload.meta.material, 'Polyester');
+  assert.equal(payload.source.price_min, 26);
+  assert.equal(payload.source.price_max, 28);
+  assert.equal(payload.source.platform, '1688');
 });
 
 test('requires an allocated wearhongxiu style number instead of reusing the 1688 item number', () => {
