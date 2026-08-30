@@ -103,7 +103,8 @@ function isExternalModelAccessError(error) {
   return message.includes('failed (401)') || message.includes('failed (402)')
     || message.includes('failed (403)') || message.includes('accessdenied')
     || message.includes('arrearage') || message.includes('unpurchased')
-    || message.includes('insufficient balance') || message.includes('insufficient_balance');
+    || message.includes('insufficient balance') || message.includes('insufficient_balance')
+    || message.includes('deepseek_api_key is not configured');
 }
 
 function requireApiKey(request, reply, done) {

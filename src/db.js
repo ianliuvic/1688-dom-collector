@@ -777,10 +777,12 @@ export function createDatabase(databaseUrl) {
     const safeLimit = Math.min(Math.max(Number(limit) || 5000, 1), 10000);
     await pool.query(`UPDATE product_image_audits
       SET status='queued', started_at=NULL, completed_at=NULL, error=NULL
-      WHERE status='running' OR (status='failed' AND error ~* '(403|accessdenied|arrearage|unpurchased)')`);
+      WHERE status='running' OR (status='failed' AND error ~*
+        '(401|402|403|accessdenied|arrearage|unpurchased|insufficient[_ ]balance|deepseek_api_key is not configured)')`);
     await pool.query(`UPDATE product_sku_audits
       SET status='queued', started_at=NULL, completed_at=NULL, error=NULL
-      WHERE status='running' OR (status='failed' AND error ~* '(403|accessdenied|arrearage|unpurchased)')`);
+      WHERE status='running' OR (status='failed' AND error ~*
+        '(401|402|403|accessdenied|arrearage|unpurchased|insufficient[_ ]balance|deepseek_api_key is not configured)')`);
     const result = await pool.query(`
       SELECT 'image'::text AS audit_type, id, product_detail_id, trigger_type,
         model, status, created_at
