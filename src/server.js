@@ -169,6 +169,139 @@ function getBrowserModeStatus() {
   };
 }
 
+function auditModelConfig() {
+  return {
+    apiKey: config.dashscopeApiKey,
+    baseUrl: config.dashscopeBaseUrl,
+    visionModel: config.visionModel,
+    complexModel: config.complexModel,
+    storagePath: config.storagePath,
+  };
+}
+
+function hashJson(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+async function imageDataUrl(image) {
+  if (!image?.storage_path) return null;
+  const storageRoot = path.resolve(config.storagePath);
+  const imagePath = path.resolve(image.storage_path);
+  if (!imagePath.startsWith(`${storageRoot}${path.sep}`)) return null;
+  try {
+    const bytes = await fs.readFile(imagePath);
+    const mime = image.mime_type || ({ '.png': 'image/png', '.webp': 'image/webp',
+      '.gif': 'image/gif', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg' })[path.extname(imagePath).toLowerCase()]
+      || 'image/jpeg';
+    return `data:${mime};base64,${bytes.toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
+
+function normalizedImageUrl(value) {
+  return String(value || '').trim().replace(/^http:/, 'https:').replace(/[?#].*$/, '');
+}
+
+async function savedSkuAuditInput(detail) {
+  const raw = detail.raw_data ?? {};
+  const skuOptions = Array.isArray(raw.skuOptions) ? raw.skuOptions : [];
+  const skuFiles = (detail.images ?? []).filter((image) => image.image_type === 'sku');
+  const skuByUrl = new Map(skuFiles.map((image) => [normalizedImageUrl(image.source_url), image]));
+  const skuImages = [];
+  const seen = new Set();
+  for (const [optionIndex, option] of skuOptions.entries()) {
+    const sourceUrl = option.image || option.imageUrl || null;
+    const key = normalizedImageUrl(sourceUrl);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const stored = skuByUrl.get(key) ?? null;
+    const dataUrl = await imageDataUrl(stored);
+    if (dataUrl) skuImages.push({ kind: 'sku', optionIndex, optionText: option.text || '', sourceUrl, dataUrl });
+  }
+  const galleryRows = (detail.images ?? []).filter((image) => ['main', 'gallery'].includes(image.image_type))
+    .sort((a, b) => {
+      if (a.image_type === 'main') return -1;
+      if (b.image_type === 'main') return 1;
+      return Number(a.sort_order || 0) - Number(b.sort_order || 0);
+    }).slice(0, 4);
+  const galleryImages = [];
+  for (const [index, image] of galleryRows.entries()) {
+    const dataUrl = await imageDataUrl(image);
+    if (dataUrl) galleryImages.push({ kind: 'gallery', index, sourceUrl: image.source_url, dataUrl });
+  }
+  const product = {
+    ...raw,
+    offerId: raw.offerId ?? detail.offer_id,
+    title: raw.title ?? detail.title,
+    skuOptions: skuOptions.map((option) => ({ ...option, image: option.image || option.imageUrl || null })),
+    skuRows: Array.isArray(raw.skuRows) && raw.skuRows.length ? raw.skuRows
+      : (detail.skus ?? []).map((sku) => ({ skuKey: sku.sku_key, skuText: sku.sku_text,
+        price: sku.price, stock: sku.stock, options: sku.option_data ?? {} })),
+  };
+  return { product, skuImages, galleryImages };
+}
+
+async function executeSavedProductAudits(productDetailId, records) {
+  const results = {};
+  let detail;
+  try {
+    detail = await db.getProductDetail(productDetailId);
+    if (!detail) throw new Error('Saved product detail no longer exists.');
+  } catch (error) {
+    if (records.image) await db.failProductAudit('image', records.image.id, error).catch(() => {});
+    if (records.sku) await db.failProductAudit('sku', records.sku.id, error).catch(() => {});
+    return {
+      ...(records.image ? { image: { error: error.message } } : {}),
+      ...(records.sku ? { sku: { error: error.message } } : {}),
+    };
+  }
+  if (records.image) {
+    try {
+      await db.startProductAudit('image', records.image.id);
+      const result = await auditProductGallery({ detail, config: auditModelConfig() });
+      const sourceHash = hashJson((result.images ?? []).map((image) => ({
+        index: image.index, sha256: image.sha256, sourceUrl: image.sourceUrl,
+      })));
+      results.image = { record: await db.completeProductAudit('image', records.image.id, result, sourceHash), result };
+    } catch (error) {
+      await db.failProductAudit('image', records.image.id, error);
+      results.image = { error: error.message };
+    }
+  }
+  if (records.sku) {
+    try {
+      await db.startProductAudit('sku', records.sku.id);
+      const input = await savedSkuAuditInput(detail);
+      const sourceHash = hashJson({
+        skuDimensions: input.product.skuDimensions ?? [], skuOptions: input.product.skuOptions ?? [],
+        skuRows: input.product.skuRows ?? [], skuImageUrls: input.skuImages.map((image) => image.sourceUrl),
+        galleryUrls: input.galleryImages.map((image) => image.sourceUrl),
+      });
+      const result = await auditProductSkus({ ...input, config: auditModelConfig() });
+      results.sku = { record: await db.completeProductAudit('sku', records.sku.id, result, sourceHash), result };
+    } catch (error) {
+      await db.failProductAudit('sku', records.sku.id, error);
+      results.sku = { error: error.message };
+    }
+  }
+  return results;
+}
+
+async function scheduleSavedProductAudits(productDetailId, { trigger = 'manual', types = ['image', 'sku'] } = {}) {
+  const records = {};
+  if (types.includes('image')) records.image = await db.createProductAudit('image', productDetailId,
+    { trigger, model: config.complexModel });
+  if (types.includes('sku')) records.sku = await db.createProductAudit('sku', productDetailId,
+    { trigger, model: config.complexModel });
+  const operation = multimodalAuditQueue.catch(() => {})
+    .then(() => executeSavedProductAudits(productDetailId, records));
+  multimodalAuditQueue = operation.catch((error) => {
+    app.log.error({ err: error, productDetailId }, 'saved product audits failed');
+  });
+  return { records, operation };
+}
+
 app.register(fastifyHttpProxy, {
   upstream: 'http://127.0.0.1:6080',
   prefix: '/login',
@@ -569,16 +702,40 @@ app.post('/api/product-details/:id/image-audit', { preHandler: requireApiKey }, 
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   try {
-    const result = await auditProductGallery({ detail, config: {
-      apiKey: config.dashscopeApiKey, baseUrl: config.dashscopeBaseUrl,
-      visionModel: config.visionModel, complexModel: config.complexModel,
-      storagePath: config.storagePath,
-    } });
-    return result;
+    const scheduled = await scheduleSavedProductAudits(detail.id, { trigger: 'manual', types: ['image'] });
+    const completed = await scheduled.operation;
+    if (completed.image?.error) throw new Error(completed.image.error);
+    return { ...completed.image.result, persisted: true, auditRecordId: completed.image.record.id };
   } catch (error) {
     request.log.error({ err: error, productDetailId: detail.id }, 'gallery audit failed');
     return reply.code(502).send({ error: 'image_audit_failed', message: error.message });
   }
+});
+
+app.get('/api/product-details/:id/image-audits', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  return db.listProductAudits('image', detail.id, request.query?.limit);
+});
+
+app.post('/api/product-details/:id/sku-audit', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  try {
+    const scheduled = await scheduleSavedProductAudits(detail.id, { trigger: 'manual', types: ['sku'] });
+    const completed = await scheduled.operation;
+    if (completed.sku?.error) throw new Error(completed.sku.error);
+    return { ...completed.sku.result, persisted: true, auditRecordId: completed.sku.record.id };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: detail.id }, 'saved SKU audit failed');
+    return reply.code(502).send({ error: 'sku_audit_failed', message: error.message });
+  }
+});
+
+app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  return db.listProductAudits('sku', detail.id, request.query?.limit);
 });
 
 app.post('/api/image-audit/test', { preHandler: requireApiKey }, async (request, reply) => {
@@ -831,7 +988,15 @@ async function workerLoop() {
         await db.saveShopScan(job.id, result.extractedData);
       } else if (job.options?.mode === 'product_detail'
           && result.extractedData?.pageType === 'product') {
-        await db.saveProductDetail(result.extractedData, job.url, result.extractedData.localImages ?? []);
+        const saved = await db.saveProductDetail(
+          result.extractedData, job.url, result.extractedData.localImages ?? [],
+        );
+        try {
+          await scheduleSavedProductAudits(saved.productDetailId, { trigger: 'capture' });
+        } catch (error) {
+          app.log.error({ err: error, productDetailId: saved.productDetailId },
+            'failed to schedule automatic product audits');
+        }
       }
     } catch (error) {
       app.log.error({ err: error, jobId: job.id }, 'capture failed');

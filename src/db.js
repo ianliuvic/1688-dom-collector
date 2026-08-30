@@ -204,6 +204,42 @@ export function createDatabase(databaseUrl) {
         created_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE INDEX IF NOT EXISTS product_image_cleanups_product_idx ON product_image_cleanups(product_detail_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS product_image_audits (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        trigger_type text NOT NULL DEFAULT 'manual',
+        model text NOT NULL,
+        schema_version integer,
+        source_hash text,
+        status text NOT NULL DEFAULT 'queued',
+        audit_status text,
+        summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+        result jsonb NOT NULL DEFAULT '{}'::jsonb,
+        error text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        started_at timestamptz,
+        completed_at timestamptz
+      );
+      CREATE INDEX IF NOT EXISTS product_image_audits_product_idx
+        ON product_image_audits(product_detail_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS product_sku_audits (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        trigger_type text NOT NULL DEFAULT 'manual',
+        model text NOT NULL,
+        schema_version integer,
+        source_hash text,
+        status text NOT NULL DEFAULT 'queued',
+        audit_status text,
+        summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+        result jsonb NOT NULL DEFAULT '{}'::jsonb,
+        error text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        started_at timestamptz,
+        completed_at timestamptz
+      );
+      CREATE INDEX IF NOT EXISTS product_sku_audits_product_idx
+        ON product_sku_audits(product_detail_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS product_detail_translations (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -501,14 +537,17 @@ export function createDatabase(databaseUrl) {
       ) THEN '1688_listing_time' ELSE 'first_seen_at' END AS publication_date_source
       FROM product_details WHERE product_details.id = $1`, [id]);
     if (!detail.rows[0]) return null;
-    const [images, skus, attributes, tiers] = await Promise.all([
+    const [images, skus, attributes, tiers, imageAudit, skuAudit] = await Promise.all([
       pool.query('SELECT * FROM product_detail_images WHERE product_detail_id = $1 ORDER BY image_type, sort_order', [id]),
       pool.query('SELECT * FROM product_detail_skus WHERE product_detail_id = $1 ORDER BY id', [id]),
       pool.query('SELECT * FROM product_detail_attributes WHERE product_detail_id = $1 ORDER BY sort_order', [id]),
       pool.query('SELECT * FROM product_detail_price_tiers WHERE product_detail_id = $1 ORDER BY min_quantity NULLS FIRST', [id]),
+      pool.query('SELECT * FROM product_image_audits WHERE product_detail_id=$1 ORDER BY created_at DESC LIMIT 1', [id]),
+      pool.query('SELECT * FROM product_sku_audits WHERE product_detail_id=$1 ORDER BY created_at DESC LIMIT 1', [id]),
     ]);
     return { ...detail.rows[0], images: images.rows, skus: skus.rows,
-      attributes: attributes.rows, priceTiers: tiers.rows };
+      attributes: attributes.rows, priceTiers: tiers.rows,
+      latestImageAudit: imageAudit.rows[0] ?? null, latestSkuAudit: skuAudit.rows[0] ?? null };
   }
 
   async function listProductDetails({ offerId = null, limit = 100 } = {}) {
@@ -547,6 +586,58 @@ export function createDatabase(databaseUrl) {
 
   async function listProductImageCleanups(productDetailId) {
     const result = await pool.query('SELECT * FROM product_image_cleanups WHERE product_detail_id=$1 ORDER BY created_at DESC', [productDetailId]);
+    return result.rows;
+  }
+
+  async function createProductAudit(auditType, productDetailId, values = {}) {
+    const table = auditType === 'image' ? 'product_image_audits'
+      : auditType === 'sku' ? 'product_sku_audits' : null;
+    if (!table) throw new Error('Unsupported product audit type.');
+    const saved = await pool.query(`INSERT INTO ${table}
+      (product_detail_id, trigger_type, model, status)
+      VALUES ($1,$2,$3,'queued') RETURNING *`, [productDetailId,
+      values.trigger ?? 'manual', values.model ?? 'qwen3.8-max']);
+    return saved.rows[0];
+  }
+
+  async function startProductAudit(auditType, id) {
+    const table = auditType === 'image' ? 'product_image_audits'
+      : auditType === 'sku' ? 'product_sku_audits' : null;
+    if (!table) throw new Error('Unsupported product audit type.');
+    const saved = await pool.query(`UPDATE ${table}
+      SET status='running', started_at=now(), error=NULL WHERE id=$1 RETURNING *`, [id]);
+    return saved.rows[0] ?? null;
+  }
+
+  async function completeProductAudit(auditType, id, result, sourceHash = null) {
+    const table = auditType === 'image' ? 'product_image_audits'
+      : auditType === 'sku' ? 'product_sku_audits' : null;
+    if (!table) throw new Error('Unsupported product audit type.');
+    const model = result?.models?.complex ?? result?.models?.vision ?? 'qwen3.8-max';
+    const saved = await pool.query(`UPDATE ${table} SET status='completed', model=$2,
+      schema_version=$3, source_hash=$4, audit_status=$5, summary=$6, result=$7,
+      error=NULL, completed_at=now() WHERE id=$1 RETURNING *`, [id, model,
+      result?.schemaVersion ?? null, sourceHash, result?.auditStatus ?? null,
+      JSON.stringify(result?.summary ?? {}), JSON.stringify(result ?? {})]);
+    return saved.rows[0] ?? null;
+  }
+
+  async function failProductAudit(auditType, id, error) {
+    const table = auditType === 'image' ? 'product_image_audits'
+      : auditType === 'sku' ? 'product_sku_audits' : null;
+    if (!table) throw new Error('Unsupported product audit type.');
+    const saved = await pool.query(`UPDATE ${table} SET status='failed', error=$2,
+      completed_at=now() WHERE id=$1 RETURNING *`, [id, String(error?.message ?? error)]);
+    return saved.rows[0] ?? null;
+  }
+
+  async function listProductAudits(auditType, productDetailId, limit = 20) {
+    const table = auditType === 'image' ? 'product_image_audits'
+      : auditType === 'sku' ? 'product_sku_audits' : null;
+    if (!table) throw new Error('Unsupported product audit type.');
+    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+    const result = await pool.query(`SELECT * FROM ${table}
+      WHERE product_detail_id=$1 ORDER BY created_at DESC LIMIT $2`, [productDetailId, safeLimit]);
     return result.rows;
   }
 
@@ -739,6 +830,7 @@ export function createDatabase(databaseUrl) {
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
     saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail, listProductDetails,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
+    createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
     getWordPressPublication, listWordPressPublicationDates, auditAndRepairProductPrices,
     saveWordPressPublication, ping };

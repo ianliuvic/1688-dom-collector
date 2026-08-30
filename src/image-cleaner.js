@@ -152,11 +152,17 @@ export async function analyzeGalleryImages({ images, config }) {
   };
 }
 
+export function selectAuditableGalleryImages(images = []) {
+  return [...images]
+    .filter((image) => image.image_type === 'main' || image.image_type === 'gallery')
+    .sort((a, b) => {
+      if (a.image_type === 'main') return -1;
+      if (b.image_type === 'main') return 1;
+      return (a.sort_order || 0) - (b.sort_order || 0);
+    });
+}
+
 export async function auditProductGallery({ detail, config }) {
-  const images = (detail.images || []).sort((a, b) => {
-    if (a.image_type === 'main') return -1;
-    if (b.image_type === 'main') return 1;
-    return (a.sort_order || 0) - (b.sort_order || 0);
-  });
+  const images = selectAuditableGalleryImages(detail.images || []);
   return analyzeGalleryImages({ images, config });
 }
