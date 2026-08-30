@@ -91,3 +91,9 @@ test('rejects keyword-stuffed titles and color or print-specific descriptions', 
     description: `${description} It comes in a floral print.`,
   }), /color or print/);
 });
+
+test('accepts a concise two-word product title', () => {
+  assert.doesNotThrow(() => validateGeneratedCatalogCopy({
+    title: 'Triangle Bikini', description,
+  }));
+});

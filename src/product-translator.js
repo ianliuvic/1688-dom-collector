@@ -82,8 +82,8 @@ export function validateGeneratedCatalogCopy(translated) {
   const description = String(translated.description || '').trim();
   const titleWords = englishWordCount(title);
   const descriptionWords = englishWordCount(description);
-  if (/[\u3400-\u9fff]/.test(title) || titleWords < 3 || titleWords > 12 || title.length > 100) {
-    throw new Error('Generated English title is not a concise 3 to 12 word product name.');
+  if (/[\u3400-\u9fff]/.test(title) || titleWords < 2 || titleWords > 15 || title.length > 120) {
+    throw new Error('Generated English title is not a concise 2 to 15 word product name.');
   }
   if (TITLE_NOISE_RE.test(title) || VARIANT_APPEARANCE_RE.test(title)) {
     throw new Error('Generated English title contains year, marketplace, sales, color, or print keywords.');
@@ -244,7 +244,7 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
   }
 
   const visualPrompt = `你是专业的泳装和服装B2B商品内容编辑。综合全部Gallery图片识别同一个产品，只返回严格JSON：{"title":"","description":""}。
-title必须根据图片重新命名，不能直译1688中文标题。使用3至12个英文单词的稳定产品名称；不得含年份、New Arrival、Hot Sale、Cross-Border、AliExpress、Amazon、Export、Wholesale、颜色、印花或图案。
+title必须根据图片重新命名，不能直译1688中文标题。使用2至15个英文单词的稳定产品名称；不得含年份、New Arrival、Hot Sale、Cross-Border、AliExpress、Amazon、Export、Wholesale、颜色、印花或图案。
 description必须是35至120个英文单词的单段产品级描述。只写多张图片共同体现的稳定可见特点，例如品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁和套装组成。不得描述颜色、印花、图案、单个SKU、促销、年份、平台、SEO关键词、穿着效果、材质、功能或不可见信息。
 中文标题仅可作为产品类别的弱提示，图片证据优先。不要输出Markdown或JSON之外的内容。
 中文标题弱提示：${JSON.stringify(source.title)}`;
