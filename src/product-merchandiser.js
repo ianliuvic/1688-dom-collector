@@ -124,17 +124,31 @@ PRODUCT DATA: ${JSON.stringify(source)}`;
     content.push({ type: 'text', text: `Gallery image ${index + 1}` });
     content.push({ type: 'image_url', image_url: { url: image.url } });
   }
-  const response = await fetch(endpointFrom(config.baseUrl), {
-    method: 'POST',
-    headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content }],
-      response_format: { type: 'json_object' }, temperature: 0, max_tokens: 4000 }),
-    signal: AbortSignal.timeout(360000),
-  });
-  if (!response.ok) throw new Error(`DeepSeek merchandising classification failed (${response.status}).`);
-  const body = await response.json();
-  const profile = validateMerchandisingProfile(
-    parseJson(contentText(body.choices?.[0]?.message?.content)), taxonomies,
-  );
+  let body;
+  let profile;
+  let correction = '';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const requestContent = correction
+      ? [{ type: 'text', text: `${prompt}\n上一次输出未通过校验：${correction}。请只返回完整JSON。` }, ...content.slice(1)]
+      : content;
+    const response = await fetch(endpointFrom(config.baseUrl), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: requestContent }],
+        response_format: { type: 'json_object' }, temperature: 0, max_tokens: 8000 }),
+      signal: AbortSignal.timeout(360000),
+    });
+    if (!response.ok) throw new Error(`DeepSeek merchandising classification failed (${response.status}).`);
+    body = await response.json();
+    try {
+      profile = validateMerchandisingProfile(
+        parseJson(contentText(body.choices?.[0]?.message?.content)), taxonomies,
+      );
+      break;
+    } catch (error) {
+      if (attempt === 1) throw error;
+      correction = error.message;
+    }
+  }
   return { ...profile, model, imageSources: images.map(({ url, ...item }) => item), usage: body.usage ?? null };
 }
