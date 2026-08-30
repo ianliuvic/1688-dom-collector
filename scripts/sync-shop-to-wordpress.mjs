@@ -235,9 +235,18 @@ async function fillCaptureSlots() {
 
 async function resolveDetail(item) {
   const details = await api(`/api/product-details?offerId=${encodeURIComponent(item.offerId)}&limit=10`);
-  const detail = Array.isArray(details) ? details[0] : null;
-  if (!detail?.id) throw new Error('Captured product detail could not be resolved.');
-  item.detailId = String(detail.id);
+  const summary = Array.isArray(details) ? details[0] : null;
+  if (!summary?.id) throw new Error('Captured product detail could not be resolved.');
+  const detail = await api(`/api/product-details/${encodeURIComponent(summary.id)}`);
+  const images = Array.isArray(detail?.images) ? detail.images : [];
+  const mainCount = images.filter((image) => image.image_type === 'main').length;
+  const gallery = detail?.raw_data?.gallery || {};
+  const verified = detail?.gallery_verified_complete === true
+    && gallery.source === 'exact_dom_gallery' && gallery.complete === true
+    && gallery.stable === true && Number(gallery.unresolvedSlotCount || 0) === 0
+    && mainCount > 0;
+  if (!verified) throw new Error('Captured product Gallery is incomplete or has no verified main image.');
+  item.detailId = String(summary.id);
   item.stage = 'captured';
 }
 
