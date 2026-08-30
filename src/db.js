@@ -296,6 +296,26 @@ export function createDatabase(databaseUrl) {
         ON product_wordpress_publications(wp_post_id);
       CREATE INDEX IF NOT EXISTS product_wordpress_publications_external_idx
         ON product_wordpress_publications(external_id);
+      CREATE TABLE IF NOT EXISTS product_rag_syncs (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        trigger_type text NOT NULL,
+        status text NOT NULL DEFAULT 'queued',
+        canonical_product_id text,
+        active boolean NOT NULL DEFAULT false,
+        attempt_count integer NOT NULL DEFAULT 0,
+        request_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+        response_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+        error text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        started_at timestamptz,
+        completed_at timestamptz,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS product_rag_syncs_product_idx
+        ON product_rag_syncs(product_detail_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS product_rag_syncs_status_idx
+        ON product_rag_syncs(status, created_at);
     `);
   }
 
@@ -823,6 +843,45 @@ export function createDatabase(databaseUrl) {
     return saved.rows[0];
   }
 
+  async function createProductRagSync(productDetailId, values = {}) {
+    const saved = await pool.query(`INSERT INTO product_rag_syncs
+      (product_detail_id, trigger_type, canonical_product_id, active, request_summary)
+      VALUES ($1,$2,$3,$4,$5) RETURNING *`, [productDetailId, values.trigger ?? 'manual',
+      values.canonicalProductId ?? null, Boolean(values.active),
+      JSON.stringify(values.requestSummary ?? {})]);
+    return saved.rows[0];
+  }
+
+  async function startProductRagSync(id) {
+    const saved = await pool.query(`UPDATE product_rag_syncs SET status='running',
+      attempt_count=attempt_count+1, started_at=COALESCE(started_at,now()), error=NULL,
+      updated_at=now() WHERE id=$1 RETURNING *`, [id]);
+    return saved.rows[0] ?? null;
+  }
+
+  async function completeProductRagSync(id, values = {}) {
+    const saved = await pool.query(`UPDATE product_rag_syncs SET status='completed',
+      canonical_product_id=COALESCE($2,canonical_product_id), active=$3,
+      response_summary=$4, error=NULL, completed_at=now(), updated_at=now()
+      WHERE id=$1 RETURNING *`, [id, values.canonicalProductId ?? null,
+      Boolean(values.active), JSON.stringify(values.responseSummary ?? {})]);
+    return saved.rows[0] ?? null;
+  }
+
+  async function failProductRagSync(id, error) {
+    const saved = await pool.query(`UPDATE product_rag_syncs SET status='failed',
+      error=$2, completed_at=now(), updated_at=now() WHERE id=$1 RETURNING *`,
+    [id, String(error?.message ?? error)]);
+    return saved.rows[0] ?? null;
+  }
+
+  async function listProductRagSyncs(productDetailId, limit = 20) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+    const saved = await pool.query(`SELECT * FROM product_rag_syncs
+      WHERE product_detail_id=$1 ORDER BY created_at DESC LIMIT $2`, [productDetailId, safeLimit]);
+    return saved.rows;
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -833,7 +892,8 @@ export function createDatabase(databaseUrl) {
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
     getWordPressPublication, listWordPressPublicationDates, auditAndRepairProductPrices,
-    saveWordPressPublication, ping };
+    saveWordPressPublication, createProductRagSync, startProductRagSync,
+    completeProductRagSync, failProductRagSync, listProductRagSyncs, ping };
 }
 
 function parseScore(value) {

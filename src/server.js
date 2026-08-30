@@ -13,6 +13,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   setWordPressProductPublicationDate, syncWordPressProductPricing } from './wordpress-publisher.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
+import { buildRagProduct, createRagClient } from './rag-client.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -41,6 +42,9 @@ const config = {
   wordpressApplicationPassword: process.env.WORDPRESS_APPLICATION_PASSWORD,
   novncUsername: process.env.NOVNC_USERNAME || '',
   novncPassword: process.env.NOVNC_PASSWORD || '',
+  productsRagApiUrl: process.env.PRODUCTS_RAG_API_URL || '',
+  productsRagAdminToken: process.env.PRODUCTS_RAG_ADMIN_TOKEN || '',
+  productsRagSyncConcurrency: Math.min(Math.max(Number(process.env.PRODUCTS_RAG_SYNC_CONCURRENCY) || 2, 1), 5),
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -50,6 +54,7 @@ const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 1024 * 1024 });
 const db = createDatabase(config.databaseUrl);
 const collector = createCollector(config);
 const loginManager = createLoginManager(config);
+const ragClient = createRagClient(config);
 let workerRunning = true;
 let workerEnabled = true;
 let workerActive = false;
@@ -66,6 +71,10 @@ let multimodalAuditQueue = Promise.resolve();
 const translationQueue = createConcurrentQueue({
   concurrency: config.translationConcurrency,
   onTaskError: (error) => app.log.error({ err: error }, 'unhandled translation queue error'),
+});
+const ragSyncQueue = createConcurrentQueue({
+  concurrency: config.productsRagSyncConcurrency,
+  onTaskError: (error) => app.log.error({ err: error }, 'unhandled products RAG sync error'),
 });
 let wordpressQueue = Promise.resolve();
 
@@ -302,6 +311,47 @@ async function scheduleSavedProductAudits(productDetailId, { trigger = 'manual',
   return { records, operation };
 }
 
+async function executeProductRagSync(record) {
+  await db.startProductRagSync(record.id);
+  try {
+    const detail = await db.getProductDetail(record.product_detail_id);
+    if (!detail) throw new Error('Saved product detail no longer exists.');
+    const [translation, publication] = await Promise.all([
+      db.getLatestProductTranslation(detail.id, 'en'),
+      db.getWordPressPublication(detail.id),
+    ]);
+    const product = buildRagProduct({ detail, translation, publication });
+    const response = await ragClient.upsert(product);
+    const result = response?.results?.[0];
+    if (!response?.ok || result?.ok === false) {
+      throw new Error(result?.error || 'Products RAG API rejected the product.');
+    }
+    await db.completeProductRagSync(record.id, {
+      canonicalProductId: product.canonicalProductId, active: product.active,
+      responseSummary: {
+        entities: result?.entities ?? null, productEntities: result?.productEntities ?? null,
+        galleryEntities: result?.galleryEntities ?? null, skuEntities: result?.skuEntities ?? null,
+      },
+    });
+    return response;
+  } catch (error) {
+    await db.failProductRagSync(record.id, error).catch(() => {});
+    throw error;
+  }
+}
+
+async function scheduleProductRagSync(productDetailId, { trigger = 'manual' } = {}) {
+  if (!ragClient.enabled) return { scheduled: false, reason: 'not_configured' };
+  const detail = await db.getProductDetail(productDetailId);
+  if (!detail) throw new Error('Saved product detail no longer exists.');
+  const record = await db.createProductRagSync(productDetailId, {
+    trigger, canonicalProductId: `1688:${detail.offer_id}`,
+    requestSummary: { sourceProductId: String(detail.offer_id), trigger },
+  });
+  ragSyncQueue.enqueue(() => executeProductRagSync(record));
+  return { scheduled: true, recordId: record.id };
+}
+
 app.register(fastifyHttpProxy, {
   upstream: 'http://127.0.0.1:6080',
   prefix: '/login',
@@ -431,6 +481,7 @@ app.post('/api/product-details/:id/translations', { preHandler: requireApiKey },
         translated.namingStrategy = 'preserved_catalog_copy_sku_refresh';
       }
       const saved = await db.saveProductTranslation(detail.id, translated);
+      await scheduleProductRagSync(detail.id, { trigger: 'translation' });
       job.translationId = saved.id;
       job.result = saved;
       job.status = 'completed';
@@ -537,6 +588,7 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
         wpStatus: wp.status ?? options.status, syncHash, payload: published.payload, result: wp,
         lastError: null,
       });
+      await scheduleProductRagSync(detail.id, { trigger: 'wordpress_publish' });
       job.publicationId = saved.id;
       job.result = { publication: saved, wordpress: wp, mediaCount: published.media.length };
       job.status = 'completed';
@@ -559,6 +611,19 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
 app.get('/api/wordpress-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = wordpressJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.get('/api/product-details/:id/rag-syncs', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  return db.listProductRagSyncs(detail.id, request.query?.limit);
+});
+
+app.post('/api/product-details/:id/rag-sync', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const scheduled = await scheduleProductRagSync(detail.id, { trigger: 'manual' });
+  return reply.code(scheduled.scheduled ? 202 : 503).send(scheduled);
 });
 
 app.post('/api/wordpress/publication-dates/backfill', { preHandler: requireApiKey }, async (_request, reply) => {
@@ -996,6 +1061,12 @@ async function workerLoop() {
         } catch (error) {
           app.log.error({ err: error, productDetailId: saved.productDetailId },
             'failed to schedule automatic product audits');
+        }
+        try {
+          await scheduleProductRagSync(saved.productDetailId, { trigger: 'capture' });
+        } catch (error) {
+          app.log.error({ err: error, productDetailId: saved.productDetailId },
+            'failed to schedule automatic products RAG sync');
         }
       }
     } catch (error) {
