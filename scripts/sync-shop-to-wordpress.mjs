@@ -416,7 +416,11 @@ async function resume() {
   // Captures are durable, but a prior network failure may have hidden the
   // completed response. Resolve SQL first and only enqueue a new capture if
   // no saved detail exists.
-  for (const item of Object.values(progress.items).filter((entry) => entry.stage === 'new')) {
+  // Only reconcile items that had previously reached the capture API. Fresh,
+  // never-admitted items cannot already exist because of this run, and
+  // querying every one of them makes a large-shop resume needlessly slow.
+  for (const item of Object.values(progress.items)
+    .filter((entry) => entry.stage === 'new' && Number(entry.captureAttempts || 0) > 0)) {
     try {
       await resolveDetail(item);
     } catch { /* New items are admitted later by the adaptive capture window. */ }
