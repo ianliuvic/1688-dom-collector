@@ -133,6 +133,18 @@ function recoverExistingItem(item) {
   if (item.stage === 'published') return;
 
   const errorText = String(item.error || '').toLowerCase();
+  if (item.stage === 'failed'
+      && errorText.includes('no saved main or gallery image is available')) {
+    item.captureJobId = null;
+    item.detailId = null;
+    item.translationJobId = null;
+    item.translationCompleted = false;
+    item.wordpressJobId = null;
+    item.stage = 'new';
+    item.error = null;
+    item.failedStage = null;
+    return;
+  }
   const recoverableFailure = item.stage === 'failed' && (
     errorText.includes('not_found')
     || errorText.includes('fetch failed')
