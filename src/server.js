@@ -37,6 +37,7 @@ const config = {
   translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
   translationConcurrency: Math.min(Math.max(Number(process.env.TRANSLATION_CONCURRENCY) || 1, 1), 10),
   savedAuditConcurrency: Math.min(Math.max(Number(process.env.SAVED_AUDIT_CONCURRENCY) || 3, 1), 5),
+  wordpressPublishConcurrency: Math.min(Math.max(Number(process.env.WORDPRESS_PUBLISH_CONCURRENCY) || 3, 1), 5),
   modelImageTransport: process.env.MODEL_IMAGE_TRANSPORT === 'persistent_storage'
     ? 'persistent_storage' : 'source_url',
   wordpressBaseUrl: process.env.WORDPRESS_BASE_URL,
@@ -83,7 +84,11 @@ const ragSyncQueue = createConcurrentQueue({
   concurrency: config.productsRagSyncConcurrency,
   onTaskError: (error) => app.log.error({ err: error }, 'unhandled products RAG sync error'),
 });
-let wordpressQueue = Promise.resolve();
+const wordpressPublishQueue = createConcurrentQueue({
+  concurrency: config.wordpressPublishConcurrency,
+  onTaskError: (error) => app.log.error({ err: error }, 'unhandled WordPress publish queue error'),
+});
+let wordpressMaintenanceQueue = Promise.resolve();
 
 function trimTerminalJobs(jobMap, maxEntries = 2000) {
   if (jobMap.size <= maxEntries) return;
@@ -425,7 +430,8 @@ app.get('/', async () => ({
 app.get('/health', async (_request, reply) => {
   try {
     await db.ping();
-    return { ok: true, queues: { savedAudits: savedAuditQueue.stats() } };
+    return { ok: true, queues: { savedAudits: savedAuditQueue.stats(),
+      wordpressPublish: wordpressPublishQueue.stats() } };
   } catch (error) {
     reply.code(503);
     return { ok: false, error: error.message };
@@ -628,7 +634,7 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
     startedAt: null, completedAt: null, publicationId: null, result: null, error: null };
   wordpressJobs.set(id, job);
   trimTerminalJobs(wordpressJobs);
-  wordpressQueue = wordpressQueue.catch(() => {}).then(async () => {
+  wordpressPublishQueue.enqueue(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
     let draft;
@@ -688,7 +694,7 @@ app.post('/api/wordpress/publication-dates/backfill', { preHandler: requireApiKe
     createdAt: new Date().toISOString(), startedAt: null, completedAt: null, errors: [] };
   wordpressPublicationDateJobs.set(id, job);
   trimTerminalJobs(wordpressPublicationDateJobs);
-  wordpressQueue = wordpressQueue.catch(() => {}).then(async () => {
+  wordpressMaintenanceQueue = wordpressMaintenanceQueue.catch(() => {}).then(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
     try {
@@ -733,7 +739,7 @@ app.post('/api/wordpress/prices/audit-and-repair', { preHandler: requireApiKey }
     createdAt: new Date().toISOString(), startedAt: null, completedAt: null, errors: [] };
   wordpressPriceRepairJobs.set(id, job);
   trimTerminalJobs(wordpressPriceRepairJobs);
-  wordpressQueue = wordpressQueue.catch(() => {}).then(async () => {
+  wordpressMaintenanceQueue = wordpressMaintenanceQueue.catch(() => {}).then(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
     try {
