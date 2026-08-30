@@ -48,34 +48,28 @@ export async function analyzeGalleryImages({ images, config }) {
     files.push({ id: image.id ?? null, index, sourceUrl: image.source_url || image.sourceUrl || null, sourcePath: imagePath,
       sha256: crypto.createHash('sha256').update(bytes).digest('hex'), dataUrl: `data:${mime};base64,${bytes.toString('base64')}` });
   }
-  const prompt = `你是商品Gallery图片质检器。图片按网页展示顺序提供，图片0是首图。本轮不要判断重复，只返回严格JSON对象：{"items":[{"index":0,"is_front_view":true,"is_back_or_reverse":false,"is_collage":false,"has_watermark":false,"has_chinese_text":false,"notes":""}],"summary":""}。
+  const prompt = `你是商品Gallery图片质检与跨图取证审计器。图片按网页展示顺序提供，图片0是首图。一次完成逐图可见事实、正反面跨图判断和重复图片判断，只返回严格JSON对象：{"items":[{"index":0,"is_front_view":true,"is_back_or_reverse":false,"is_collage":false,"has_watermark":false,"has_chinese_text":false,"orientation_evidence":"","notes":""}],"back_or_reverse_indices":[],"orientation_evidence":{},"duplicate_sets":[{"indices":[0,2],"confidence":0.98,"evidence":"主体轮廓、褶皱和位置逐点一致，仅背景不同"}],"summary":""}。
 判定规则：
 1. is_front_view：展示商品正面；一套商品包含上下装不等于拼图。
 2. is_back_or_reverse：展示服装背面、内里或反面。必须跨图片比较同一商品：例如其他图片显示印花外侧，而某图显示纯色内里、罩杯内侧、反面接缝或裤装背面，应标记true。局部特写或产品不完整本身绝不代表反面；如果局部图展示的印花外侧与其他正面图一致且没有明确内里证据，必须标记false。无法确认时也标记false并在notes说明。
 3. is_collage：同一画布含独立分格、圆形局部放大框、多个重复视图或多张照片拼接。仅仅同时展示上装和下装不算拼接。
 4. has_watermark：图片上叠加的品牌、店铺、平台、联系方式或水印文字/图标；正常场景道具不算水印。
 5. has_chinese_text：图片画面中确实可见中文字符。
+6. duplicate_sets 只收录源自同一张原始照片或完全相同构图的图片；换背景、抠图、格式/缩放/轻微裁切、加文字或局部框仍算重复。相同商品但角度、姿势、摆放不同不算重复。置信度低于0.85不要列入。
 不要根据商品相同就推测其他属性，不可见信息不要编造。图片编号从0开始。\n${files.map((_, i) => `图片编号 ${i}`).join('、')}`;
   const content = [{ type: 'text', text: prompt }, ...files.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } }))];
   const visionModel = config.visionModel || 'qwen3.8-max';
   const complexModel = config.complexModel || 'qwen3.8-max';
-  const qualityResult = await callVision(content, config, { model: visionModel, maxTokens: 2500, label: 'basic image recognition' });
-  const crossImagePrompt = `你是商品Gallery跨图取证审计器。基础识图已由另一模型处理；你只完成需要跨图片推理的两项，并返回严格JSON：
-{"back_or_reverse_indices":[1],"orientation_evidence":{"1":"与图片0对比，该图明确展示内里"},"duplicate_sets":[{"indices":[0,2],"confidence":0.98,"evidence":"主体轮廓、褶皱和位置逐点一致，仅背景不同"}],"summary":""}。
-规则：
-1. 只有明确展示服装背面、内里或反面才列入 back_or_reverse_indices；局部特写、裁切、不完整、不同花位不等于反面；证据不足不列入。
-2. duplicate_sets 只收录源自同一张原始照片/完全相同构图的图片；换背景、抠图、格式/缩放/轻微裁切、加文字或局部框仍算重复。相同商品但角度、姿势、摆放不同不算重复。
-3. 不判断水印或中文，不为凑组而推断。编号范围为0到${files.length - 1}。`;
-  const crossImageContent = [{ type: 'text', text: crossImagePrompt }, ...files.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } }))];
-  const crossImageResult = await callVision(crossImageContent, config, { model: complexModel, maxTokens: 2200, label: 'cross-image reasoning' });
-  const auditedBackIndices = new Set((Array.isArray(crossImageResult.parsed?.back_or_reverse_indices)
-    ? crossImageResult.parsed.back_or_reverse_indices : []).map(Number)
+  const auditResult = await callVision(content, config, { model: complexModel, maxTokens: 4000,
+    label: 'combined gallery audit' });
+  const auditedBackIndices = new Set((Array.isArray(auditResult.parsed?.back_or_reverse_indices)
+    ? auditResult.parsed.back_or_reverse_indices : []).map(Number)
     .filter((index) => Number.isInteger(index) && index >= 0 && index < files.length));
-  const parsed = qualityResult.parsed;
+  const parsed = auditResult.parsed;
   const modelItems = Array.isArray(parsed?.items) ? parsed.items : [];
   const byIndex = new Map(modelItems.map((item) => [Number(item.index), item]));
-  const duplicateSets = Array.isArray(crossImageResult.parsed?.duplicate_sets)
-    ? crossImageResult.parsed.duplicate_sets.map((set) => ({ ...set,
+  const duplicateSets = Array.isArray(auditResult.parsed?.duplicate_sets)
+    ? auditResult.parsed.duplicate_sets.map((set) => ({ ...set,
       indices: [...new Set((Array.isArray(set.indices) ? set.indices : []).map(Number)
         .filter((index) => Number.isInteger(index) && index >= 0 && index < files.length))],
     })).filter((set) => Number(set.confidence ?? 0) >= 0.85 && set.indices.length >= 2) : [];
@@ -109,7 +103,7 @@ export async function analyzeGalleryImages({ images, config }) {
     const model = { ...(byIndex.get(index) || {}) };
     model.is_back_or_reverse = model.is_back_or_reverse === true || auditedBackIndices.has(index);
     if (auditedBackIndices.has(index) && !model.orientation_evidence) {
-      model.orientation_evidence = crossImageResult.parsed?.orientation_evidence?.[String(index)] || null;
+      model.orientation_evidence = auditResult.parsed?.orientation_evidence?.[String(index)] || null;
     }
     const duplicateGroup = duplicateGroupByIndex.get(index) || null;
     const duplicateSet = duplicateGroup
@@ -146,9 +140,9 @@ export async function analyzeGalleryImages({ images, config }) {
   const auditStatus = Object.entries(summary).some(([key, value]) => key.startsWith('has') && value === true)
     || !summary.firstImageCompliant ? 'issues_detected' : 'clear';
   return {
-    schemaVersion: 3, mode: 'audit_only', models: { vision: visionModel, complex: complexModel },
+    schemaVersion: 4, mode: 'audit_only', models: { vision: visionModel, complex: complexModel },
     auditStatus, summary, images: auditedItems, duplicateSets: mergedSets,
-    modelResponse: { quality: qualityResult, crossImage: crossImageResult },
+    modelResponse: { audit: auditResult },
   };
 }
 
