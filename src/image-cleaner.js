@@ -22,7 +22,8 @@ function contentText(content) {
 async function callVision(content, config, { model, maxTokens = 2500, label = 'gallery analysis' } = {}) {
   const response = await fetch(endpointFrom(config.baseUrl), {
     method: 'POST', headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: maxTokens }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content }],
+      response_format: { type: 'json_object' }, temperature: 0, max_tokens: maxTokens }),
     signal: AbortSignal.timeout(180000),
   });
   if (!response.ok) throw new Error(`DeepSeek ${label} failed (${response.status}).`);

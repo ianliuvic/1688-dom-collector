@@ -211,7 +211,8 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
     const response = await fetch(endpointFrom(config.baseUrl), {
       method: 'POST',
       headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: maxTokens }),
+      body: JSON.stringify({ model, messages: [{ role: 'user', content }],
+        response_format: { type: 'json_object' }, temperature: 0, max_tokens: maxTokens }),
       signal: AbortSignal.timeout(360000),
     });
     if (!response.ok) throw new Error(`DeepSeek ${label} failed (${response.status}).`);
@@ -225,16 +226,18 @@ title必须根据图片重新命名，不能直译1688中文标题。使用3至1
 description必须是35至120个英文单词的单段产品级描述。只写多张图片共同体现的稳定可见特点，例如品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁和套装组成。不得描述颜色、印花、图案、单个SKU、促销、年份、平台、SEO关键词、穿着效果、材质、功能或不可见信息。
 中文标题仅可作为产品类别的弱提示，图片证据优先。不要输出Markdown或JSON之外的内容。
 中文标题弱提示：${JSON.stringify(source.title)}`;
-  async function requestVisualCopy(correction = '') {
-    const text = correction ? `${visualPrompt}\n上一次输出未通过校验：${correction}。请重新输出。` : visualPrompt;
-    return callModel([{ type: 'text', text }, ...imageContent], 1600, 'visual product copy generation');
+  async function requestVisualCopy(correction = '', previousOutput = '') {
+    const text = correction
+      ? `${visualPrompt}\n上一次输出：${previousOutput}\n未通过校验：${correction}。必须修正违规字段并重新输出。`
+      : visualPrompt;
+    return callModel([{ type: 'text', text }, ...imageContent], 3000, 'visual product copy generation');
   }
   let visualAttempt = await requestVisualCopy();
   let visualCopy = parseJson(visualAttempt.raw);
   try {
     validateGeneratedCatalogCopy(visualCopy || {});
   } catch (error) {
-    visualAttempt = await requestVisualCopy(error.message);
+    visualAttempt = await requestVisualCopy(error.message, visualAttempt.raw);
     visualCopy = parseJson(visualAttempt.raw);
     validateGeneratedCatalogCopy(visualCopy || {});
   }

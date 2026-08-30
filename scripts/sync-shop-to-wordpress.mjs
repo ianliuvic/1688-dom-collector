@@ -441,6 +441,12 @@ async function resume() {
     currentConcurrency: captureMinConcurrency, completedSinceAdjustment: 0,
     recentOutcomes: [], adjustments: [],
   };
+  progress.adaptiveCapture.minConcurrency = captureMinConcurrency;
+  progress.adaptiveCapture.maxConcurrency = captureMaxConcurrency;
+  progress.adaptiveCapture.currentConcurrency = Math.min(
+    Math.max(progress.adaptiveCapture.currentConcurrency || captureMinConcurrency, captureMinConcurrency),
+    captureMaxConcurrency,
+  );
 
   for (const item of Object.values(progress.items)) recoverExistingItem(item);
 

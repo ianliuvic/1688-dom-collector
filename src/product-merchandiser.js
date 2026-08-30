@@ -127,7 +127,8 @@ PRODUCT DATA: ${JSON.stringify(source)}`;
   const response = await fetch(endpointFrom(config.baseUrl), {
     method: 'POST',
     headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: 1800 }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content }],
+      response_format: { type: 'json_object' }, temperature: 0, max_tokens: 4000 }),
     signal: AbortSignal.timeout(360000),
   });
   if (!response.ok) throw new Error(`DeepSeek merchandising classification failed (${response.status}).`);

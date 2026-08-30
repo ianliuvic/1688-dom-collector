@@ -39,6 +39,7 @@ export async function analyzeProductImage({ imagePath, sourceUrl = null, offerId
     body: JSON.stringify({
       model: config.model || 'deepseek-v4-flash-vision-exp',
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: dataUrl } }] }],
+      response_format: { type: 'json_object' },
       temperature: 0.1,
       max_tokens: 1200,
     }),
