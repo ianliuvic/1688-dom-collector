@@ -100,25 +100,40 @@ async function downloadProductImages(data, storagePath, jobId, requestContext = 
   for (const source of sources) {
     if (!source.url || seen.has(source.url)) continue;
     seen.add(source.url);
-    try {
-      const headers = { 'user-agent': 'Mozilla/5.0', referer: 'https://detail.1688.com/' };
-      const response = requestContext?.request
-        ? await requestContext.request.get(source.url, { headers, timeout: 20000 })
-        : await fetch(source.url, { headers, signal: AbortSignal.timeout(20000) });
-      const ok = requestContext?.request ? response.ok() : response.ok;
-      if (!ok) continue;
-      const contentType = (requestContext?.request ? response.headers()['content-type'] : response.headers.get('content-type'))?.split(';')[0] || 'image/jpeg';
-      if (!contentType.startsWith('image/')) continue;
-      const extension = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' })[contentType] || 'bin';
-      const hash = crypto.createHash('sha1').update(source.url).digest('hex').slice(0, 12);
-      const filePath = path.join(imageDir, `${source.type}-${String(source.sortOrder ?? files.length).padStart(4, '0')}-${hash}.${extension}`);
-      const bytes = requestContext?.request ? await response.body() : Buffer.from(await response.arrayBuffer());
-      await fs.writeFile(filePath, bytes);
-      files.push({ type: source.type, sortOrder: source.sortOrder ?? files.length, sourceUrl: source.url,
-        storagePath: filePath, mimeType: contentType,
-        contentSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
-        byteSize: bytes.length });
-    } catch { /* preserve the source URL even when an individual image is blocked */ }
+    const headers = { 'user-agent': 'Mozilla/5.0', referer: 'https://detail.1688.com/' };
+    let downloaded = null;
+    for (let attempt = 1; attempt <= 3 && !downloaded; attempt += 1) {
+      try {
+        const response = requestContext?.request
+          ? await requestContext.request.get(source.url, { headers, timeout: 30000 })
+          : await fetch(source.url, { headers, signal: AbortSignal.timeout(30000) });
+        const ok = requestContext?.request ? response.ok() : response.ok;
+        const responseStatus = requestContext?.request ? response.status() : response.status;
+        if (!ok) throw new Error(`Image request failed with HTTP ${responseStatus}.`);
+        const contentType = (requestContext?.request
+          ? response.headers()['content-type']
+          : response.headers.get('content-type'))?.split(';')[0] || 'image/jpeg';
+        if (!contentType.startsWith('image/')) throw new Error('Image request returned a non-image response.');
+        const bytes = requestContext?.request
+          ? await response.body()
+          : Buffer.from(await response.arrayBuffer());
+        if (!bytes.length) throw new Error('Image request returned an empty body.');
+        downloaded = { contentType, bytes };
+      } catch {
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 350));
+      }
+    }
+    if (!downloaded) continue;
+    const extension = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
+      'image/gif': 'gif' })[downloaded.contentType] || 'bin';
+    const hash = crypto.createHash('sha1').update(source.url).digest('hex').slice(0, 12);
+    const filePath = path.join(imageDir,
+      `${source.type}-${String(source.sortOrder ?? files.length).padStart(4, '0')}-${hash}.${extension}`);
+    await fs.writeFile(filePath, downloaded.bytes);
+    files.push({ type: source.type, sortOrder: source.sortOrder ?? files.length, sourceUrl: source.url,
+      storagePath: filePath, mimeType: downloaded.contentType,
+      contentSha256: crypto.createHash('sha256').update(downloaded.bytes).digest('hex'),
+      byteSize: downloaded.bytes.length });
   }
   return files;
 }
