@@ -21,12 +21,24 @@ test('runs no more than the configured number of tasks concurrently', async () =
   }
 
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(queue.stats(), { concurrency: 5, active: 5, pending: 7 });
+  assert.deepEqual(queue.stats(), { concurrency: 5, active: 5, pending: 7, paused: false });
   release();
 
   while (completed < 12) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(maximumActive, 5);
-  assert.deepEqual(queue.stats(), { concurrency: 5, active: 0, pending: 0 });
+  assert.deepEqual(queue.stats(), { concurrency: 5, active: 0, pending: 0, paused: false });
+});
+
+test('pause preserves pending tasks until resume', async () => {
+  let completed = 0;
+  const queue = createConcurrentQueue({ concurrency: 1 });
+  queue.pause();
+  queue.enqueue(async () => { completed += 1; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(queue.stats(), { concurrency: 1, active: 0, pending: 1, paused: true });
+  queue.resume();
+  while (completed < 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(queue.stats(), { concurrency: 1, active: 0, pending: 0, paused: false });
 });
 
 test('continues after a task rejects', async () => {

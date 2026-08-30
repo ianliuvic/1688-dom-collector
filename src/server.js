@@ -98,6 +98,12 @@ function trimTerminalJobs(jobMap, maxEntries = 2000) {
   }
 }
 
+function isExternalModelAccessError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('failed (403)') || message.includes('accessdenied')
+    || message.includes('arrearage') || message.includes('unpurchased');
+}
+
 function requireApiKey(request, reply, done) {
   const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
   const expected = config.adminApiKey;
@@ -343,7 +349,9 @@ async function scheduleSavedProductAudits(productDetailId, { trigger = 'manual',
   const operations = Object.entries(records).map(([auditType, record]) => new Promise((resolve) => {
     savedAuditQueue.enqueue(async () => {
       try {
-        resolve(await executeSavedProductAudits(productDetailId, { [auditType]: record }));
+        const result = await executeSavedProductAudits(productDetailId, { [auditType]: record });
+        if (isExternalModelAccessError(result?.[auditType]?.error)) savedAuditQueue.pause();
+        resolve(result);
       } catch (error) {
         app.log.error({ err: error, productDetailId, auditType }, 'saved product audit failed');
         await db.failProductAudit(auditType, record.id, error).catch(() => {});
@@ -360,7 +368,13 @@ async function recoverSavedProductAudits() {
   for (const record of pending) {
     savedAuditQueue.enqueue(async () => {
       try {
-        await executeSavedProductAudits(record.product_detail_id, { [record.audit_type]: record });
+        const result = await executeSavedProductAudits(record.product_detail_id,
+          { [record.audit_type]: record });
+        if (isExternalModelAccessError(result?.[record.audit_type]?.error)) {
+          savedAuditQueue.pause();
+          app.log.warn({ auditRecordId: record.id },
+            'saved audit queue paused because model access is unavailable');
+        }
       } catch (error) {
         app.log.error({ err: error, productDetailId: record.product_detail_id,
           auditType: record.audit_type, auditRecordId: record.id }, 'recovered product audit failed');
