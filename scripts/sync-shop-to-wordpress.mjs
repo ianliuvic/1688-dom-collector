@@ -140,6 +140,8 @@ function recoverExistingItem(item) {
     || errorText.includes('gateway timeout')
     || errorText.includes('timeout')
     || errorText.includes('network')
+    || errorText.includes('target crashed')
+    || errorText.includes('target page, context or browser has been closed')
     || errorText.includes('failed (403)')
     || errorText.includes('failed (401)')
     || errorText.includes('failed (402)')
@@ -149,6 +151,11 @@ function recoverExistingItem(item) {
     || errorText.includes('insufficient balance')
     || errorText.includes('insufficient_balance')
     || errorText.includes('deepseek_api_key is not configured')
+    || errorText.includes('generated english title')
+    || errorText.includes('generated english description')
+    || errorText.includes('translation response')
+    || errorText.includes('merchandising response is not json')
+    || errorText.includes('visual product copy generation failed')
   );
 
   if (recoverableFailure) {
