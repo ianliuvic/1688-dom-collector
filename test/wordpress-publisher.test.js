@@ -122,6 +122,15 @@ test('uses the highest source SKU price and marks retail stock only when every S
   assert.equal(result.payload.bulk_pricing.tiers[0].price, 6.92);
 });
 
+test('does not trust an unverified global page price over exact saved SKU prices', () => {
+  const polluted = { ...detail, price_min: '23', price_max: '999',
+    raw_data: { ...detail.raw_data, price: { min: 23, max: 999, verified: false } },
+    skus: detail.skus.map((sku) => ({ ...sku, price: '27' })) };
+  const pricing = buildWearHongxiuPricing(polluted);
+  assert.equal(pricing.source_max_price, 27);
+  assert.deepEqual(pricing.tiers.map((tier) => tier.price), [7.23, 6.46, 5.69]);
+});
+
 test('requires an allocated wearhongxiu style number instead of reusing the 1688 item number', () => {
   assert.throws(() => buildWordPressProductDraft({ detail, translation,
     options: { categoryIds: [35], primaryCategoryId: 35 },

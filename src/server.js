@@ -10,7 +10,7 @@ import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
 import { translateProductDetail } from './product-translator.js';
 import { prepareWordPressProductDraft, publishProductToWordPress,
-  setWordPressProductPublicationDate } from './wordpress-publisher.js';
+  setWordPressProductPublicationDate, syncWordPressProductPricing } from './wordpress-publisher.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
 
@@ -61,6 +61,7 @@ const imageAuditJobs = new Map();
 const translationJobs = new Map();
 const wordpressJobs = new Map();
 const wordpressPublicationDateJobs = new Map();
+const wordpressPriceRepairJobs = new Map();
 let multimodalAuditQueue = Promise.resolve();
 const translationQueue = createConcurrentQueue({
   concurrency: config.translationConcurrency,
@@ -471,6 +472,68 @@ app.post('/api/wordpress/publication-dates/backfill', { preHandler: requireApiKe
 
 app.get('/api/wordpress-publication-date-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = wordpressPublicationDateJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.post('/api/wordpress/prices/audit-and-repair', { preHandler: requireApiKey }, async (_request, reply) => {
+  const id = crypto.randomUUID();
+  const job = { id, status: 'queued', total: 0, verified: 0, unresolved: 0,
+    storedChanged: 0, publishedAffected: 0, wordpressUpdated: 0, failed: 0,
+    createdAt: new Date().toISOString(), startedAt: null, completedAt: null, errors: [] };
+  wordpressPriceRepairJobs.set(id, job);
+  while (wordpressPriceRepairJobs.size > 100) {
+    wordpressPriceRepairJobs.delete(wordpressPriceRepairJobs.keys().next().value);
+  }
+  wordpressQueue = wordpressQueue.catch(() => {}).then(async () => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    try {
+      const audit = await db.auditAndRepairProductPrices();
+      job.total = audit.total;
+      job.verified = audit.verified;
+      job.unresolved = audit.unresolved;
+      job.storedChanged = audit.changed;
+      const affected = audit.items.filter((item) => item.needsWordPressSync);
+      job.publishedAffected = affected.length;
+      for (let offset = 0; offset < affected.length; offset += 5) {
+        const batch = affected.slice(offset, offset + 5);
+        await Promise.all(batch.map(async (item) => {
+          try {
+            const [detail, publication] = await Promise.all([
+              db.getProductDetail(item.productDetailId),
+              db.getWordPressPublication(item.productDetailId),
+            ]);
+            const synced = await syncWordPressProductPricing({ detail, publication, config });
+            const syncHash = crypto.createHash('sha256').update(JSON.stringify(synced.payload)).digest('hex');
+            await db.saveWordPressPublication(detail.id, {
+              translationId: publication.translation_id, externalId: publication.external_id,
+              styleNo: publication.style_no, wpPostId: publication.wp_post_id,
+              wpUrl: synced.wordpress.permalink || publication.wp_url,
+              wpEditUrl: synced.wordpress.edit_link || publication.wp_edit_url,
+              wpStatus: synced.wordpress.status || publication.wp_status,
+              syncHash, payload: synced.payload, result: synced.wordpress, lastError: null,
+            });
+            job.wordpressUpdated += 1;
+          } catch (error) {
+            job.failed += 1;
+            job.errors.push({ productDetailId: item.productDetailId, message: error.message });
+          }
+        }));
+      }
+      job.status = (job.failed || job.unresolved) ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.failed += 1;
+      job.errors.push({ message: error.message });
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  });
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress-price-repair-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = wordpressPriceRepairJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 

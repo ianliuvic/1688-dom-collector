@@ -15,6 +15,62 @@ function numberFrom(value) {
   return match ? Number(match[0]) : null;
 }
 
+export function extractCurrencyPrices(values) {
+  return (values ?? []).flatMap((value) =>
+    [...String(value ?? '').matchAll(/[¥￥]\s*(\d+(?:\.\d{1,2})?)/g)]
+      .map((match) => Number(match[1])))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+}
+
+export function extractPriceTiers(values) {
+  const text = (values ?? []).find((value) => /[¥￥]\s*\d/.test(String(value))
+    && /起批|[≥>]\s*\d+|\d+\s*-\s*\d+\s*(?:件|套|个|条|组|pcs?)/i.test(String(value)));
+  if (!text) return [];
+  const tiers = [];
+  const seen = new Set();
+  const add = (price, minimum, maximum, openEnded = false) => {
+    const normalized = {
+      minQuantity: Number(minimum),
+      maxQuantity: openEnded ? null : (maximum == null ? null : Number(maximum)),
+      price: Number(price),
+    };
+    if (!Number.isFinite(normalized.price) || !Number.isFinite(normalized.minQuantity)) return;
+    const key = `${normalized.minQuantity}:${normalized.maxQuantity}:${normalized.price}`;
+    if (!seen.has(key)) { seen.add(key); tiers.push(normalized); }
+  };
+  const forwardMatches = [...String(text).matchAll(
+    /[¥￥]\s*(\d+(?:\.\d{1,2})?)\s*([≥>]?)\s*(\d+)(?:\s*-\s*(\d+))?\s*(?:件|套|个|条|组|pcs?)/gi,
+  )];
+  for (const match of forwardMatches) add(match[1], match[3], match[4], Boolean(match[2]));
+  if (!forwardMatches.length) {
+    for (const match of String(text).matchAll(
+      /([≥>]?)\s*(\d+)(?:\s*-\s*(\d+))?\s*(?:件|套|个|条|组|pcs?)\s*[¥￥]\s*(\d+(?:\.\d{1,2})?)/gi,
+    )) add(match[4], match[2], match[3], Boolean(match[1]));
+  }
+  return tiers.sort((left, right) => left.minQuantity - right.minQuantity);
+}
+
+export function deriveVerifiedProductPrice({ skuPrices = [], jsonLdPrices = [], scopedPriceTexts = [] } = {}) {
+  const exactSkuPrices = skuPrices.map(numberFrom).filter((value) => value !== null && value >= 0);
+  const tiers = extractPriceTiers(scopedPriceTexts);
+  if (exactSkuPrices.length) {
+    const skuMin = Math.min(...exactSkuPrices);
+    const skuMax = Math.max(...exactSkuPrices);
+    const plausibleTiers = tiers.filter((tier) => tier.price <= skuMax * 1.25
+      && tier.price >= Math.max(0, skuMin * 0.25));
+    const values = [...exactSkuPrices, ...plausibleTiers.map((tier) => tier.price)];
+    return { min: Math.min(...values), max: Math.max(...values), tiers: plausibleTiers,
+      source: plausibleTiers.length ? 'exact_dom_sku_and_offer_tiers' : 'exact_dom_sku', verified: true };
+  }
+  const ldPrices = jsonLdPrices.map(numberFrom).filter((value) => value !== null && value >= 0);
+  if (ldPrices.length) return { min: Math.min(...ldPrices), max: Math.max(...ldPrices), tiers: [],
+    source: 'product_json_ld', verified: true };
+  const scopedPrices = extractCurrencyPrices(scopedPriceTexts);
+  if (scopedPrices.length) return { min: Math.min(...scopedPrices), max: Math.max(...scopedPrices), tiers,
+    source: 'scoped_offer_price_dom', verified: true };
+  return { min: null, max: null, tiers: [], source: 'unresolved', verified: false };
+}
+
 function normalizeImageUrl(value, baseUrl) {
   if (!value || typeof value !== 'string' || value.startsWith('data:')) return null;
   try {
@@ -312,6 +368,15 @@ export async function parse1688Product(page) {
 
     const priceTexts = all('[class*="price"], [class*="Price"], [class*="amount"]')
       .map(text).filter((value) => /[¥￥]|\d+(?:\.\d+)?/.test(value)).slice(0, 100);
+    const skuRoot = document.querySelector('#skuSelection');
+    let productScope = skuRoot;
+    for (let depth = 0; productScope?.parentElement && depth < 4; depth += 1) {
+      productScope = productScope.parentElement;
+    }
+    const scopedPriceTexts = productScope
+      ? Array.from(productScope.querySelectorAll('[class*="price"], [class*="Price"], [class*="amount"]'))
+        .map(text).filter((value) => /[¥￥]\s*\d/.test(value)).slice(0, 50)
+      : [];
 
     return {
       url: location.href,
@@ -328,6 +393,7 @@ export async function parse1688Product(page) {
       domSkuDimensions,
       domSkuRows,
       priceTexts,
+      scopedPriceTexts,
       bodyText: (document.body?.innerText || '').slice(0, 200000),
       sellerLinks: all([
         'a[href*="shop.1688.com"]', 'a[href*="company.1688.com"]',
@@ -396,10 +462,6 @@ export async function parse1688Product(page) {
   const offerList = Array.isArray(offers) ? offers : [offers];
   const ldPrices = offerList.flatMap((offer) => [offer?.price, offer?.lowPrice, offer?.highPrice])
     .map(numberFrom).filter((value) => value !== null);
-  const priceValues = [...candidates.prices, ...ldPrices];
-  const textPrices = raw.priceTexts.flatMap((value) =>
-    [...value.matchAll(/[¥￥]\s*(\d+(?:\.\d+)?)/g)].map((match) => Number(match[1])));
-  if (!priceValues.length) priceValues.push(...textPrices);
 
   const bodyMoq = raw.bodyText.match(/(?:起批量|最小起订量|起订量|MOQ)\s*[：:]?\s*(\d+)/i);
   const ldImages = Array.isArray(productLd.image) ? productLd.image : [productLd.image];
@@ -458,6 +520,11 @@ export async function parse1688Product(page) {
   const inferredSkuRows = [...new Map(inferredSkuRowsRaw.map((row) => [
     `${row.skuText}\0${row.price}\0${row.stock}`, row,
   ])).values()];
+  const verifiedPrice = deriveVerifiedProductPrice({
+    skuPrices: inferredSkuRows.map((row) => row.price),
+    jsonLdPrices: ldPrices,
+    scopedPriceTexts: raw.scopedPriceTexts ?? [],
+  });
   const sizeValues = unique(inferredSkuRows.map((row) => row.skuText), 100);
   const colorOptions = raw.skuOptions.filter((item) => /^(?:颜色|color)$/i.test(cleanText(item.dimensionName)));
   const colorValues = unique(colorOptions.map((item) => cleanText(item.text)), 100);
@@ -481,9 +548,11 @@ export async function parse1688Product(page) {
     canonicalUrl: raw.canonicalUrl || (offerId ? `https://detail.1688.com/offer/${offerId}.html` : raw.url),
     currency: offerList.find((offer) => offer?.priceCurrency)?.priceCurrency || 'CNY',
     price: {
-      min: priceValues.length ? Math.min(...priceValues) : null,
-      max: priceValues.length ? Math.max(...priceValues) : null,
-      tiers: candidates.tiers.slice(0, 50),
+      min: verifiedPrice.min,
+      max: verifiedPrice.max,
+      tiers: verifiedPrice.tiers.slice(0, 50),
+      source: verifiedPrice.source,
+      verified: verifiedPrice.verified,
       textCandidates: unique(raw.priceTexts.filter((value) => value.length <= 120 && /[¥￥]/.test(value)), 20),
     },
     moq: bodyMoq ? Number(bodyMoq[1]) : null,
@@ -504,7 +573,7 @@ export async function parse1688Product(page) {
     videos: [],
     skuDimensions: ((raw.domSkuDimensions ?? []).length ? raw.domSkuDimensions
       : candidates.dimensions.length ? candidates.dimensions : inferredDimensions).slice(0, 50),
-    skuRows: (candidates.skuRows.length ? candidates.skuRows : inferredSkuRows).slice(0, MAX_SKU_ROWS),
+    skuRows: (inferredSkuRows.length ? inferredSkuRows : candidates.skuRows).slice(0, MAX_SKU_ROWS),
     skuOptions: raw.skuOptions.slice(0, 200).map((item) => ({
       dimensionName: cleanText(item.dimensionName),
       text: cleanText(item.text),

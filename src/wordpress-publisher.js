@@ -28,10 +28,15 @@ export function normalizePublicationDate(value) {
 }
 
 export function getSourceMaximumPrice(detail) {
-  const candidates = [detail?.price_min, detail?.price_max];
-  for (const sku of detail?.skus ?? []) candidates.push(sku?.price);
-  for (const tier of detail?.price_tiers ?? []) {
-    candidates.push(tier?.price, tier?.unit_price, tier?.price_value);
+  const skuPrices = (detail?.skus ?? []).map((sku) => numberOrNull(sku?.price))
+    .filter((value) => value !== null && value >= 0);
+  const priceVerified = detail?.raw_data?.price?.verified === true;
+  const candidates = [...skuPrices];
+  if (priceVerified) {
+    candidates.push(detail?.price_min, detail?.price_max);
+    for (const tier of [...(detail?.price_tiers ?? []), ...(detail?.priceTiers ?? [])]) {
+      candidates.push(tier?.price, tier?.unit_price, tier?.price_value);
+    }
   }
   const numbers = candidates.map(numberOrNull).filter((value) => value !== null && value >= 0);
   return numbers.length ? Math.max(...numbers) : null;
@@ -329,6 +334,22 @@ export async function setWordPressProductPublicationDate({ postId, publicationDa
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ date_gmt: normalized }),
   });
+}
+
+export async function syncWordPressProductPricing({ detail, publication, config }) {
+  const existingPayload = publication?.payload;
+  if (!existingPayload?.external_id || !existingPayload?.title) {
+    throw new Error('The saved WordPress publication payload is incomplete.');
+  }
+  const payload = { ...existingPayload, bulk_pricing: buildWearHongxiuPricing(detail) };
+  const wp = wordpressClient(config);
+  const result = await wp('/wp-json/hx/v1/products/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    timeoutMs: 120000,
+  });
+  return { payload, wordpress: result };
 }
 
 function extensionForMime(mimeType) {

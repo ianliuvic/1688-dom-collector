@@ -1,6 +1,33 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parse1688Product } from '../src/parsers/1688-product.js';
+import { deriveVerifiedProductPrice, extractPriceTiers,
+  parse1688Product } from '../src/parsers/1688-product.js';
+
+test('extracts the current offer tiers from compact 1688 price text', () => {
+  assert.deepEqual(extractPriceTiers([
+    '券后¥27.00首件预估到手价¥28.001套起批 60天老客价¥27.0050-99套 ¥26.00≥100套',
+  ]), [
+    { minQuantity: 1, maxQuantity: null, price: 28 },
+    { minQuantity: 50, maxQuantity: 99, price: 27 },
+    { minQuantity: 100, maxQuantity: null, price: 26 },
+  ]);
+});
+
+test('ignores unrelated global prices when exact DOM SKU prices exist', () => {
+  assert.deepEqual(deriveVerifiedProductPrice({
+    skuPrices: [28, 28, 28, 28],
+    jsonLdPrices: [23, 74, 999],
+    scopedPriceTexts: ['¥28.001套起批 ¥27.0050-99套 ¥26.00≥100套'],
+  }), {
+    min: 26, max: 28,
+    tiers: [
+      { minQuantity: 1, maxQuantity: null, price: 28 },
+      { minQuantity: 50, maxQuantity: 99, price: 27 },
+      { minQuantity: 100, maxQuantity: null, price: 26 },
+    ],
+    source: 'exact_dom_sku_and_offer_tiers', verified: true,
+  });
+});
 
 test('uses the exact product carousel and does not append unrelated page candidates', async () => {
   const page = {
@@ -20,6 +47,11 @@ test('uses the exact product carousel and does not append unrelated page candida
         images: ['https://cbu01.alicdn.com/img/ibank/unrelated-review-avatar.jpg'],
       },
       attributes: [], skuOptions: [], priceTexts: [], bodyText: '', sellerLinks: [], sellerTexts: [],
+      domSkuRows: [
+        { dimensionName: '尺码', text: 'S', priceText: '¥28.00', stockText: '库存999' },
+        { dimensionName: '尺码', text: 'M', priceText: '¥28.00', stockText: '库存999' },
+      ],
+      scopedPriceTexts: ['¥28.001套起批 ¥27.0050-99套 ¥26.00≥100套'],
     }),
   };
 
@@ -29,6 +61,9 @@ test('uses the exact product carousel and does not append unrelated page candida
     'https://cbu01.alicdn.com/img/ibank/product-two.jpg_.webp',
   ]);
   assert.equal(product.images.some((url) => url.includes('review-avatar')), false);
+  assert.equal(product.price.max, 28);
+  assert.equal(product.price.min, 26);
+  assert.equal(product.price.verified, true);
 });
 
 test('prefers a hydrated exact Gallery snapshot and exposes completeness diagnostics', async () => {

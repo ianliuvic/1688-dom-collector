@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { deriveVerifiedProductPrice } from './parsers/1688-product.js';
 
 const { Pool } = pg;
 
@@ -623,6 +624,76 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function auditAndRepairProductPrices() {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const rows = await client.query(`SELECT details.id, details.currency,
+        details.price_min, details.price_max, details.raw_data,
+        array_remove(array_agg(skus.price ORDER BY skus.id), NULL) AS sku_prices,
+        (publications.id IS NOT NULL) AS is_published,
+        publications.payload AS publication_payload
+        FROM product_details details
+        LEFT JOIN product_detail_skus skus ON skus.product_detail_id = details.id
+        LEFT JOIN product_wordpress_publications publications
+          ON publications.product_detail_id = details.id AND publications.wp_post_id IS NOT NULL
+        GROUP BY details.id, publications.id
+        ORDER BY details.id`);
+      const items = [];
+      for (const row of rows.rows) {
+        const skuPrices = row.sku_prices ?? [];
+        const scopedPriceTexts = row.raw_data?.price?.textCandidates ?? [];
+        const derived = deriveVerifiedProductPrice({ skuPrices, scopedPriceTexts });
+        if (!derived.verified) {
+          items.push({ productDetailId: row.id, published: row.is_published,
+            changed: false, verified: false, reason: 'no_exact_saved_sku_or_scoped_price' });
+          continue;
+        }
+        const previousMin = row.price_min == null ? null : Number(row.price_min);
+        const previousMax = row.price_max == null ? null : Number(row.price_max);
+        const changed = previousMin !== derived.min || previousMax !== derived.max
+          || row.raw_data?.price?.verified !== true;
+        if (changed) {
+          const rawData = row.raw_data ?? {};
+          rawData.price = {
+            ...(rawData.price ?? {}), min: derived.min, max: derived.max,
+            tiers: derived.tiers, source: `stored_${derived.source}`, verified: true,
+            repairedFrom: { min: previousMin, max: previousMax },
+          };
+          await client.query(`UPDATE product_details SET price_min=$1, price_max=$2, raw_data=$3
+            WHERE id=$4`, [derived.min, derived.max, JSON.stringify(rawData), row.id]);
+          await client.query('DELETE FROM product_detail_price_tiers WHERE product_detail_id=$1', [row.id]);
+          for (const tier of derived.tiers) {
+            await client.query(`INSERT INTO product_detail_price_tiers
+              (product_detail_id, min_quantity, max_quantity, price, currency)
+              VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, [row.id, tier.minQuantity,
+              tier.maxQuantity, tier.price, row.currency ?? 'CNY']);
+          }
+        }
+        const publishedSourceMax = row.publication_payload?.bulk_pricing?.source_max_price;
+        const needsWordPressSync = row.is_published
+          && (publishedSourceMax == null || Number(publishedSourceMax) !== Number(derived.max));
+        items.push({ productDetailId: row.id, published: row.is_published, changed, verified: true,
+          needsWordPressSync, previousMin, previousMax, min: derived.min, max: derived.max,
+          source: derived.source });
+      }
+      await client.query('COMMIT');
+      return {
+        total: items.length,
+        verified: items.filter((item) => item.verified).length,
+        unresolved: items.filter((item) => !item.verified).length,
+        changed: items.filter((item) => item.changed).length,
+        publishedChanged: items.filter((item) => item.needsWordPressSync).length,
+        items,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async function saveWordPressPublication(productDetailId, values) {
     const payload = values.payload ?? {};
     const result = values.result ?? {};
@@ -661,7 +732,8 @@ export function createDatabase(databaseUrl) {
     saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail, listProductDetails,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
-    getWordPressPublication, listWordPressPublicationDates, saveWordPressPublication, ping };
+    getWordPressPublication, listWordPressPublicationDates, auditAndRepairProductPrices,
+    saveWordPressPublication, ping };
 }
 
 function parseScore(value) {
