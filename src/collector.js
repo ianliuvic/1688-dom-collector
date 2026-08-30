@@ -133,6 +133,17 @@ export function isAllowed1688Url(value) {
   }
 }
 
+export function is1688ShopUrl(value) {
+  try {
+    const url = new URL(value);
+    const reservedNonShopHosts = ['detail.', 'air.', 'login.', 'passport.', 'member.', 'h5api.'];
+    return url.hostname.endsWith('.1688.com')
+      && !reservedNonShopHosts.some((prefix) => url.hostname.startsWith(prefix));
+  } catch {
+    return false;
+  }
+}
+
 export function createCollector({
   storagePath,
   navigationTimeoutMs,
@@ -418,10 +429,11 @@ export function createCollector({
     page.on('response', responseHandler);
     try {
       await page.goto(job.url, { waitUntil: 'domcontentloaded' });
-      const isShopPage = new URL(page.url()).hostname.startsWith('shop');
+      const currentUrl = new URL(page.url());
+      const isShopPage = is1688ShopUrl(currentUrl.href);
       await page.waitForTimeout(isShopPage ? 8000 : 3000);
       if (job.options?.paginate === true
-          && isShopPage && new URL(page.url()).pathname.includes('offerlist')) {
+          && isShopPage && currentUrl.pathname.includes('offerlist')) {
         const paginationText = await page.locator('body').innerText().catch(() => '');
         const totalPages = Math.min(Number(paginationText.match(/\b\d+\/(\d+)\s*到/)?.[1] ?? 1), 20);
         for (let currentPage = 1; currentPage < totalPages; currentPage += 1) {
