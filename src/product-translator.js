@@ -147,6 +147,28 @@ export function validateProductTranslation(source, translated) {
   return translated;
 }
 
+export function restoreTranslationIdentity(source, translated) {
+  if (!translated || typeof translated !== 'object') return translated;
+  const restored = { ...translated };
+  if (Array.isArray(translated.attributes) && translated.attributes.length === source.attributes.length) {
+    restored.attributes = translated.attributes.map((item, index) => ({ ...item, index }));
+  }
+  if (Array.isArray(translated.skuDimensions)
+      && translated.skuDimensions.length === source.skuDimensions.length) {
+    restored.skuDimensions = translated.skuDimensions.map((item, index) => ({ ...item, index }));
+  }
+  if (Array.isArray(translated.skuOptions) && translated.skuOptions.length === source.skuOptions.length) {
+    restored.skuOptions = translated.skuOptions.map((item, index) => ({ ...item, index,
+      dimensionName: source.skuOptions[index].dimensionName,
+      imageUrl: source.skuOptions[index].imageUrl }));
+  }
+  if (Array.isArray(translated.skuRows) && translated.skuRows.length === source.skuRows.length) {
+    restored.skuRows = translated.skuRows.map((item, index) => ({ ...item, index,
+      skuKey: source.skuRows[index].skuKey }));
+  }
+  return restored;
+}
+
 async function loadTranslationImages(detail, config) {
   const storageRoot = path.resolve(config.storagePath || '/app/storage');
   const selected = selectTranslationImages(detail, config.maxTranslationImages || 6);
@@ -232,14 +254,21 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
       : visualPrompt;
     return callModel([{ type: 'text', text }, ...imageContent], 3000, 'visual product copy generation');
   }
-  let visualAttempt = await requestVisualCopy();
-  let visualCopy = parseJson(visualAttempt.raw);
-  try {
-    validateGeneratedCatalogCopy(visualCopy || {});
-  } catch (error) {
-    visualAttempt = await requestVisualCopy(error.message, visualAttempt.raw);
+  let visualAttempt;
+  let visualCopy;
+  let visualCorrection = '';
+  let previousVisualOutput = '';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    visualAttempt = await requestVisualCopy(visualCorrection, previousVisualOutput);
     visualCopy = parseJson(visualAttempt.raw);
-    validateGeneratedCatalogCopy(visualCopy || {});
+    try {
+      validateGeneratedCatalogCopy(visualCopy || {});
+      break;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      visualCorrection = error.message;
+      previousVisualOutput = visualAttempt.raw;
+    }
   }
 
   const translationPrompt = `你是专业的泳装和服装B2B商品数据翻译器。把输入JSON中的属性、SKU和价格文字准确翻译为自然英文，只返回严格JSON。
@@ -248,21 +277,31 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
 输入JSON：${JSON.stringify({ sellerName: source.sellerName, attributes: source.attributes,
     skuDimensions: source.skuDimensions, skuOptions: source.skuOptions,
     skuRows: source.skuRows, priceTextCandidates: source.priceTextCandidates })}`;
-  async function requestStructuredTranslation(correction = '') {
-    const text = correction ? `${translationPrompt}\n上一次输出未通过校验：${correction}。请完整重新输出。` : translationPrompt;
+  async function requestStructuredTranslation(correction = '', previousOutput = '') {
+    const text = correction
+      ? `${translationPrompt}\n上一次输出：${previousOutput}\n未通过校验：${correction}。请完整修正并重新输出。`
+      : translationPrompt;
     return callModel(text, 10000, 'structured product translation');
   }
-  let translationAttempt = await requestStructuredTranslation();
-  let structured = parseJson(translationAttempt.raw);
-  let translated = { title: visualCopy.title, description: visualCopy.description, ...(structured || {}) };
-  try {
-    translated = validateProductTranslation(source, translated);
-  } catch (error) {
-    translationAttempt = await requestStructuredTranslation(error.message);
-    structured = parseJson(translationAttempt.raw);
-    translated = validateProductTranslation(source, {
-      title: visualCopy.title, description: visualCopy.description, ...(structured || {}),
-    });
+  let translationAttempt;
+  let translated;
+  let translationCorrection = '';
+  let previousTranslationOutput = '';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    translationAttempt = await requestStructuredTranslation(
+      translationCorrection, previousTranslationOutput,
+    );
+    const structured = parseJson(translationAttempt.raw);
+    translated = restoreTranslationIdentity(source,
+      { title: visualCopy.title, description: visualCopy.description, ...(structured || {}) });
+    try {
+      translated = validateProductTranslation(source, translated);
+      break;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      translationCorrection = error.message;
+      previousTranslationOutput = translationAttempt.raw;
+    }
   }
   const imageSources = images.map(({ url, ...image }) => image);
   return {

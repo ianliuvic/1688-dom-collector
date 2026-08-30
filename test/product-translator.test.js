@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildProductTranslationSource, selectTranslationImages, translationSourceHash,
-  validateGeneratedCatalogCopy, validateProductTranslation,
+  restoreTranslationIdentity, validateGeneratedCatalogCopy, validateProductTranslation,
 } from '../src/product-translator.js';
 
 const detail = {
@@ -62,6 +62,23 @@ test('rejects a translation that drops or changes SKU identity', () => {
     priceTextCandidates: ['Minimum order: 2 pieces'],
   };
   assert.throws(() => validateProductTranslation(source, invalid), /identity/);
+});
+
+test('restores immutable SKU identity after model translation', () => {
+  const source = buildProductTranslationSource(detail);
+  const changed = {
+    title: "Women's Tie-Back Triangle Bikini Set", description, sellerName: 'Test Factory',
+    attributes: [{ index: 8, name: 'Fabric', value: 'Polyester' }],
+    skuDimensions: [{ index: 8, name: 'Color', values: ['Black', 'Blue'] },
+      { index: 9, name: 'Size', values: ['S', 'M'] }],
+    skuOptions: [{ index: 8, dimensionName: 'Color', text: 'Black', imageUrl: 'https://img/changed.jpg' }],
+    skuRows: [{ index: 8, skuKey: 'changed', skuText: 'Black S', options: { Color: 'Black', Size: 'S' } }],
+    priceTextCandidates: ['Minimum order: 2 pieces'],
+  };
+  const restored = restoreTranslationIdentity(source, changed);
+  assert.equal(restored.skuOptions[0].imageUrl, source.skuOptions[0].imageUrl);
+  assert.equal(restored.skuRows[0].skuKey, source.skuRows[0].skuKey);
+  assert.doesNotThrow(() => validateProductTranslation(source, restored));
 });
 
 test('rejects keyword-stuffed titles and color or print-specific descriptions', () => {
