@@ -773,6 +773,27 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function recoverPendingProductAudits(limit = 5000) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 5000, 1), 10000);
+    await pool.query(`UPDATE product_image_audits
+      SET status='queued', started_at=NULL, completed_at=NULL, error=NULL
+      WHERE status='running'`);
+    await pool.query(`UPDATE product_sku_audits
+      SET status='queued', started_at=NULL, completed_at=NULL, error=NULL
+      WHERE status='running'`);
+    const result = await pool.query(`
+      SELECT 'image'::text AS audit_type, id, product_detail_id, trigger_type,
+        model, status, created_at
+      FROM product_image_audits WHERE status='queued'
+      UNION ALL
+      SELECT 'sku'::text AS audit_type, id, product_detail_id, trigger_type,
+        model, status, created_at
+      FROM product_sku_audits WHERE status='queued'
+      ORDER BY created_at ASC, id ASC
+      LIMIT $1`, [safeLimit]);
+    return result.rows;
+  }
+
   async function saveProductTranslation(productDetailId, result) {
     const translated = result.translated;
     const saved = await pool.query(`INSERT INTO product_detail_translations
@@ -1003,6 +1024,7 @@ export function createDatabase(databaseUrl) {
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
+    recoverPendingProductAudits,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
     getWordPressPublication, listWordPressPublicationDates, auditAndRepairProductPrices,
     saveWordPressPublication, createProductRagSync, startProductRagSync,

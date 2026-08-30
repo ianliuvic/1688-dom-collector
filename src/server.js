@@ -36,6 +36,7 @@ const config = {
   complexModel: process.env.DASHSCOPE_COMPLEX_MODEL || 'qwen3.8-max',
   translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
   translationConcurrency: Math.min(Math.max(Number(process.env.TRANSLATION_CONCURRENCY) || 1, 1), 10),
+  savedAuditConcurrency: Math.min(Math.max(Number(process.env.SAVED_AUDIT_CONCURRENCY) || 3, 1), 5),
   modelImageTransport: process.env.MODEL_IMAGE_TRANSPORT === 'persistent_storage'
     ? 'persistent_storage' : 'source_url',
   wordpressBaseUrl: process.env.WORDPRESS_BASE_URL,
@@ -70,6 +71,10 @@ const wordpressJobs = new Map();
 const wordpressPublicationDateJobs = new Map();
 const wordpressPriceRepairJobs = new Map();
 let multimodalAuditQueue = Promise.resolve();
+const savedAuditQueue = createConcurrentQueue({
+  concurrency: config.savedAuditConcurrency,
+  onTaskError: (error) => app.log.error({ err: error }, 'unhandled saved audit queue error'),
+});
 const translationQueue = createConcurrentQueue({
   concurrency: config.translationConcurrency,
   onTaskError: (error) => app.log.error({ err: error }, 'unhandled translation queue error'),
@@ -322,12 +327,35 @@ async function scheduleSavedProductAudits(productDetailId, { trigger = 'manual',
     { trigger, model: config.complexModel });
   if (types.includes('sku')) records.sku = await db.createProductAudit('sku', productDetailId,
     { trigger, model: config.complexModel });
-  const operation = multimodalAuditQueue.catch(() => {})
-    .then(() => executeSavedProductAudits(productDetailId, records));
-  multimodalAuditQueue = operation.catch((error) => {
-    app.log.error({ err: error, productDetailId }, 'saved product audits failed');
-  });
+  const operations = Object.entries(records).map(([auditType, record]) => new Promise((resolve) => {
+    savedAuditQueue.enqueue(async () => {
+      try {
+        resolve(await executeSavedProductAudits(productDetailId, { [auditType]: record }));
+      } catch (error) {
+        app.log.error({ err: error, productDetailId, auditType }, 'saved product audit failed');
+        await db.failProductAudit(auditType, record.id, error).catch(() => {});
+        resolve({ [auditType]: { error: error.message } });
+      }
+    });
+  }));
+  const operation = Promise.all(operations).then((parts) => Object.assign({}, ...parts));
   return { records, operation };
+}
+
+async function recoverSavedProductAudits() {
+  const pending = await db.recoverPendingProductAudits();
+  for (const record of pending) {
+    savedAuditQueue.enqueue(async () => {
+      try {
+        await executeSavedProductAudits(record.product_detail_id, { [record.audit_type]: record });
+      } catch (error) {
+        app.log.error({ err: error, productDetailId: record.product_detail_id,
+          auditType: record.audit_type, auditRecordId: record.id }, 'recovered product audit failed');
+        await db.failProductAudit(record.audit_type, record.id, error).catch(() => {});
+      }
+    });
+  }
+  return pending.length;
 }
 
 async function executeProductRagSync(record) {
@@ -389,7 +417,7 @@ app.get('/', async () => ({
 app.get('/health', async (_request, reply) => {
   try {
     await db.ping();
-    return { ok: true };
+    return { ok: true, queues: { savedAudits: savedAuditQueue.stats() } };
   } catch (error) {
     reply.code(503);
     return { ok: false, error: error.message };
@@ -1128,6 +1156,13 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 await db.migrate();
+try {
+  const recoveredAuditCount = await recoverSavedProductAudits();
+  app.log.info({ recoveredAuditCount, concurrency: config.savedAuditConcurrency },
+    'pending saved product audits recovered');
+} catch (error) {
+  app.log.error({ err: error }, 'failed to recover pending saved product audits');
+}
 try {
   const hashBackfill = await db.backfillProductImageHashes();
   app.log.info(hashBackfill, 'product image hashes ready for duplicate detection');

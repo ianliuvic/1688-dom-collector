@@ -26,6 +26,7 @@ This framework does not bypass CAPTCHAs, signatures, access controls, or platfor
 | `STORAGE_PATH` | no | `/app/storage` |
 | `MIN_CAPTURE_INTERVAL_MS` | no | `15000` |
 | `NAVIGATION_TIMEOUT_MS` | no | `45000` |
+| `SAVED_AUDIT_CONCURRENCY` | no | `3` (maximum `5`); queued/running saved audits recover after restart |
 | `PROXY_SERVER` | no | - |
 | `PROXY_USERNAME` | no | - |
 | `PROXY_PASSWORD` | no | - |
