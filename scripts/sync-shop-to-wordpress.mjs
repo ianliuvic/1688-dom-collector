@@ -97,8 +97,11 @@ function isTransientError(error) {
 
 function isExternalModelAccessError(error) {
   const message = String(error?.message || error || '').toLowerCase();
-  return message.includes('failed (403)') || message.includes('accessdenied')
-    || message.includes('arrearage') || message.includes('unpurchased');
+  return message.includes('failed (401)') || message.includes('failed (402)')
+    || message.includes('failed (403)') || message.includes('accessdenied')
+    || message.includes('arrearage') || message.includes('unpurchased')
+    || message.includes('insufficient balance') || message.includes('insufficient_balance')
+    || message.includes('deepseek_api_key is not configured');
 }
 
 function pauseForExternalModel(item, stage, error) {
@@ -138,9 +141,14 @@ function recoverExistingItem(item) {
     || errorText.includes('timeout')
     || errorText.includes('network')
     || errorText.includes('failed (403)')
+    || errorText.includes('failed (401)')
+    || errorText.includes('failed (402)')
     || errorText.includes('accessdenied')
     || errorText.includes('arrearage')
     || errorText.includes('unpurchased')
+    || errorText.includes('insufficient balance')
+    || errorText.includes('insufficient_balance')
+    || errorText.includes('deepseek_api_key is not configured')
   );
 
   if (recoverableFailure) {
