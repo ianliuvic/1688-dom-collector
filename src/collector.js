@@ -87,6 +87,7 @@ async function captureShopContactUrl(page, context) {
 }
 
 async function downloadProductImages(data, storagePath, jobId, requestContext = null) {
+  const downloadDeadlineAt = Date.now() + 6 * 60 * 1000;
   const sources = [];
   if (data.mainImage) sources.push({ url: data.mainImage, type: 'main' });
   for (const [index, url] of (data.images ?? []).entries()) sources.push({ url, type: 'gallery', sortOrder: index });
@@ -98,15 +99,17 @@ async function downloadProductImages(data, storagePath, jobId, requestContext = 
   await fs.mkdir(imageDir, { recursive: true });
   const files = [];
   for (const source of sources) {
+    if (Date.now() >= downloadDeadlineAt) break;
     if (!source.url || seen.has(source.url)) continue;
     seen.add(source.url);
     const headers = { 'user-agent': 'Mozilla/5.0', referer: 'https://detail.1688.com/' };
     let downloaded = null;
-    for (let attempt = 1; attempt <= 3 && !downloaded; attempt += 1) {
+    for (let attempt = 1; attempt <= 2 && !downloaded
+      && Date.now() < downloadDeadlineAt; attempt += 1) {
       try {
         const response = requestContext?.request
-          ? await requestContext.request.get(source.url, { headers, timeout: 30000 })
-          : await fetch(source.url, { headers, signal: AbortSignal.timeout(30000) });
+          ? await requestContext.request.get(source.url, { headers, timeout: 20000 })
+          : await fetch(source.url, { headers, signal: AbortSignal.timeout(20000) });
         const ok = requestContext?.request ? response.ok() : response.ok;
         const responseStatus = requestContext?.request ? response.status() : response.status;
         if (!ok) throw new Error(`Image request failed with HTTP ${responseStatus}.`);
@@ -120,7 +123,9 @@ async function downloadProductImages(data, storagePath, jobId, requestContext = 
         if (!bytes.length) throw new Error('Image request returned an empty body.');
         downloaded = { contentType, bytes };
       } catch {
-        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 350));
+        if (attempt < 2 && Date.now() < downloadDeadlineAt) {
+          await new Promise((resolve) => setTimeout(resolve, attempt * 350));
+        }
       }
     }
     // Product media on the Alibaba CDN is public and does not require the
@@ -133,12 +138,14 @@ async function downloadProductImages(data, storagePath, jobId, requestContext = 
       directFallbackAllowed = imageHost === 'alicdn.com' || imageHost.endsWith('.alicdn.com')
         || imageHost === '1688.com' || imageHost.endsWith('.1688.com');
     } catch { /* malformed source URLs are never fetched directly */ }
-    if (!downloaded && requestContext?.request && directFallbackAllowed) {
-      for (let attempt = 1; attempt <= 2 && !downloaded; attempt += 1) {
+    if (!downloaded && requestContext?.request && directFallbackAllowed
+      && Date.now() < downloadDeadlineAt) {
+      for (let attempt = 1; attempt <= 1 && !downloaded
+        && Date.now() < downloadDeadlineAt; attempt += 1) {
         try {
           const response = await fetch(source.url, {
             headers,
-            signal: AbortSignal.timeout(30000),
+            signal: AbortSignal.timeout(20000),
           });
           if (!response.ok) throw new Error(`Image fallback failed with HTTP ${response.status}.`);
           const contentType = response.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
@@ -148,9 +155,7 @@ async function downloadProductImages(data, storagePath, jobId, requestContext = 
           const bytes = Buffer.from(await response.arrayBuffer());
           if (!bytes.length) throw new Error('Image fallback returned an empty body.');
           downloaded = { contentType, bytes };
-        } catch {
-          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, attempt * 500));
-        }
+        } catch { /* completeness validation below rejects any missing source image */ }
       }
     }
     if (!downloaded) continue;
