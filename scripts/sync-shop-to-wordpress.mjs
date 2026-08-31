@@ -523,6 +523,22 @@ async function resume() {
 
   for (const item of Object.values(progress.items)) recoverExistingItem(item);
 
+  // A prior run may have been interrupted while several already-submitted
+  // captures were returning the same risk-control page.  Discard those stale
+  // responses on an explicit resume; the first fresh single-page request will
+  // verify whether the user's manual challenge/cool-down actually cleared it.
+  for (const item of Object.values(progress.items).filter((entry) => entry.stage === 'capturing')) {
+    try {
+      const job = await api(`/api/jobs/${item.captureJobId}`);
+      if (!['queued', 'running'].includes(job.status) && isRiskControlResult(job)) {
+        item.captureJobId = null;
+        item.stage = 'new';
+        item.error = null;
+        item.failedStage = null;
+      }
+    } catch { /* The normal job reconciliation loop handles other outcomes. */ }
+  }
+
   // Captures are durable, but a prior network failure may have hidden the
   // completed response. Resolve SQL first and only enqueue a new capture if
   // no saved detail exists.
