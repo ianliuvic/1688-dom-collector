@@ -13,6 +13,9 @@ const minListingDate = minListingDateText ? new Date(minListingDateText) : null;
 const captureMinConcurrency = Math.min(Math.max(Number(process.env.SYNC_CAPTURE_MIN_CONCURRENCY) || 2, 1), 5);
 const captureMaxConcurrency = Math.min(Math.max(Number(process.env.SYNC_CAPTURE_MAX_CONCURRENCY) || 5,
   captureMinConcurrency), 5);
+const captureDelayMinMs = Math.max(Number(process.env.SYNC_CAPTURE_DELAY_MIN_MS) || 0, 0);
+const captureDelayMaxMs = Math.max(Number(process.env.SYNC_CAPTURE_DELAY_MAX_MS) || captureDelayMinMs,
+  captureDelayMinMs);
 
 if (!apiKey) throw new Error('COLLECTOR_API_KEY is required.');
 if (!shopId) throw new Error('SYNC_SHOP_ID is required.');
@@ -21,6 +24,7 @@ if (minListingDate && Number.isNaN(minListingDate.getTime())) throw new Error('S
 
 let progress;
 let stopping = false;
+let nextCaptureAllowedAt = 0;
 
 function now() {
   return new Date().toISOString();
@@ -113,6 +117,28 @@ function pauseForExternalModel(item, stage, error) {
   stopping = true;
 }
 
+function isRiskControlResult(job) {
+  const text = [job?.title, job?.error, job?.extracted_data?.title,
+    job?.extracted_data?.error, job?.extracted_data?.gallery?.reason]
+    .filter(Boolean).join(' ').toLowerCase();
+  return /验证码|滑块|访问被拒绝|风控|captcha|access denied|punish|anti.?bot|risk control/.test(text);
+}
+
+function pauseForRiskControl(item, job) {
+  item.captureJobId = null;
+  item.stage = 'new';
+  item.error = '1688 risk-control page detected; collection paused before the next product.';
+  item.failedStage = 'capture';
+  progress.status = 'blocked_risk_control';
+  progress.fatalError = item.error;
+  progress.blockedAt = now();
+  progress.riskControl = {
+    detectedAt: now(),
+    pageTitle: String(job?.title || job?.extracted_data?.title || '').slice(0, 120),
+  };
+  stopping = true;
+}
+
 function resetLostJob(item, stage) {
   item.error = null;
   item.failedStage = null;
@@ -186,6 +212,8 @@ function recoverExistingItem(item) {
 }
 
 async function queueCapture(item) {
+  const waitMs = Math.max(0, nextCaptureAllowedAt - Date.now());
+  if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
   const job = await api('/api/product-details', {
     method: 'POST',
     body: JSON.stringify({ offerId: item.offerId }),
@@ -195,6 +223,9 @@ async function queueCapture(item) {
   item.captureQueuedAt = now();
   item.stage = 'capturing';
   item.error = null;
+  const delayRange = captureDelayMaxMs - captureDelayMinMs;
+  nextCaptureAllowedAt = Date.now() + captureDelayMinMs
+    + (delayRange ? Math.floor(Math.random() * (delayRange + 1)) : 0);
 }
 
 function recordCaptureOutcome(item, success, status) {
@@ -223,6 +254,7 @@ function recordCaptureOutcome(item, success, status) {
 }
 
 async function fillCaptureSlots() {
+  if (stopping) return;
   const inFlight = Object.values(progress.items).filter((item) => item.stage === 'capturing').length;
   const available = Math.max(0, progress.adaptiveCapture.currentConcurrency - inFlight);
   const pending = Object.values(progress.items).filter((item) => item.stage === 'new').slice(0, available);
@@ -285,6 +317,10 @@ async function advanceItem(item) {
     if (item.stage === 'capturing') {
       const job = await api(`/api/jobs/${item.captureJobId}`);
       if (['queued', 'running'].includes(job.status)) return;
+      if (isRiskControlResult(job)) {
+        pauseForRiskControl(item, job);
+        return;
+      }
       if (job.status === 'rejected_duplicate') {
         recordCaptureOutcome(item, true, job.status);
         item.stage = 'duplicate_rejected';
@@ -427,6 +463,10 @@ async function initialize() {
       recentOutcomes: [],
       adjustments: [],
     },
+    capturePacing: {
+      minDelayMs: captureDelayMinMs,
+      maxDelayMs: captureDelayMaxMs,
+    },
     counts: {},
     items: Object.fromEntries(usable.map((product) => [String(product.offer_id), {
       offerId: String(product.offer_id),
@@ -476,6 +516,10 @@ async function resume() {
     Math.max(progress.adaptiveCapture.currentConcurrency || captureMinConcurrency, captureMinConcurrency),
     captureMaxConcurrency,
   );
+  progress.capturePacing = {
+    minDelayMs: captureDelayMinMs,
+    maxDelayMs: captureDelayMaxMs,
+  };
 
   for (const item of Object.values(progress.items)) recoverExistingItem(item);
 
