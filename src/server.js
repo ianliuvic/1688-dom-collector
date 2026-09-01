@@ -469,6 +469,17 @@ app.post('/api/browser-mode/login', { preHandler: requireApiKey }, async (reques
   }
 });
 
+app.post('/api/browser-mode/logout-login', { preHandler: requireApiKey }, async (request, reply) => {
+  try {
+    await switchBrowserMode('login');
+    const logout = await loginManager.logoutAndOpenSignin();
+    return { ...getBrowserModeStatus(), logout };
+  } catch (error) {
+    request.log.error({ err: error }, 'failed to log out and reopen the login page');
+    return reply.code(500).send({ error: 'logout_login_failed', message: error.message });
+  }
+});
+
 app.post('/api/browser-mode/collector', { preHandler: requireApiKey }, async (request, reply) => {
   try {
     return await switchBrowserMode('collector');

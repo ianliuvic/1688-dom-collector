@@ -112,9 +112,36 @@ export function createLoginManager({
     state = 'stopped';
   }
 
+  async function logoutAndOpenSignin() {
+    if (state !== 'running' || !context) {
+      throw new Error('Login browser must be running before logging out.');
+    }
+    lastError = null;
+    const page = context.pages()[0] ?? await context.newPage();
+    page.setDefaultNavigationTimeout(navigationTimeoutMs);
+    const logoutUrl = 'https://login.1688.com/member/logout.htm?Done=https://www.1688.com/';
+    try {
+      await page.goto(logoutUrl, { waitUntil: 'domcontentloaded' });
+      await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
+      await saveStorageState();
+      const cookies = await context.cookies();
+      const logonFlags = cookies
+        .filter((cookie) => cookie.name === '__cn_logon__' && cookie.domain.endsWith('1688.com'))
+        .map((cookie) => String(cookie.value).toLowerCase());
+      const hasLogonId = cookies.some((cookie) => cookie.name === '__cn_logon_id__'
+        && cookie.domain.endsWith('1688.com') && cookie.value);
+      const loggedOut = logonFlags.includes('false') && !hasLogonId;
+      if (!loggedOut) throw new Error('1688 logout markers were not cleared.');
+      return { loggedOut: true, signinReady: true };
+    } catch (error) {
+      lastError = `Logout and sign-in reset failed: ${error.message}`;
+      throw error;
+    }
+  }
+
   function getStatus() {
     return { state, ready: state === 'running', startUrl, lastError };
   }
 
-  return { start, stop, getStatus };
+  return { start, stop, logoutAndOpenSignin, getStatus };
 }
