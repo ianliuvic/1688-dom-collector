@@ -130,7 +130,7 @@ export function createLoginManager({
         .map((cookie) => String(cookie.value).toLowerCase());
       const hasLogonId = cookies.some((cookie) => cookie.name === '__cn_logon_id__'
         && cookie.domain.endsWith('1688.com') && cookie.value);
-      const loggedOut = logonFlags.includes('false') && !hasLogonId;
+      const loggedOut = !logonFlags.includes('true') && !hasLogonId;
       if (!loggedOut) throw new Error('1688 logout markers were not cleared.');
       return { loggedOut: true, signinReady: true };
     } catch (error) {
