@@ -153,6 +153,26 @@ function requireNovncAuth(request, reply, done) {
   done();
 }
 
+function requireDashboardAuth(request, reply, done) {
+  if (!config.novncUsername || !config.novncPassword) {
+    reply.code(503).send({ error: 'dashboard_credentials_not_configured' });
+    return;
+  }
+  const encoded = request.headers.authorization?.match(/^Basic\s+(.+)$/i)?.[1] || '';
+  let supplied = '';
+  try { supplied = Buffer.from(encoded, 'base64').toString('utf8'); } catch { /* invalid Basic auth */ }
+  const expected = `${config.novncUsername}:${config.novncPassword}`;
+  const suppliedBuffer = Buffer.from(supplied);
+  const expectedBuffer = Buffer.from(expected);
+  if (suppliedBuffer.length !== expectedBuffer.length
+      || !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)) {
+    reply.header('WWW-Authenticate', 'Basic realm="1688 Collector Dashboard"');
+    reply.code(401).send({ error: 'unauthorized' });
+    return;
+  }
+  done();
+}
+
 async function waitForWorkerIdle() {
   while (workerActiveCount > 0) await new Promise((resolve) => setTimeout(resolve, 100));
 }
@@ -441,8 +461,28 @@ app.register(fastifyHttpProxy, {
 app.get('/', async () => ({
   name: '1688 DOM Collector',
   status: 'framework-ready',
+  dashboard: '/dashboard',
   browserMode: getBrowserModeStatus(),
   session: collector.getSessionStatus(),
+}));
+
+app.get('/dashboard', { preHandler: requireDashboardAuth }, async (_request, reply) => {
+  const html = await fs.readFile(new URL('../public/dashboard.html', import.meta.url), 'utf8');
+  return reply.type('text/html; charset=utf-8').send(html);
+});
+
+app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({
+  ...(await db.getDashboardStats()),
+  runtime: {
+    browserMode: getBrowserModeStatus(),
+    session: collector.getSessionStatus(),
+    queues: {
+      savedAudits: savedAuditQueue.stats(),
+      translations: translationQueue.stats(),
+      ragSync: ragSyncQueue.stats(),
+      wordpressPublish: wordpressPublishQueue.stats(),
+    },
+  },
 }));
 
 app.get('/health', async (_request, reply) => {

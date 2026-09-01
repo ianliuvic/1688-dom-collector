@@ -1017,6 +1017,120 @@ export function createDatabase(databaseUrl) {
     return saved.rows;
   }
 
+  async function getDashboardStats() {
+    const [overview, shops, sourceCategories, listingYears, detailQuality, duplicateStatus,
+      images, skus, prices, imageAudits, skuAudits, publications, rag, stylePrefixes,
+      tags, recentJobs] = await Promise.all([
+      pool.query(`SELECT
+        (SELECT count(*)::int FROM shop_profiles) AS shops,
+        (SELECT count(DISTINCT domain)::int FROM shop_profiles) AS unique_shop_domains,
+        (SELECT count(*)::int FROM shop_products) AS listed_products,
+        (SELECT count(DISTINCT offer_id)::int FROM shop_products) AS unique_listed_products,
+        (SELECT count(*)::int FROM product_details) AS captured_products,
+        (SELECT count(DISTINCT product_detail_id)::int FROM product_detail_translations) AS translated_products,
+        (SELECT count(*)::int FROM product_wordpress_publications) AS publication_records,
+        (SELECT count(*)::int FROM product_wordpress_publications WHERE wp_status='publish') AS published_products,
+        (SELECT count(*)::int FROM product_details d WHERE NOT EXISTS
+          (SELECT 1 FROM product_wordpress_publications w WHERE w.product_detail_id=d.id)) AS unpublished_captures`),
+      pool.query(`SELECT s.id, coalesce(s.shop_name,s.domain) AS shop_name, s.domain,
+        count(p.id)::int AS product_count,
+        count(*) FILTER (WHERE p.listing_time >= '2024-01-01')::int AS listed_since_2024,
+        min(p.listing_time) AS oldest_listing, max(p.listing_time) AS newest_listing,
+        max(s.last_seen_at) AS last_seen_at
+        FROM shop_profiles s LEFT JOIN shop_products p ON p.shop_id=s.id
+        GROUP BY s.id ORDER BY product_count DESC, s.id`),
+      pool.query(`SELECT coalesce(nullif(category,''),'未分类') AS category, count(*)::int AS products
+        FROM shop_products GROUP BY 1 ORDER BY products DESC, category`),
+      pool.query(`SELECT coalesce(extract(year from listing_time)::text,'未知') AS listing_year,
+        count(*)::int AS products FROM shop_products GROUP BY 1 ORDER BY listing_year`),
+      pool.query(`SELECT count(*) FILTER (WHERE gallery_verified_complete)::int AS gallery_verified_complete,
+        count(*) FILTER (WHERE NOT gallery_verified_complete)::int AS gallery_incomplete,
+        round(avg(gallery_image_count),2) AS avg_gallery_images,
+        min(gallery_image_count)::int AS min_gallery_images,
+        max(gallery_image_count)::int AS max_gallery_images,
+        count(*) FILTER (WHERE gallery_image_count<=1)::int AS one_or_fewer_gallery,
+        count(*) FILTER (WHERE price_min IS NOT NULL OR price_max IS NOT NULL)::int AS with_trusted_price,
+        count(*) FILTER (WHERE price_min IS NULL AND price_max IS NULL)::int AS missing_trusted_price,
+        count(*) FILTER (WHERE title IS NOT NULL AND title<>'')::int AS with_title,
+        min(first_seen_at) AS first_capture_at, max(last_crawled_at) AS last_capture_at
+        FROM product_details`),
+      pool.query(`SELECT duplicate_status AS status, count(*)::int AS products
+        FROM product_details GROUP BY duplicate_status ORDER BY products DESC`),
+      pool.query(`SELECT image_type, count(*)::int AS images,
+        count(*) FILTER (WHERE storage_path IS NOT NULL)::int AS stored,
+        count(DISTINCT product_detail_id)::int AS products
+        FROM product_detail_images GROUP BY image_type ORDER BY images DESC`),
+      pool.query(`SELECT count(*)::int AS sku_rows,
+        count(DISTINCT product_detail_id)::int AS products_with_skus,
+        round(avg(price),2) AS avg_sku_price,
+        count(*) FILTER (WHERE stock IS NULL)::int AS unknown_stock_rows,
+        count(*) FILTER (WHERE stock>0)::int AS positive_stock_rows,
+        (SELECT count(DISTINCT product_detail_id)::int FROM product_detail_images WHERE image_type='sku') AS products_with_sku_images
+        FROM product_detail_skus`),
+      pool.query(`SELECT round(min(coalesce(price_min,price_max)),2) AS min_cny,
+        round(percentile_cont(0.5) within group(order by coalesce(price_max,price_min))::numeric,2) AS median_max_cny,
+        round(avg(coalesce(price_max,price_min)),2) AS avg_max_cny,
+        round(max(coalesce(price_max,price_min)),2) AS max_cny
+        FROM product_details WHERE price_min IS NOT NULL OR price_max IS NOT NULL`),
+      pool.query(`WITH latest AS (SELECT DISTINCT ON(product_detail_id) * FROM product_image_audits
+          ORDER BY product_detail_id,created_at DESC)
+        SELECT count(*)::int AS audited,
+          count(*) FILTER(WHERE status='completed')::int AS completed,
+          count(*) FILTER(WHERE status='failed')::int AS failed,
+          count(*) FILTER(WHERE status='completed' AND audit_status='clear')::int AS clear,
+          count(*) FILTER(WHERE status='completed' AND audit_status='issues_detected')::int AS issues_detected,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'firstImageCompliant')::boolean,false))::int AS first_image_compliant,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'hasWatermark')::boolean,false))::int AS watermark,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'hasChineseText')::boolean,false))::int AS chinese_text,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'hasDuplicates')::boolean,false))::int AS duplicates,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'hasCollage')::boolean,false))::int AS collage,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'hasBackOrReverse')::boolean,false))::int AS back_or_reverse
+        FROM latest`),
+      pool.query(`WITH latest AS (SELECT DISTINCT ON(product_detail_id) * FROM product_sku_audits
+          ORDER BY product_detail_id,created_at DESC)
+        SELECT count(*)::int AS audited,
+          count(*) FILTER(WHERE status='completed')::int AS completed,
+          count(*) FILTER(WHERE status='failed')::int AS failed,
+          count(*) FILTER(WHERE status='completed' AND audit_status='clear')::int AS clear,
+          count(*) FILTER(WHERE status='completed' AND audit_status='issues_detected')::int AS issues_detected,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'requires_review')::boolean,false))::int AS requires_review,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'has_bundle_options')::boolean,false))::int AS bundle_options,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'has_multiple_products')::boolean,false))::int AS multiple_products,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'has_nonstandard_sizes')::boolean,false))::int AS nonstandard_sizes,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'has_text_image_mismatch')::boolean,false))::int AS text_image_mismatch,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'has_missing_variant_images')::boolean,false))::int AS missing_variant_images,
+          count(*) FILTER(WHERE status='completed' AND coalesce((summary->>'has_nonstandard_variant_names')::boolean,false))::int AS nonstandard_variant_names
+        FROM latest`),
+      pool.query(`SELECT coalesce(wp_status,'未知') AS status, count(*)::int AS products,
+        count(*) FILTER (WHERE wp_url IS NOT NULL)::int AS with_url,
+        count(*) FILTER (WHERE last_error IS NOT NULL AND last_error<>'')::int AS with_error,
+        count(*) FILTER (WHERE payload ? 'publication_date')::int AS with_source_publication_date
+        FROM product_wordpress_publications GROUP BY wp_status ORDER BY products DESC`),
+      pool.query(`WITH latest AS (SELECT DISTINCT ON(product_detail_id) product_detail_id,status,active
+          FROM product_rag_syncs ORDER BY product_detail_id,created_at DESC)
+        SELECT status,active,count(*)::int AS products FROM latest
+        GROUP BY status,active ORDER BY products DESC`),
+      pool.query(`SELECT coalesce(substring(style_no from '^[A-Z]+'),'未知') AS prefix,
+        count(*)::int AS products FROM product_wordpress_publications GROUP BY 1 ORDER BY products DESC`),
+      pool.query(`SELECT tag,count(*)::int AS products FROM product_wordpress_publications p,
+        LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(payload->'tags')='array'
+          THEN payload->'tags' ELSE '[]'::jsonb END) tag
+        GROUP BY tag ORDER BY products DESC,tag LIMIT 30`),
+      pool.query(`SELECT id,status,coalesce(options->>'mode','dom') AS mode,title,error,
+        created_at,started_at,completed_at FROM capture_jobs
+        ORDER BY created_at DESC LIMIT 20`),
+    ]);
+    return {
+      generatedAt: new Date().toISOString(),
+      overview: overview.rows[0], shops: shops.rows, sourceCategories: sourceCategories.rows,
+      listingYears: listingYears.rows, detailQuality: detailQuality.rows[0],
+      duplicateStatus: duplicateStatus.rows, images: images.rows, skus: skus.rows[0],
+      prices: prices.rows[0], imageAudits: imageAudits.rows[0], skuAudits: skuAudits.rows[0],
+      publications: publications.rows, rag: rag.rows, stylePrefixes: stylePrefixes.rows,
+      tags: tags.rows, recentJobs: recentJobs.rows,
+    };
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -1030,7 +1144,7 @@ export function createDatabase(databaseUrl) {
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
     getWordPressPublication, listWordPressPublicationDates, auditAndRepairProductPrices,
     saveWordPressPublication, createProductRagSync, startProductRagSync,
-    completeProductRagSync, failProductRagSync, listProductRagSyncs, ping };
+    completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats, ping };
 }
 
 function parseScore(value) {
