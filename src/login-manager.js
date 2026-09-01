@@ -122,6 +122,9 @@ export function createLoginManager({
     const logoutUrl = 'https://login.1688.com/member/logout.htm?Done=https://www.1688.com/';
     try {
       await page.goto(logoutUrl, { waitUntil: 'domcontentloaded' });
+      await context.clearCookies({
+        domain: /(^|\.)((1688|taobao|tmall)\.com|alibaba\.com)$/,
+      });
       await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
       await saveStorageState();
       const cookies = await context.cookies();
