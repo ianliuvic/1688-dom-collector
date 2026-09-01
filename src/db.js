@@ -102,6 +102,11 @@ export function createDatabase(databaseUrl) {
       CREATE INDEX IF NOT EXISTS shop_products_listing_idx ON shop_products (listing_time);
       CREATE INDEX IF NOT EXISTS shop_products_sales_idx ON shop_products (sale_quantity);
       CREATE INDEX IF NOT EXISTS shop_products_status_idx ON shop_products (status);
+      ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS availability_status text NOT NULL DEFAULT 'active';
+      ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS last_seen_in_scan_at timestamptz;
+      ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS delisted_at timestamptz;
+      CREATE INDEX IF NOT EXISTS shop_products_availability_idx
+        ON shop_products (shop_id, availability_status);
       CREATE TABLE IF NOT EXISTS shop_product_snapshots (
         id bigserial PRIMARY KEY,
         scan_run_id bigint NOT NULL REFERENCES shop_scan_runs(id) ON DELETE CASCADE,
@@ -437,52 +442,96 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
-  async function saveShopScan(jobId, data) {
+  async function saveShopScan(jobId, data, { completeInventory = false } = {}) {
     if (!data || data.pageType !== 'shop-offer-collection' || !data.shop) return null;
     const shop = await upsertShopProfile(data.shop);
-    const run = await pool.query(`
-      INSERT INTO shop_scan_runs (job_id, shop_id, total_count, fetched_count, request_count, truncated)
-      VALUES ($1,$2,$3,$4,$5,$6)
-      ON CONFLICT (job_id) DO UPDATE SET
-        total_count=EXCLUDED.total_count, fetched_count=EXCLUDED.fetched_count,
-        request_count=EXCLUDED.request_count, truncated=EXCLUDED.truncated,
-        completed_at=now()
-      RETURNING *
-    `, [jobId, shop.id, data.totalCount ?? null, data.offerCount ?? 0,
-      data.requestCount ?? null, data.truncated === true]);
-    const scanRun = run.rows[0];
-    let saved = 0;
-    for (const offer of data.offers ?? []) {
-      const offerId = offer?.offerId == null ? null : String(offer.offerId);
-      if (!offerId) continue;
-      const product = normalizeOffer(offer);
-      const productResult = await pool.query(`
-        INSERT INTO shop_products (
-          shop_id, offer_id, title, category, price, currency, image_url, product_url,
-          sale_quantity, sale_quantity_text, listing_time, shipping_info, status, raw_data, last_crawled_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
-        ON CONFLICT (shop_id, offer_id) DO UPDATE SET
-          title=EXCLUDED.title, category=EXCLUDED.category, price=EXCLUDED.price,
-          currency=EXCLUDED.currency, image_url=EXCLUDED.image_url, product_url=EXCLUDED.product_url,
-          sale_quantity=EXCLUDED.sale_quantity, sale_quantity_text=EXCLUDED.sale_quantity_text,
-          listing_time=COALESCE(EXCLUDED.listing_time, shop_products.listing_time),
-          shipping_info=EXCLUDED.shipping_info, status=EXCLUDED.status, raw_data=EXCLUDED.raw_data,
-          last_crawled_at=now()
-        RETURNING id
-      `, [shop.id, offerId, product.title, product.category, product.price, product.currency,
-        product.imageUrl, product.productUrl, product.saleQuantity, product.saleQuantityText,
-        product.listingTime, product.shippingInfo, product.status, JSON.stringify(offer)]);
-      await pool.query(`
-        INSERT INTO shop_product_snapshots
-          (scan_run_id, shop_product_id, title, price, sale_quantity, sale_quantity_text, listing_time, status, raw_data)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-        ON CONFLICT (scan_run_id, shop_product_id) DO NOTHING
-      `, [scanRun.id, productResult.rows[0].id, product.title, product.price,
-        product.saleQuantity, product.saleQuantityText, product.listingTime,
-        product.status, JSON.stringify(offer)]);
-      saved += 1;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const previousRows = await client.query(
+        'SELECT offer_id, availability_status FROM shop_products WHERE shop_id=$1 FOR UPDATE',
+        [shop.id],
+      );
+      const knownBefore = new Set(previousRows.rows.map((row) => String(row.offer_id)));
+      const activeBefore = new Set(previousRows.rows
+        .filter((row) => row.availability_status !== 'delisted')
+        .map((row) => String(row.offer_id)));
+      const run = await client.query(`
+        INSERT INTO shop_scan_runs (job_id, shop_id, total_count, fetched_count, request_count, truncated)
+        VALUES ($1,$2,$3,$4,$5,$6)
+        ON CONFLICT (job_id) DO UPDATE SET
+          total_count=EXCLUDED.total_count, fetched_count=EXCLUDED.fetched_count,
+          request_count=EXCLUDED.request_count, truncated=EXCLUDED.truncated,
+          completed_at=now()
+        RETURNING *
+      `, [jobId, shop.id, data.totalCount ?? null, data.offerCount ?? 0,
+        data.requestCount ?? null, data.truncated === true]);
+      const scanRun = run.rows[0];
+      const seen = new Set();
+      const addedOfferIds = [];
+      const relistedOfferIds = [];
+      let saved = 0;
+      for (const offer of data.offers ?? []) {
+        const offerId = offer?.offerId == null ? null : String(offer.offerId);
+        if (!offerId || seen.has(offerId)) continue;
+        seen.add(offerId);
+        if (!knownBefore.has(offerId)) addedOfferIds.push(offerId);
+        else if (!activeBefore.has(offerId)) relistedOfferIds.push(offerId);
+        const product = normalizeOffer(offer);
+        const productResult = await client.query(`
+          INSERT INTO shop_products (
+            shop_id, offer_id, title, category, price, currency, image_url, product_url,
+            sale_quantity, sale_quantity_text, listing_time, shipping_info, status, raw_data,
+            availability_status, last_seen_in_scan_at, delisted_at, last_crawled_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'active',now(),NULL,now())
+          ON CONFLICT (shop_id, offer_id) DO UPDATE SET
+            title=EXCLUDED.title, category=EXCLUDED.category, price=EXCLUDED.price,
+            currency=EXCLUDED.currency, image_url=EXCLUDED.image_url, product_url=EXCLUDED.product_url,
+            sale_quantity=EXCLUDED.sale_quantity, sale_quantity_text=EXCLUDED.sale_quantity_text,
+            listing_time=COALESCE(EXCLUDED.listing_time, shop_products.listing_time),
+            shipping_info=EXCLUDED.shipping_info, status=EXCLUDED.status, raw_data=EXCLUDED.raw_data,
+            availability_status='active', last_seen_in_scan_at=now(), delisted_at=NULL,
+            last_crawled_at=now()
+          RETURNING id
+        `, [shop.id, offerId, product.title, product.category, product.price, product.currency,
+          product.imageUrl, product.productUrl, product.saleQuantity, product.saleQuantityText,
+          product.listingTime, product.shippingInfo, product.status, JSON.stringify(offer)]);
+        await client.query(`
+          INSERT INTO shop_product_snapshots
+            (scan_run_id, shop_product_id, title, price, sale_quantity, sale_quantity_text, listing_time, status, raw_data)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+          ON CONFLICT (scan_run_id, shop_product_id) DO NOTHING
+        `, [scanRun.id, productResult.rows[0].id, product.title, product.price,
+          product.saleQuantity, product.saleQuantityText, product.listingTime,
+          product.status, JSON.stringify(offer)]);
+        saved += 1;
+      }
+      const inventoryComplete = completeInventory === true && data.truncated !== true
+        && (data.totalCount == null || seen.size >= Number(data.totalCount));
+      let removedOfferIds = [];
+      if (inventoryComplete) {
+        removedOfferIds = [...activeBefore].filter((offerId) => !seen.has(offerId));
+        if (removedOfferIds.length) {
+          await client.query(`UPDATE shop_products
+            SET availability_status='delisted', delisted_at=COALESCE(delisted_at, now()), last_crawled_at=now()
+            WHERE shop_id=$1 AND offer_id=ANY($2::text[])`, [shop.id, removedOfferIds]);
+        }
+      }
+      await client.query('COMMIT');
+      return {
+        shopId: shop.id, scanRunId: scanRun.id, savedProducts: saved,
+        inventoryComplete, addedOfferIds, relistedOfferIds, removedOfferIds,
+        counts: {
+          added: addedOfferIds.length, relisted: relistedOfferIds.length,
+          removed: removedOfferIds.length, current: seen.size,
+        },
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
-    return { shopId: shop.id, scanRunId: scanRun.id, savedProducts: saved };
   }
 
   async function listShopProducts(shopId, limit = 100) {

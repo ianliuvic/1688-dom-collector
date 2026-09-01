@@ -10,7 +10,8 @@ import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
 import { translateProductDetail } from './product-translator.js';
 import { prepareWordPressProductDraft, publishProductToWordPress,
-  setWordPressProductPublicationDate, syncWordPressProductPricing } from './wordpress-publisher.js';
+  setWordPressProductPublicationDate, setWordPressProductStatus,
+  syncWordPressProductPricing } from './wordpress-publisher.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
 import { buildRagProduct, createRagClient } from './rag-client.js';
@@ -676,6 +677,45 @@ app.get('/api/product-details/:id/wordpress', { preHandler: requireApiKey }, asy
   return db.getWordPressPublication(detail.id);
 });
 
+app.post('/api/product-details/:id/wordpress/unpublish', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const publication = await db.getWordPressPublication(detail.id);
+  if (!publication?.wp_post_id) {
+    return { status: 'not_published', productDetailId: detail.id, ragDeactivationScheduled: false };
+  }
+  const targetStatus = request.body?.status === 'private' ? 'private' : 'draft';
+  try {
+    const wordpress = await setWordPressProductStatus({
+      postId: publication.wp_post_id, status: targetStatus, config,
+    });
+    const payload = { ...(publication.payload ?? {}), status: targetStatus };
+    const result = { ...(publication.result ?? {}), ...wordpress, status: targetStatus };
+    const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+    const saved = await db.saveWordPressPublication(detail.id, {
+      translationId: publication.translation_id,
+      externalId: publication.external_id,
+      styleNo: publication.style_no,
+      wpPostId: publication.wp_post_id,
+      wpUrl: publication.wp_url,
+      wpEditUrl: publication.wp_edit_url,
+      wpStatus: targetStatus,
+      syncHash,
+      payload,
+      result,
+      lastError: null,
+    });
+    const rag = await scheduleProductRagSync(detail.id, { trigger: 'source_delisted' });
+    return {
+      status: 'unpublished', productDetailId: detail.id,
+      wordpressStatus: saved.wp_status, ragDeactivationScheduled: rag.scheduled,
+    };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: detail.id }, 'WordPress unpublish failed');
+    return reply.code(502).send({ error: 'wordpress_unpublish_failed', message: error.message });
+  }
+});
+
 app.post('/api/product-details/:id/wordpress/preview', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
@@ -1173,7 +1213,10 @@ async function workerLoop(queue, workerIndex = 0) {
       if (result.extractedData?.pageType === 'shop') {
         await db.upsertShopProfile(result.extractedData);
       } else if (result.extractedData?.pageType === 'shop-offer-collection') {
-        await db.saveShopScan(job.id, result.extractedData);
+        const reconciliation = await db.saveShopScan(job.id, result.extractedData, {
+          completeInventory: job.options?.allPages === true,
+        });
+        result.extractedData.reconciliation = reconciliation;
       } else if (job.options?.mode === 'product_detail'
           && result.extractedData?.pageType === 'product') {
         const duplicateAnalysis = await analyzeProductDuplicates({

@@ -336,6 +336,18 @@ export async function setWordPressProductPublicationDate({ postId, publicationDa
   });
 }
 
+export async function setWordPressProductStatus({ postId, status, config }) {
+  const allowedStatuses = new Set(['draft', 'pending', 'publish', 'private']);
+  if (!Number(postId)) throw new Error('A WordPress post ID is required.');
+  if (!allowedStatuses.has(status)) throw new Error('Unsupported WordPress product status.');
+  const wp = wordpressClient(config);
+  return wp(`/wp-json/wp/v2/product/${Number(postId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  });
+}
+
 export async function syncWordPressProductPricing({ detail, publication, config }) {
   const existingPayload = publication?.payload;
   if (!existingPayload?.external_id || !existingPayload?.title) {
