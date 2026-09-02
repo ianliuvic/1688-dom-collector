@@ -340,6 +340,112 @@ export function createDatabase(databaseUrl) {
       CREATE INDEX IF NOT EXISTS product_rag_syncs_status_idx
         ON product_rag_syncs(status, created_at);
     `);
+
+    // A shop can be reached through several equivalent 1688 URLs (homepage,
+    // offer-list page, vanity domain).  Older rows used shop_url as the only
+    // identity, which allowed the same member_id to be stored more than once
+    // and made a later full scan look like an entirely new inventory.  Merge
+    // those historical rows before enforcing the stable 1688 member identity.
+    const duplicateMembers = await pool.query(`
+      SELECT member_id
+      FROM shop_profiles
+      WHERE member_id IS NOT NULL AND btrim(member_id) <> ''
+      GROUP BY member_id
+      HAVING count(*) > 1
+    `);
+    for (const { member_id: memberId } of duplicateMembers.rows) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const profilesResult = await client.query(`
+          SELECT *
+          FROM shop_profiles
+          WHERE member_id=$1
+          ORDER BY
+            (shop_url = concat('https://', domain, '/')) DESC,
+            last_seen_at DESC,
+            id DESC
+          FOR UPDATE
+        `, [memberId]);
+        const [canonical, ...duplicates] = profilesResult.rows;
+        if (!canonical) {
+          await client.query('ROLLBACK');
+          continue;
+        }
+
+        for (const duplicate of duplicates) {
+          const duplicateProducts = await client.query(
+            'SELECT * FROM shop_products WHERE shop_id=$1 ORDER BY id FOR UPDATE',
+            [duplicate.id],
+          );
+          for (const product of duplicateProducts.rows) {
+            const existing = await client.query(
+              'SELECT id, last_crawled_at FROM shop_products WHERE shop_id=$1 AND offer_id=$2 FOR UPDATE',
+              [canonical.id, product.offer_id],
+            );
+            if (existing.rowCount) {
+              const canonicalProduct = existing.rows[0];
+              await client.query(
+                'UPDATE shop_product_snapshots SET shop_product_id=$1 WHERE shop_product_id=$2',
+                [canonicalProduct.id, product.id],
+              );
+              if (new Date(product.last_crawled_at) > new Date(canonicalProduct.last_crawled_at)) {
+                await client.query(`
+                  UPDATE shop_products SET
+                    title=$2, category=$3, price=$4, currency=$5, image_url=$6,
+                    product_url=$7, sale_quantity=$8, sale_quantity_text=$9,
+                    listing_time=COALESCE($10, listing_time), shipping_info=$11,
+                    status=$12, raw_data=$13, availability_status=$14,
+                    last_seen_in_scan_at=$15, delisted_at=$16, last_crawled_at=$17,
+                    first_seen_at=LEAST(first_seen_at, $18)
+                  WHERE id=$1
+                `, [canonicalProduct.id, product.title, product.category, product.price,
+                  product.currency, product.image_url, product.product_url,
+                  product.sale_quantity, product.sale_quantity_text, product.listing_time,
+                  product.shipping_info, product.status, product.raw_data,
+                  product.availability_status, product.last_seen_in_scan_at,
+                  product.delisted_at, product.last_crawled_at, product.first_seen_at]);
+              } else {
+                await client.query(
+                  'UPDATE shop_products SET first_seen_at=LEAST(first_seen_at,$2) WHERE id=$1',
+                  [canonicalProduct.id, product.first_seen_at],
+                );
+              }
+              await client.query('DELETE FROM shop_products WHERE id=$1', [product.id]);
+            } else {
+              await client.query('UPDATE shop_products SET shop_id=$1 WHERE id=$2',
+                [canonical.id, product.id]);
+            }
+          }
+          await client.query('UPDATE shop_scan_runs SET shop_id=$1 WHERE shop_id=$2',
+            [canonical.id, duplicate.id]);
+          await client.query(`
+            UPDATE shop_profiles SET
+              first_seen_at=LEAST(first_seen_at,$2),
+              last_seen_at=GREATEST(last_seen_at,$3)
+            WHERE id=$1
+          `, [canonical.id, duplicate.first_seen_at, duplicate.last_seen_at]);
+          await client.query('DELETE FROM shop_profiles WHERE id=$1', [duplicate.id]);
+        }
+
+        const canonicalUrl = `${new URL(canonical.shop_url).origin}/`;
+        await client.query(
+          'UPDATE shop_profiles SET shop_url=$2, domain=$3 WHERE id=$1',
+          [canonical.id, canonicalUrl, new URL(canonicalUrl).hostname],
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS shop_profiles_member_id_unique_idx
+        ON shop_profiles (member_id)
+        WHERE member_id IS NOT NULL AND btrim(member_id) <> ''
+    `);
   }
 
   async function createJob(id, url, options = {}) {
@@ -397,15 +503,52 @@ export function createDatabase(databaseUrl) {
       ?? data.navigation?.find((item) => item.id === 'offerlist')?.url ?? null;
     const newOfferListUrl = data.newOfferListUrl
       ?? data.navigation?.find((item) => item.id === 'newofferlist')?.url ?? null;
-    const result = await pool.query(`
-      INSERT INTO shop_profiles (
+    const values = [
+      shopUrl, parsedUrl.hostname, company.name ?? null, data.title ?? null,
+      company.memberId ?? null, company.sellerId ?? null, company.companyId ?? null,
+      company.sellerType ?? null, company.mainCategory ?? null, company.address ?? null,
+      company.establishedYear ?? null, parseDate(company.establishedDate),
+      metrics.followerCount ?? null, metrics.offerCount ?? null,
+      parseScore(metrics.serviceScore), metrics.repeatRate ?? null,
+      metrics.fulfillmentRate ?? null, metrics.yearsOnPlatform ?? null,
+      contact.name ?? null, contact.phone ?? null, contact.mobile ?? null, contact.fax ?? null,
+      data.wangwangUrl ?? null, offerListUrl, newOfferListUrl,
+      JSON.stringify(data.navigation ?? []), JSON.stringify(data),
+    ];
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const existing = await client.query(`
+        SELECT id FROM shop_profiles
+        WHERE ($1::text IS NOT NULL AND member_id=$1) OR shop_url=$2
+        ORDER BY (member_id=$1) DESC, last_seen_at DESC
+        LIMIT 1 FOR UPDATE
+      `, [company.memberId ?? null, shopUrl]);
+      let result;
+      if (existing.rowCount) {
+        result = await client.query(`
+          UPDATE shop_profiles SET
+            shop_url=$2, domain=$3, shop_name=$4, page_title=$5, member_id=$6,
+            seller_id=$7, company_id=$8, seller_type=$9, main_category=$10,
+            address=$11, established_year=$12, established_date=$13,
+            follower_count=$14, offer_count=$15, service_score=$16, repeat_rate=$17,
+            fulfillment_rate=$18, years_on_platform=$19, contact_name=$20,
+            phone=$21, mobile=$22, fax=$23, wangwang_url=$24,
+            offer_list_url=$25, new_offer_list_url=$26, navigation=$27,
+            raw_data=$28, last_seen_at=now()
+          WHERE id=$1
+          RETURNING *
+        `, [existing.rows[0].id, ...values]);
+      } else {
+        result = await client.query(`
+          INSERT INTO shop_profiles (
         shop_url, domain, shop_name, page_title, member_id, seller_id, company_id,
         seller_type, main_category, address, established_year, established_date,
         follower_count, offer_count, service_score, repeat_rate, fulfillment_rate,
         years_on_platform, contact_name, phone, mobile, fax, wangwang_url, offer_list_url, new_offer_list_url,
         navigation, raw_data, last_seen_at
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,now())
-      ON CONFLICT (shop_url) DO UPDATE SET
+          ON CONFLICT (shop_url) DO UPDATE SET
         domain=EXCLUDED.domain, shop_name=EXCLUDED.shop_name, page_title=EXCLUDED.page_title,
         member_id=EXCLUDED.member_id, seller_id=EXCLUDED.seller_id, company_id=EXCLUDED.company_id,
         seller_type=EXCLUDED.seller_type, main_category=EXCLUDED.main_category,
@@ -418,20 +561,17 @@ export function createDatabase(databaseUrl) {
         wangwang_url=EXCLUDED.wangwang_url, offer_list_url=EXCLUDED.offer_list_url,
         new_offer_list_url=EXCLUDED.new_offer_list_url, navigation=EXCLUDED.navigation,
         raw_data=EXCLUDED.raw_data, last_seen_at=now()
-      RETURNING *
-    `, [
-      shopUrl, parsedUrl.hostname, company.name ?? null, data.title ?? null,
-      company.memberId ?? null, company.sellerId ?? null, company.companyId ?? null,
-      company.sellerType ?? null, company.mainCategory ?? null, company.address ?? null,
-      company.establishedYear ?? null, parseDate(company.establishedDate),
-      metrics.followerCount ?? null, metrics.offerCount ?? null,
-      parseScore(metrics.serviceScore), metrics.repeatRate ?? null,
-      metrics.fulfillmentRate ?? null, metrics.yearsOnPlatform ?? null,
-      contact.name ?? null, contact.phone ?? null, contact.mobile ?? null, contact.fax ?? null,
-      data.wangwangUrl ?? null, offerListUrl, newOfferListUrl,
-      JSON.stringify(data.navigation ?? []), JSON.stringify(data),
-    ]);
-    return result.rows[0];
+          RETURNING *
+        `, values);
+      }
+      await client.query('COMMIT');
+      return result.rows[0];
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async function listShopProfiles(limit = 100) {
