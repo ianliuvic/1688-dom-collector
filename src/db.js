@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import pg from 'pg';
 import { deriveVerifiedProductPrice } from './parsers/1688-product.js';
+import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 
 const { Pool } = pg;
 
@@ -105,6 +106,18 @@ export function createDatabase(databaseUrl) {
       ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS availability_status text NOT NULL DEFAULT 'active';
       ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS last_seen_in_scan_at timestamptz;
       ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS delisted_at timestamptz;
+      ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS ingestion_eligible boolean NOT NULL DEFAULT true;
+      ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS ingestion_policy text;
+      ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS ingestion_reason text;
+      UPDATE shop_products products SET
+        ingestion_eligible = products.category IN ('沙滩防晒服', '沙滩裙、沙滩套装'),
+        ingestion_policy = 'yipin_swim_coverups_only',
+        ingestion_reason = CASE
+          WHEN products.category IN ('沙滩防晒服', '沙滩裙、沙滩套装') THEN NULL
+          ELSE 'source_category_is_not_swim_coverup'
+        END
+      FROM shop_profiles shops
+      WHERE shops.id=products.shop_id AND lower(shops.domain)='shop478x140nz9144.1688.com';
       CREATE INDEX IF NOT EXISTS shop_products_availability_idx
         ON shop_products (shop_id, availability_status);
       CREATE TABLE IF NOT EXISTS shop_product_snapshots (
@@ -618,24 +631,29 @@ export function createDatabase(databaseUrl) {
         if (!knownBefore.has(offerId)) addedOfferIds.push(offerId);
         else if (!activeBefore.has(offerId)) relistedOfferIds.push(offerId);
         const product = normalizeOffer(offer);
+        const ingestion = evaluateShopProductPolicy([{ domain: shop.domain, category: product.category }]);
         const productResult = await client.query(`
           INSERT INTO shop_products (
             shop_id, offer_id, title, category, price, currency, image_url, product_url,
             sale_quantity, sale_quantity_text, listing_time, shipping_info, status, raw_data,
-            availability_status, last_seen_in_scan_at, delisted_at, last_crawled_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'active',now(),NULL,now())
+            availability_status, ingestion_eligible, ingestion_policy, ingestion_reason,
+            last_seen_in_scan_at, delisted_at, last_crawled_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'active',$15,$16,$17,now(),NULL,now())
           ON CONFLICT (shop_id, offer_id) DO UPDATE SET
             title=EXCLUDED.title, category=EXCLUDED.category, price=EXCLUDED.price,
             currency=EXCLUDED.currency, image_url=EXCLUDED.image_url, product_url=EXCLUDED.product_url,
             sale_quantity=EXCLUDED.sale_quantity, sale_quantity_text=EXCLUDED.sale_quantity_text,
             listing_time=COALESCE(EXCLUDED.listing_time, shop_products.listing_time),
             shipping_info=EXCLUDED.shipping_info, status=EXCLUDED.status, raw_data=EXCLUDED.raw_data,
-            availability_status='active', last_seen_in_scan_at=now(), delisted_at=NULL,
+            availability_status='active', ingestion_eligible=EXCLUDED.ingestion_eligible,
+            ingestion_policy=EXCLUDED.ingestion_policy, ingestion_reason=EXCLUDED.ingestion_reason,
+            last_seen_in_scan_at=now(), delisted_at=NULL,
             last_crawled_at=now()
           RETURNING id
         `, [shop.id, offerId, product.title, product.category, product.price, product.currency,
           product.imageUrl, product.productUrl, product.saleQuantity, product.saleQuantityText,
-          product.listingTime, product.shippingInfo, product.status, JSON.stringify(offer)]);
+          product.listingTime, product.shippingInfo, product.status, JSON.stringify(offer),
+          ingestion.allowed, ingestion.policy, ingestion.reason]);
         await client.query(`
           INSERT INTO shop_product_snapshots
             (scan_run_id, shop_product_id, title, price, sale_quantity, sale_quantity_text, listing_time, status, raw_data)
@@ -679,6 +697,17 @@ export function createDatabase(databaseUrl) {
       'SELECT * FROM shop_products WHERE shop_id = $1 ORDER BY last_crawled_at DESC LIMIT $2',
       [shopId, Math.min(Math.max(Number(limit) || 100, 1), 5000)],
     );
+    return result.rows;
+  }
+
+  async function listShopProductSources(offerId) {
+    const result = await pool.query(`SELECT products.shop_id, products.offer_id,
+      products.title, products.category, products.status, products.availability_status,
+      shops.domain, shops.shop_name, shops.shop_url
+      FROM shop_products products
+      JOIN shop_profiles shops ON shops.id=products.shop_id
+      WHERE products.offer_id=$1
+      ORDER BY products.last_crawled_at DESC`, [String(offerId)]);
     return result.rows;
   }
 
@@ -1348,7 +1377,8 @@ export function createDatabase(databaseUrl) {
   }
 
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
-    saveShopScan, listShopProfiles, listShopProducts, saveProductDetail, getProductDetail, listProductDetails,
+    saveShopScan, listShopProfiles, listShopProducts, listShopProductSources,
+    saveProductDetail, getProductDetail, listProductDetails,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,

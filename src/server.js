@@ -17,6 +17,7 @@ import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
 import { buildRagProduct, createRagClient } from './rag-client.js';
 import { analyzeProductDuplicates } from './duplicate-analyzer.js';
+import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -551,6 +552,17 @@ app.post('/api/product-details', { preHandler: [requireApiKey, requireCollectorM
       || !new URL(url).hostname.startsWith('detail.')) {
     return reply.code(400).send({ error: 'Provide a valid HTTPS 1688 detail URL or offerId.' });
   }
+  const resolvedOfferId = typeof offerId === 'string' && /^\d{10,13}$/.test(offerId)
+    ? offerId : url.match(/\/offer\/(\d{10,13})\.html/i)?.[1];
+  if (resolvedOfferId) {
+    const sourceListings = await db.listShopProductSources(resolvedOfferId);
+    const policy = evaluateShopProductPolicy(sourceListings);
+    if (!policy.allowed) {
+      return reply.code(422).send({
+        error: 'shop_product_policy_rejected', policy: policy.policy, reason: policy.reason,
+      });
+    }
+  }
   const job = await db.createJob(crypto.randomUUID(), url, { mode: 'product_detail' });
   return reply.code(202).send(job);
 });
@@ -736,6 +748,13 @@ app.post('/api/product-details/:id/wordpress/preview', { preHandler: requireApiK
 app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const sourceListings = await db.listShopProductSources(detail.offer_id);
+  const policy = evaluateShopProductPolicy(sourceListings);
+  if (!policy.allowed) {
+    return reply.code(422).send({
+      error: 'shop_product_policy_rejected', policy: policy.policy, reason: policy.reason,
+    });
+  }
   const translation = await db.getLatestProductTranslation(detail.id, 'en');
   if (!translation) return reply.code(409).send({ error: 'english_translation_required' });
   const id = crypto.randomUUID();
