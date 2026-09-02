@@ -12,12 +12,13 @@ import { translateProductDetail } from './product-translator.js';
 import { prepareWordPressProductDraft, publishProductToWordPress,
   get1688ArrivalDate, setWordPressProductArrivalDate,
   setWordPressProductPublicationDate, setWordPressProductStatus,
-  syncWordPressProductPricing } from './wordpress-publisher.js';
+  syncWordPressProductPricing, replaceWordPressBestSellers } from './wordpress-publisher.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
 import { buildRagProduct, createRagClient } from './rag-client.js';
 import { analyzeProductDuplicates } from './duplicate-analyzer.js';
 import { evaluateShopProductPolicy } from './shop-publication-policy.js';
+import { selectBestSellers } from './best-seller-selector.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -76,6 +77,7 @@ const wordpressJobs = new Map();
 const wordpressPublicationDateJobs = new Map();
 const wordpressArrivalDateJobs = new Map();
 const wordpressPriceRepairJobs = new Map();
+const wordpressBestSellerJobs = new Map();
 let multimodalAuditQueue = Promise.resolve();
 const savedAuditQueue = createConcurrentQueue({
   concurrency: config.savedAuditConcurrency,
@@ -94,6 +96,11 @@ const wordpressPublishQueue = createConcurrentQueue({
   onTaskError: (error) => app.log.error({ err: error }, 'unhandled WordPress publish queue error'),
 });
 let wordpressMaintenanceQueue = Promise.resolve();
+
+async function buildBestSellerPlan(limit = 36) {
+  const candidates = await db.listBestSellerCandidates();
+  return selectBestSellers(candidates, Math.min(Math.max(Number(limit) || 36, 1), 48));
+}
 
 function trimTerminalJobs(jobMap, maxEntries = 2000) {
   if (jobMap.size <= maxEntries) return;
@@ -973,6 +980,64 @@ app.post('/api/wordpress/prices/audit-and-repair', { preHandler: requireApiKey }
 
 app.get('/api/wordpress-price-repair-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = wordpressPriceRepairJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.get('/api/wordpress/best-sellers/preview', { preHandler: requireApiKey }, async (request) => {
+  const plan = await buildBestSellerPlan(request.query?.limit);
+  return {
+    target: plan.target,
+    eligiblePublished: plan.eligiblePublished,
+    allocations: plan.allocations,
+    selected: plan.selected.map((item) => ({
+      shopName: item.shop_name,
+      domain: item.domain,
+      styleNo: item.style_no,
+      wordpressUrl: item.wp_url,
+      saleQuantity: item.sale_quantity,
+      saleQuantityText: item.sale_quantity_text,
+      listingTime: item.listing_time,
+    })),
+  };
+});
+
+app.post('/api/wordpress/best-sellers/rebuild', { preHandler: requireApiKey }, async (request, reply) => {
+  const id = crypto.randomUUID();
+  const limit = Math.min(Math.max(Number(request.body?.limit) || 36, 1), 48);
+  const job = { id, status: 'queued', limit, createdAt: new Date().toISOString(),
+    startedAt: null, completedAt: null, plan: null, result: null, error: null };
+  wordpressBestSellerJobs.set(id, job);
+  trimTerminalJobs(wordpressBestSellerJobs);
+  wordpressMaintenanceQueue = wordpressMaintenanceQueue.then(async () => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    try {
+      const plan = await buildBestSellerPlan(limit);
+      job.plan = {
+        target: plan.target,
+        eligiblePublished: plan.eligiblePublished,
+        allocations: plan.allocations,
+      };
+      const wordpress = await replaceWordPressBestSellers({
+        postIds: plan.selected.map((item) => item.wp_post_id), config,
+      });
+      job.result = { wordpress, selected: plan.selected.map((item) => ({
+        shopName: item.shop_name, domain: item.domain, styleNo: item.style_no,
+        wordpressUrl: item.wp_url, saleQuantity: item.sale_quantity,
+      })) };
+      job.status = wordpress.failed ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = error.message;
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  }).catch((error) => app.log.error({ err: error }, 'Best Sellers rebuild queue failed'));
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress-best-seller-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = wordpressBestSellerJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 

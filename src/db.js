@@ -711,6 +711,25 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function listBestSellerCandidates() {
+    const result = await pool.query(`SELECT DISTINCT ON (publications.wp_post_id)
+      shops.id AS shop_id, shops.shop_name, shops.domain,
+      products.sale_quantity, products.sale_quantity_text, products.listing_time,
+      details.id AS product_detail_id, publications.wp_post_id,
+      publications.wp_url, publications.style_no
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id=publications.product_detail_id
+      JOIN shop_products products ON products.offer_id=details.offer_id
+      JOIN shop_profiles shops ON shops.id=products.shop_id
+      WHERE publications.wp_status='publish'
+        AND publications.wp_post_id IS NOT NULL
+        AND products.availability_status='active'
+        AND products.ingestion_eligible=true
+      ORDER BY publications.wp_post_id, products.sale_quantity DESC NULLS LAST,
+        products.listing_time DESC NULLS LAST, products.last_crawled_at DESC`);
+    return result.rows;
+  }
+
   async function saveProductDetail(data, sourceUrl, imageFiles = [], duplicateAnalysis = null) {
     if (!data || data.pageType !== 'product' || !sourceUrl) return null;
     const client = await pool.connect();
@@ -1378,6 +1397,7 @@ export function createDatabase(databaseUrl) {
 
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
     saveShopScan, listShopProfiles, listShopProducts, listShopProductSources,
+    listBestSellerCandidates,
     saveProductDetail, getProductDetail, listProductDetails,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,

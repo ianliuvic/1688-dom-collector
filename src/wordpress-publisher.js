@@ -373,6 +373,69 @@ export async function setWordPressProductStatus({ postId, status, config }) {
   });
 }
 
+async function mapConcurrent(values, concurrency, action) {
+  const results = new Array(values.length);
+  let next = 0;
+  async function worker() {
+    while (next < values.length) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = { ok: true, value: await action(values[index]) };
+      } catch (error) {
+        results[index] = { ok: false, error: error.message };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  return results;
+}
+
+export async function replaceWordPressBestSellers({ postIds, config, categorySlug = 'best-sellers' }) {
+  const selectedIds = [...new Set((postIds ?? []).map(Number).filter(Boolean))];
+  const wp = wordpressClient(config);
+  const terms = await wp(`/wp-json/wp/v2/product_cat?slug=${encodeURIComponent(categorySlug)}&per_page=100&context=edit`);
+  const termId = Number(terms?.[0]?.id);
+  if (!termId) throw new Error(`WordPress product category ${categorySlug} was not found.`);
+  const current = await wp(`/wp-json/wp/v2/product?product_cat=${termId}&status=publish&per_page=100&context=edit&_fields=id,product_cat`);
+  const currentIds = new Set((current ?? []).map((product) => Number(product.id)).filter(Boolean));
+  const selectedSet = new Set(selectedIds);
+  const affectedIds = [...new Set([...currentIds, ...selectedIds])];
+
+  const changes = await mapConcurrent(affectedIds, 5, async (postId) => {
+    const product = await wp(`/wp-json/wp/v2/product/${postId}?context=edit&_fields=id,status,product_cat`);
+    if (product.status !== 'publish' && selectedSet.has(postId)) {
+      throw new Error('Selected product is no longer published.');
+    }
+    const before = [...new Set((product.product_cat ?? []).map(Number).filter(Boolean))];
+    const after = selectedSet.has(postId)
+      ? [...new Set([...before, termId])]
+      : before.filter((id) => id !== termId);
+    if (before.length === after.length && before.every((id) => after.includes(id))) {
+      return { postId, changed: false, selected: selectedSet.has(postId) };
+    }
+    await wp(`/wp-json/wp/v2/product/${postId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ product_cat: after }),
+    });
+    return { postId, changed: true, selected: selectedSet.has(postId) };
+  });
+
+  const failures = changes.filter((item) => !item.ok);
+  return {
+    termId,
+    currentBefore: currentIds.size,
+    selected: selectedIds.length,
+    updated: changes.filter((item) => item.ok && item.value.changed).length,
+    added: changes.filter((item) => item.ok && item.value.changed && item.value.selected).length,
+    removed: changes.filter((item) => item.ok && item.value.changed && !item.value.selected).length,
+    unchanged: changes.filter((item) => item.ok && !item.value.changed).length,
+    failed: failures.length,
+    errors: failures.map((item) => item.error),
+  };
+}
+
 export async function syncWordPressProductPricing({ detail, publication, config }) {
   const existingPayload = publication?.payload;
   if (!existingPayload?.external_id || !existingPayload?.title) {
