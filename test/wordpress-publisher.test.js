@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildWordPressProductDraft, buildWearHongxiuPricing,
-  normalizePublicationDate, refreshWordPressProductPricingPayload } from '../src/wordpress-publisher.js';
+  get1688ArrivalDate, normalizePublicationDate,
+  refreshWordPressProductPricingPayload } from '../src/wordpress-publisher.js';
 
 const detail = {
   id: '1', offer_id: '1068935307931', canonical_url: 'https://detail.1688.com/offer/1068935307931.html',
@@ -65,6 +66,16 @@ test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
 test('normalizes valid source dates and rejects invalid values', () => {
   assert.equal(normalizePublicationDate('2025-11-05T01:08:00Z'), '2025-11-05T01:08:00.000Z');
   assert.equal(normalizePublicationDate('not-a-date'), '');
+});
+
+test('uses only an official 1688 listing time for the New Arrivals date', () => {
+  assert.equal(get1688ArrivalDate(detail), '20251105');
+  assert.equal(get1688ArrivalDate({ ...detail, publication_date_source: 'first_seen_at' }), '');
+  assert.equal(get1688ArrivalDate({ ...detail, publication_date: null }), '');
+  const result = buildWordPressProductDraft({ detail, translation,
+    options: { styleNo: 'SWBK999', categoryIds: [11], primaryCategoryId: 11, tagIds: [] },
+    taxonomies: { categories: [{ id: 11, name: 'Bikini Set' }] } });
+  assert.equal(result.payload.meta.arrival_date, '20251105');
 });
 
 test('maps each color to its own saved SKU image without adding swatches to the Gallery', () => {

@@ -27,6 +27,14 @@ export function normalizePublicationDate(value) {
   return Number.isNaN(date.getTime()) ? '' : date.toISOString();
 }
 
+export function get1688ArrivalDate(detail) {
+  if (clean(detail?.publication_date_source) !== '1688_listing_time') return '';
+  const normalized = normalizePublicationDate(detail?.publication_date);
+  if (!normalized) return '';
+  const date = new Date(normalized);
+  return `${date.getUTCFullYear()}${String(date.getUTCMonth() + 1).padStart(2, '0')}${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
 export function getSourceMaximumPrice(detail) {
   const skuPrices = (detail?.skus ?? []).map((sku) => numberOrNull(sku?.price))
     .filter((value) => value !== null && value >= 0);
@@ -233,6 +241,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   const sourceCurrency = clean(detail.currency) || 'CNY';
   const externalId = `1688:${detail.offer_id}`;
   const publicationDate = normalizePublicationDate(detail.publication_date || detail.first_seen_at);
+  const arrivalDate = get1688ArrivalDate(detail);
 
   const payload = {
     external_id: externalId,
@@ -275,6 +284,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
       source_price_max: numberOrNull(detail.price_max),
       source_product_detail_id: String(detail.id),
       source_translation_id: String(translation.id),
+      ...(arrivalDate ? { arrival_date: arrivalDate } : {}),
     },
     images: publishingImages.map((image, index) => ({
       source_image_id: String(image.id),
@@ -333,6 +343,21 @@ export async function setWordPressProductPublicationDate({ postId, publicationDa
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ date_gmt: normalized }),
+  });
+}
+
+export async function setWordPressProductArrivalDate({ postId, externalId, arrivalDate, config }) {
+  if (!Number(postId)) throw new Error('A WordPress post ID is required.');
+  if (!/^\d{8}$/.test(clean(arrivalDate))) throw new Error('A valid YYYYMMDD arrival date is required.');
+  const wp = wordpressClient(config);
+  return wp('/wp-json/hx/v1/products/arrival-date', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      post_id: Number(postId),
+      external_id: clean(externalId),
+      arrival_date: clean(arrivalDate),
+    }),
   });
 }
 

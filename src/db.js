@@ -1059,6 +1059,29 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function listWordPressArrivalDates() {
+    const result = await pool.query(`SELECT publications.product_detail_id,
+      publications.wp_post_id, publications.external_id, publications.payload,
+      (SELECT shop_products.listing_time FROM shop_products
+        WHERE shop_products.offer_id = details.offer_id
+          AND shop_products.listing_time IS NOT NULL
+        ORDER BY shop_products.last_crawled_at DESC LIMIT 1) AS listing_time
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id = publications.product_detail_id
+      WHERE publications.wp_post_id IS NOT NULL
+        AND publications.wp_status = 'publish'
+      ORDER BY publications.id`);
+    return result.rows;
+  }
+
+  async function saveWordPressArrivalDate(productDetailId, arrivalDate) {
+    const result = await pool.query(`UPDATE product_wordpress_publications
+      SET payload=jsonb_set(COALESCE(payload, '{}'::jsonb), '{meta,arrival_date}', to_jsonb($2::text), true),
+        updated_at=now()
+      WHERE product_detail_id=$1 RETURNING *`, [productDetailId, arrivalDate]);
+    return result.rows[0] ?? null;
+  }
+
   async function auditAndRepairProductPrices() {
     const client = await pool.connect();
     try {
@@ -1331,7 +1354,8 @@ export function createDatabase(databaseUrl) {
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
     recoverPendingProductAudits,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
-    getWordPressPublication, listWordPressPublicationDates, auditAndRepairProductPrices,
+    getWordPressPublication, listWordPressPublicationDates, listWordPressArrivalDates,
+    saveWordPressArrivalDate, auditAndRepairProductPrices,
     saveWordPressPublication, createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats, ping };
 }
