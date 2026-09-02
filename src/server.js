@@ -596,6 +596,23 @@ app.get('/api/product-details', { preHandler: requireApiKey }, async (request, r
   return db.listProductDetails({ offerId, limit: request.query?.limit });
 });
 
+app.get('/api/marketing/weekly-new-products', { preHandler: requireApiKey }, async (request, reply) => {
+  const from = new Date(String(request.query?.from ?? ''));
+  const to = new Date(String(request.query?.to ?? ''));
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+    return reply.code(400).send({ error: 'from and to must be valid ISO timestamps with from before to.' });
+  }
+  if (to.getTime() - from.getTime() > 31 * 24 * 60 * 60 * 1000) {
+    return reply.code(400).send({ error: 'The requested window cannot exceed 31 days.' });
+  }
+  const products = await db.listWeeklyMarketingProducts({
+    from: from.toISOString(), to: to.toISOString(), limit: request.query?.limit,
+  });
+  return {
+    from: from.toISOString(), to: to.toISOString(), count: products.length, products,
+  };
+});
+
 app.get('/api/product-details/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   return detail ?? reply.code(404).send({ error: 'not_found' });

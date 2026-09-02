@@ -856,6 +856,46 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function listWeeklyMarketingProducts({ from, to, limit = 24 } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 24, 1), 50);
+    const result = await pool.query(`SELECT details.id AS product_detail_id,
+      details.offer_id, source.listing_time, source.category AS source_category,
+      source.shop_name, publications.style_no, publications.wp_post_id,
+      publications.wp_url,
+      COALESCE(translations.title, publications.payload->>'title', details.title) AS title,
+      COALESCE(translations.description, publications.payload->>'description', details.description) AS description,
+      COALESCE(publications.payload->'images'->0->>'url', source.image_url) AS image_url
+      FROM product_details details
+      JOIN product_wordpress_publications publications
+        ON publications.product_detail_id=details.id
+       AND publications.wp_status='publish'
+       AND publications.wp_post_id IS NOT NULL
+       AND publications.wp_url IS NOT NULL
+      JOIN LATERAL (
+        SELECT products.listing_time, products.category, products.image_url,
+          shops.shop_name
+        FROM shop_products products
+        JOIN shop_profiles shops ON shops.id=products.shop_id
+        WHERE products.offer_id=details.offer_id
+          AND products.listing_time >= $1::timestamptz
+          AND products.listing_time < $2::timestamptz
+          AND products.availability_status='active'
+          AND products.ingestion_eligible=true
+        ORDER BY products.last_crawled_at DESC
+        LIMIT 1
+      ) source ON true
+      LEFT JOIN LATERAL (
+        SELECT title, description
+        FROM product_detail_translations
+        WHERE product_detail_id=details.id AND target_language='en'
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT 1
+      ) translations ON true
+      ORDER BY source.listing_time DESC, details.id DESC
+      LIMIT $3`, [from, to, safeLimit]);
+    return result.rows;
+  }
+
   async function findExactGalleryDuplicates({ offerId, fingerprint, imageCount }) {
     if (!fingerprint || Number(imageCount) < 2) return [];
     const result = await pool.query(`SELECT id AS product_detail_id, offer_id, source_url,
@@ -1398,7 +1438,7 @@ export function createDatabase(databaseUrl) {
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
     saveShopScan, listShopProfiles, listShopProducts, listShopProductSources,
     listBestSellerCandidates,
-    saveProductDetail, getProductDetail, listProductDetails,
+    saveProductDetail, getProductDetail, listProductDetails, listWeeklyMarketingProducts,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
