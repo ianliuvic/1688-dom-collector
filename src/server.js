@@ -12,7 +12,9 @@ import { translateProductDetail } from './product-translator.js';
 import { prepareWordPressProductDraft, publishProductToWordPress,
   get1688ArrivalDate, setWordPressProductArrivalDate,
   setWordPressProductPublicationDate, setWordPressProductStatus,
-  syncWordPressProductPricing, replaceWordPressBestSellers } from './wordpress-publisher.js';
+  syncWordPressProductPricing, replaceWordPressBestSellers,
+  resolveWordPressProduct } from './wordpress-publisher.js';
+import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
 import { buildRagProduct, createRagClient } from './rag-client.js';
@@ -713,6 +715,36 @@ app.get('/api/product-details/:id/wordpress', { preHandler: requireApiKey }, asy
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   return db.getWordPressPublication(detail.id);
+});
+
+app.get('/api/wordpress/products/resolve', { preHandler: requireApiKey }, async (request, reply) => {
+  let identifier;
+  try {
+    identifier = parseProductResolverQuery(request.query, config.wordpressBaseUrl);
+  } catch (error) {
+    return reply.code(400).send({ error: 'invalid_product_identifier', message: error.message });
+  }
+  const lookup = localResolverLookup(identifier);
+  let matches = lookup ? await db.resolveWordPressPublication(lookup) : [];
+  if (matches.length > 1) {
+    return reply.code(409).send({ error: 'ambiguous_product_identifier', matches: matches.length });
+  }
+  if (matches.length === 1) {
+    return { source: 'collector_index', identifier: identifier.kind, collector: matches[0],
+      wordpress: { id: matches[0].wp_post_id, style_no: matches[0].style_no,
+        status: matches[0].wp_status, link: matches[0].wp_url,
+        edit_link: matches[0].wp_edit_url } };
+  }
+  try {
+    const wordpress = await resolveWordPressProduct(identifier.wordpressQuery, config);
+    matches = wordpress?.id
+      ? await db.resolveWordPressPublication({ wpPostId: Number(wordpress.id) }) : [];
+    return { source: 'wordpress_fallback', identifier: identifier.kind,
+      wordpress, collector: matches.length === 1 ? matches[0] : null };
+  } catch (error) {
+    request.log.warn({ err: error, identifier: identifier.kind }, 'Product resolver fallback failed');
+    return reply.code(404).send({ error: 'product_not_found', message: error.message });
+  }
 });
 
 app.get('/api/shopify/source-match', { preHandler: requireApiKey }, async (request, reply) => {

@@ -330,6 +330,10 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS product_wordpress_publications_post_idx
         ON product_wordpress_publications(wp_post_id);
+      CREATE INDEX IF NOT EXISTS product_wordpress_publications_style_upper_idx
+        ON product_wordpress_publications(upper(style_no));
+      CREATE INDEX IF NOT EXISTS product_wordpress_publications_url_idx
+        ON product_wordpress_publications(wp_url);
       CREATE INDEX IF NOT EXISTS product_wordpress_publications_external_idx
         ON product_wordpress_publications(external_id);
       CREATE TABLE IF NOT EXISTS product_shopify_publications (
@@ -1152,6 +1156,46 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  async function resolveWordPressPublication({ styleNo = null, wpPostId = null, wpUrl = null }) {
+    let predicate;
+    let values;
+    if (styleNo) {
+      predicate = 'upper(publications.style_no)=upper($1)';
+      values = [styleNo];
+    } else if (wpPostId) {
+      predicate = 'publications.wp_post_id=$1';
+      values = [wpPostId];
+    } else if (wpUrl) {
+      predicate = '(publications.wp_url=$1 OR publications.wp_url=$2)';
+      values = [wpUrl, wpUrl.endsWith('/') ? wpUrl.slice(0, -1) : `${wpUrl}/`];
+    } else {
+      return [];
+    }
+    const result = await pool.query(`SELECT publications.id AS publication_id,
+      publications.product_detail_id, publications.external_id,
+      publications.style_no, publications.wp_post_id, publications.wp_url,
+      publications.wp_edit_url, publications.wp_status,
+      publications.payload->>'title' AS published_title,
+      publications.payload->'category_ids' AS category_ids,
+      publications.payload->'tags' AS tags,
+      publications.first_published_at, publications.last_synced_at,
+      details.offer_id, details.source_url, details.canonical_url,
+      details.title AS source_title, details.price_min, details.price_max,
+      details.currency, details.stock_total, details.last_crawled_at,
+      translations.title AS translated_title,
+      translations.description AS translated_description
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id=publications.product_detail_id
+      LEFT JOIN LATERAL (
+        SELECT title,description FROM product_detail_translations
+        WHERE product_detail_id=details.id AND target_language='en'
+        ORDER BY updated_at DESC,created_at DESC LIMIT 1
+      ) translations ON true
+      WHERE ${predicate}
+      ORDER BY publications.updated_at DESC`, values);
+    return result.rows;
+  }
+
   async function findShopifySource({ wpPostId, styleNo, shopifyStore }) {
     const result = await pool.query(`SELECT details.id AS product_detail_id,
       details.offer_id, publications.wp_post_id, publications.wp_url,
@@ -1534,7 +1578,7 @@ export function createDatabase(databaseUrl) {
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
     recoverPendingProductAudits,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
-    getWordPressPublication, findShopifySource, getShopifyPublication,
+    getWordPressPublication, resolveWordPressPublication, findShopifySource, getShopifyPublication,
     saveShopifyPublication, listWordPressPublicationDates, listWordPressArrivalDates,
     saveWordPressArrivalDate, auditAndRepairProductPrices,
     saveWordPressPublication, createProductRagSync, startProductRagSync,

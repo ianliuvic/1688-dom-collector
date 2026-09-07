@@ -572,6 +572,12 @@ function wordpressClient(config) {
   };
 }
 
+export async function resolveWordPressProduct(identifier, config) {
+  const wp = wordpressClient(config);
+  const query = new URLSearchParams(identifier).toString();
+  return wp(`/wp-json/hx/v1/products/resolve?${query}`, { timeoutMs: 30000 });
+}
+
 export async function prepareWordPressProductDraft({
   detail, translation, options = {}, config, reserveStyleNumber = false,
 }) {
