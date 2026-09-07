@@ -17,6 +17,7 @@ RUN npm ci --omit=dev
 
 COPY src ./src
 COPY public ./public
+COPY scripts ./scripts
 COPY start-collector.sh /usr/local/bin/start-collector.sh
 RUN mkdir -p /app/storage/browser-profile /app/storage/captures \
     && chmod 0755 /usr/local/bin/start-collector.sh \

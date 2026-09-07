@@ -482,6 +482,75 @@ function extensionForMime(mimeType) {
   return map[mimeType] || 'jpg';
 }
 
+export function isValidImagePayload(contentType, binary) {
+  if (!String(contentType || '').toLowerCase().startsWith('image/')) return false;
+  if (!Buffer.isBuffer(binary) || binary.length < 1024) return false;
+  const isJpeg = binary[0] === 0xff && binary[1] === 0xd8 && binary[2] === 0xff;
+  const isPng = binary.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const isGif = ['GIF87a', 'GIF89a'].includes(binary.subarray(0, 6).toString('ascii'));
+  const isWebp = binary.subarray(0, 4).toString('ascii') === 'RIFF'
+    && binary.subarray(8, 12).toString('ascii') === 'WEBP';
+  const isAvif = binary.subarray(4, 8).toString('ascii') === 'ftyp'
+    && ['avif', 'avis'].includes(binary.subarray(8, 12).toString('ascii'));
+  return isJpeg || isPng || isGif || isWebp || isAvif;
+}
+
+async function verifyPublicImage(url, { attempts = 2 } = {}) {
+  let last = { ok: false, status: 0, contentType: '', bytes: 0 };
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+          'User-Agent': 'Mozilla/5.0 (compatible; WearHongxiuImageVerifier/1.0)',
+        },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(30000),
+      });
+      const binary = Buffer.from(await response.arrayBuffer());
+      const contentType = clean(response.headers.get('content-type')).toLowerCase();
+      last = { ok: response.ok && isValidImagePayload(contentType, binary),
+        status: response.status, contentType, bytes: binary.length };
+      if (last.ok) return last;
+    } catch (error) {
+      last = { ok: false, status: 0, contentType: '', bytes: 0, error: error.message };
+    }
+    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+  }
+  return last;
+}
+
+async function uploadVerifiedWordPressImage({ wp, draft, detail, image, index, binary, mimeType }) {
+  const sourceKeyHash = crypto.createHash('sha1').update(clean(image.source_url)).digest('hex');
+  const contentHash = crypto.createHash('sha256').update(binary).digest('hex').slice(0, 16);
+  let lastVerification = null;
+  for (let uploadAttempt = 0; uploadAttempt < 2; uploadAttempt += 1) {
+    const repairSuffix = uploadAttempt
+      ? `:availability-repair:${contentHash}:${Date.now()}` : '';
+    const uploaded = await wp('/wp-json/hx/v1/products/media/ensure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        external_id: draft.externalId,
+        source_key: `1688:${detail.offer_id}:${image.image_type}:${image.sort_order}:${sourceKeyHash}${repairSuffix}`,
+        local_url: clean(image.source_url),
+        filename: `${draft.styleNo}-${index + 1}${uploadAttempt ? '-availability-repair' : ''}.${extensionForMime(mimeType)}`,
+        mime_type: mimeType,
+        alt: draft.payload.images[index]?.alt || draft.payload.title,
+        base64: binary.toString('base64'),
+      }),
+      timeoutMs: 120000,
+    });
+    const url = clean(uploaded.url);
+    lastVerification = url ? await verifyPublicImage(url) : {
+      ok: false, status: 0, contentType: '', bytes: 0, error: 'WordPress returned no media URL.',
+    };
+    if (lastVerification.ok) return { uploaded, verification: lastVerification,
+      repaired: uploadAttempt > 0 };
+  }
+  throw new Error(`WordPress image availability verification failed (${lastVerification?.status || 'network'}).`);
+}
+
 function wordpressClient(config) {
   const baseUrl = clean(config.wordpressBaseUrl).replace(/\/+$/, '');
   const username = clean(config.wordpressUsername);
@@ -562,25 +631,15 @@ export async function publishProductToWordPress({ detail, translation, options =
     const absolutePath = resolveStorageFile(config.storagePath, image.storage_path);
     const binary = await fs.readFile(absolutePath);
     const mimeType = clean(image.mime_type) || 'image/jpeg';
-    const sourceKeyHash = crypto.createHash('sha1').update(clean(image.source_url)).digest('hex');
-    const uploaded = await wp('/wp-json/hx/v1/products/media/ensure', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        external_id: draft.externalId,
-        source_key: `1688:${detail.offer_id}:${image.image_type}:${image.sort_order}:${sourceKeyHash}`,
-        local_url: clean(image.source_url),
-        filename: `${draft.styleNo}-${index + 1}.${extensionForMime(mimeType)}`,
-        mime_type: mimeType,
-        alt: draft.payload.images[index]?.alt || draft.payload.title,
-        base64: binary.toString('base64'),
-      }),
-      timeoutMs: 120000,
+    const { uploaded, verification, repaired } = await uploadVerifiedWordPressImage({
+      wp, draft, detail, image, index, binary, mimeType,
     });
     media.push({
       sourceImageId: String(image.id),
       attachmentId: Number(uploaded.attachment_id || uploaded.id),
       url: clean(uploaded.url),
+      verification,
+      repaired,
     });
   }
 

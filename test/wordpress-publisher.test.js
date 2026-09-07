@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildWordPressProductDraft, buildWearHongxiuPricing,
-  get1688ArrivalDate, normalizePublicationDate,
+  get1688ArrivalDate, isValidImagePayload, normalizePublicationDate,
   refreshWordPressProductPricingPayload } from '../src/wordpress-publisher.js';
 
 const detail = {
@@ -169,4 +169,13 @@ test('requires an allocated wearhongxiu style number instead of reusing the 1688
     options: { categoryIds: [35], primaryCategoryId: 35 },
     taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] } }),
   /style number allocation/);
+});
+
+test('accepts real image signatures and rejects an HTML error body', () => {
+  const webp = Buffer.alloc(1024);
+  webp.write('RIFF', 0, 'ascii');
+  webp.write('WEBP', 8, 'ascii');
+  assert.equal(isValidImagePayload('image/webp', webp), true);
+  assert.equal(isValidImagePayload('text/html', Buffer.alloc(6192)), false);
+  assert.equal(isValidImagePayload('image/webp', Buffer.from('not really an image')), false);
 });
