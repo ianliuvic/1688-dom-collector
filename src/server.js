@@ -715,6 +715,70 @@ app.get('/api/product-details/:id/wordpress', { preHandler: requireApiKey }, asy
   return db.getWordPressPublication(detail.id);
 });
 
+app.get('/api/shopify/source-match', { preHandler: requireApiKey }, async (request, reply) => {
+  const wpPostId = Number(request.query?.wpPostId);
+  const styleNo = String(request.query?.styleNo ?? '').trim();
+  const store = String(request.query?.store ?? '').trim().toLowerCase();
+  if (!Number.isSafeInteger(wpPostId) || wpPostId <= 0
+      || !/^[A-Za-z0-9_-]{2,40}$/.test(styleNo)
+      || !/^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/.test(store)) {
+    return reply.code(400).send({ error: 'valid wpPostId, styleNo, and store are required' });
+  }
+  const matches = await db.findShopifySource({ wpPostId, styleNo, shopifyStore: store });
+  if (matches.length === 0) return reply.code(404).send({ error: 'not_found' });
+  if (matches.length !== 1) {
+    return reply.code(409).send({ error: 'ambiguous_source_mapping', matches: matches.length });
+  }
+  return matches[0];
+});
+
+app.get('/api/product-details/:id/shopify', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const store = String(request.query?.store ?? '').trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/.test(store)) {
+    return reply.code(400).send({ error: 'valid store hostname is required' });
+  }
+  return (await db.getShopifyPublication(detail.id, store))
+    ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.post('/api/product-details/:id/shopify', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const body = request.body ?? {};
+  const store = String(body.shopifyStore ?? '').trim().toLowerCase();
+  const gid = String(body.shopifyProductGid ?? '').trim();
+  const handle = String(body.shopifyHandle ?? '').trim();
+  const url = String(body.shopifyUrl ?? '').trim();
+  const productStatus = String(body.productStatus ?? '').trim().toUpperCase();
+  const publicationStatus = String(body.publicationStatus ?? '').trim().toLowerCase();
+  let parsedUrl;
+  try { parsedUrl = new URL(url); } catch { parsedUrl = null; }
+  if (!/^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/.test(store)
+      || !/^gid:\/\/shopify\/Product\/\d+$/.test(gid)
+      || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(handle)
+      || !parsedUrl || parsedUrl.protocol !== 'https:'
+      || parsedUrl.hostname.toLowerCase() !== store
+      || !['ACTIVE', 'DRAFT', 'ARCHIVED'].includes(productStatus)
+      || !['published', 'unpublished'].includes(publicationStatus)) {
+    return reply.code(400).send({ error: 'invalid_shopify_publication' });
+  }
+  const saved = await db.saveShopifyPublication(detail.id, {
+    shopifyStore: store, shopifyProductGid: gid, shopifyHandle: handle,
+    shopifyUrl: url, productStatus, publicationStatus,
+    sourceWpPostId: Number.isSafeInteger(Number(body.sourceWpPostId))
+      ? Number(body.sourceWpPostId) : null,
+    sourceStyleNo: typeof body.sourceStyleNo === 'string' ? body.sourceStyleNo.trim() : null,
+    syncHash: typeof body.syncHash === 'string' ? body.syncHash : null,
+    payload: body.payload && typeof body.payload === 'object' ? body.payload : {},
+    result: body.result && typeof body.result === 'object' ? body.result : {},
+    lastError: typeof body.lastError === 'string' ? body.lastError : null,
+    verified: body.verified === true,
+  });
+  return reply.code(200).send(saved);
+});
+
 app.post('/api/product-details/:id/wordpress/unpublish', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });

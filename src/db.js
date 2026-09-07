@@ -332,6 +332,33 @@ export function createDatabase(databaseUrl) {
         ON product_wordpress_publications(wp_post_id);
       CREATE INDEX IF NOT EXISTS product_wordpress_publications_external_idx
         ON product_wordpress_publications(external_id);
+      CREATE TABLE IF NOT EXISTS product_shopify_publications (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        shopify_store text NOT NULL,
+        shopify_product_gid text NOT NULL,
+        shopify_handle text NOT NULL,
+        shopify_url text NOT NULL,
+        product_status text NOT NULL,
+        publication_status text NOT NULL,
+        source_wp_post_id bigint,
+        source_style_no text,
+        sync_hash text,
+        payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+        result jsonb NOT NULL DEFAULT '{}'::jsonb,
+        last_error text,
+        first_published_at timestamptz,
+        last_synced_at timestamptz NOT NULL DEFAULT now(),
+        last_verified_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (product_detail_id, shopify_store),
+        UNIQUE (shopify_store, shopify_product_gid)
+      );
+      CREATE INDEX IF NOT EXISTS product_shopify_publications_handle_idx
+        ON product_shopify_publications(shopify_store, shopify_handle);
+      CREATE INDEX IF NOT EXISTS product_shopify_publications_wp_post_idx
+        ON product_shopify_publications(source_wp_post_id);
       CREATE TABLE IF NOT EXISTS product_rag_syncs (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -1125,6 +1152,66 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  async function findShopifySource({ wpPostId, styleNo, shopifyStore }) {
+    const result = await pool.query(`SELECT details.id AS product_detail_id,
+      details.offer_id, publications.wp_post_id, publications.wp_url,
+      publications.style_no, shopify.id AS shopify_publication_id,
+      shopify.shopify_store, shopify.shopify_product_gid,
+      shopify.shopify_handle, shopify.shopify_url, shopify.product_status,
+      shopify.publication_status, shopify.first_published_at,
+      shopify.last_synced_at, shopify.last_verified_at
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id=publications.product_detail_id
+      LEFT JOIN product_shopify_publications shopify
+        ON shopify.product_detail_id=details.id AND shopify.shopify_store=$3
+      WHERE publications.wp_post_id=$1
+        AND upper(publications.style_no)=upper($2)
+      ORDER BY shopify.updated_at DESC NULLS LAST`, [wpPostId, styleNo, shopifyStore]);
+    return result.rows;
+  }
+
+  async function getShopifyPublication(productDetailId, shopifyStore) {
+    const result = await pool.query(`SELECT * FROM product_shopify_publications
+      WHERE product_detail_id=$1 AND shopify_store=$2`, [productDetailId, shopifyStore]);
+    return result.rows[0] ?? null;
+  }
+
+  async function saveShopifyPublication(productDetailId, values) {
+    const saved = await pool.query(`INSERT INTO product_shopify_publications
+      (product_detail_id, shopify_store, shopify_product_gid, shopify_handle,
+       shopify_url, product_status, publication_status, source_wp_post_id,
+       source_style_no, sync_hash, payload, result, last_error,
+       first_published_at, last_synced_at, last_verified_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+        CASE WHEN $7='published' THEN now() ELSE NULL END, now(),
+        CASE WHEN $14::boolean THEN now() ELSE NULL END)
+      ON CONFLICT (product_detail_id, shopify_store) DO UPDATE SET
+        shopify_product_gid=EXCLUDED.shopify_product_gid,
+        shopify_handle=EXCLUDED.shopify_handle,
+        shopify_url=EXCLUDED.shopify_url,
+        product_status=EXCLUDED.product_status,
+        publication_status=EXCLUDED.publication_status,
+        source_wp_post_id=COALESCE(EXCLUDED.source_wp_post_id,
+          product_shopify_publications.source_wp_post_id),
+        source_style_no=COALESCE(EXCLUDED.source_style_no,
+          product_shopify_publications.source_style_no),
+        sync_hash=EXCLUDED.sync_hash, payload=EXCLUDED.payload,
+        result=EXCLUDED.result, last_error=EXCLUDED.last_error,
+        first_published_at=COALESCE(product_shopify_publications.first_published_at,
+          EXCLUDED.first_published_at),
+        last_synced_at=now(),
+        last_verified_at=CASE WHEN $14::boolean THEN now()
+          ELSE product_shopify_publications.last_verified_at END,
+        updated_at=now()
+      RETURNING *`, [productDetailId, values.shopifyStore, values.shopifyProductGid,
+      values.shopifyHandle, values.shopifyUrl, values.productStatus,
+      values.publicationStatus, values.sourceWpPostId ?? null,
+      values.sourceStyleNo ?? null, values.syncHash ?? null,
+      JSON.stringify(values.payload ?? {}), JSON.stringify(values.result ?? {}),
+      values.lastError ?? null, Boolean(values.verified)]);
+    return saved.rows[0];
+  }
+
   async function listWordPressPublicationDates() {
     const result = await pool.query(`SELECT publications.product_detail_id,
       publications.wp_post_id, publications.external_id,
@@ -1330,6 +1417,9 @@ export function createDatabase(databaseUrl) {
         (SELECT count(DISTINCT product_detail_id)::int FROM product_detail_translations) AS translated_products,
         (SELECT count(*)::int FROM product_wordpress_publications) AS publication_records,
         (SELECT count(*)::int FROM product_wordpress_publications WHERE wp_status='publish') AS published_products,
+        (SELECT count(*)::int FROM product_shopify_publications) AS shopify_publication_records,
+        (SELECT count(*)::int FROM product_shopify_publications
+          WHERE publication_status='published') AS shopify_published_products,
         (SELECT count(*)::int FROM product_details d WHERE NOT EXISTS
           (SELECT 1 FROM product_wordpress_publications w WHERE w.product_detail_id=d.id)) AS unpublished_captures`),
       pool.query(`SELECT s.id, coalesce(s.shop_name,s.domain) AS shop_name, s.domain,
@@ -1444,7 +1534,8 @@ export function createDatabase(databaseUrl) {
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
     recoverPendingProductAudits,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
-    getWordPressPublication, listWordPressPublicationDates, listWordPressArrivalDates,
+    getWordPressPublication, findShopifySource, getShopifyPublication,
+    saveShopifyPublication, listWordPressPublicationDates, listWordPressArrivalDates,
     saveWordPressArrivalDate, auditAndRepairProductPrices,
     saveWordPressPublication, createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats, ping };
