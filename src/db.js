@@ -1181,7 +1181,10 @@ export function createDatabase(databaseUrl) {
       publications.first_published_at, publications.last_synced_at,
       details.offer_id, details.source_url, details.canonical_url,
       details.title AS source_title, details.price_min, details.price_max,
-      details.currency, details.stock_total, details.last_crawled_at,
+      details.currency,
+      (SELECT sum(stock) FROM product_detail_skus
+        WHERE product_detail_id=details.id) AS stock_total,
+      details.last_crawled_at,
       translations.title AS translated_title,
       translations.description AS translated_description
       FROM product_wordpress_publications publications
