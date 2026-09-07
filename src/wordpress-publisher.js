@@ -578,6 +578,21 @@ export async function resolveWordPressProduct(identifier, config) {
   return wp(`/wp-json/hx/v1/products/resolve?${query}`, { timeoutMs: 30000 });
 }
 
+export async function updateWordPressProductStyleNumber({ publication, styleNo, config }) {
+  const wp = wordpressClient(config);
+  const payload = structuredClone(publication?.payload ?? {});
+  if (!payload.external_id) throw new Error('The saved WordPress publication has no external ID.');
+  payload.style_no = clean(styleNo);
+  payload.meta = { ...(payload.meta ?? {}), sku: payload.style_no };
+  const result = await wp('/wp-json/hx/v1/products/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    timeoutMs: 60000,
+  });
+  return { payload, wordpress: result };
+}
+
 export async function prepareWordPressProductDraft({
   detail, translation, options = {}, config, reserveStyleNumber = false,
 }) {

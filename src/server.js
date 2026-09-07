@@ -13,7 +13,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   get1688ArrivalDate, setWordPressProductArrivalDate,
   setWordPressProductPublicationDate, setWordPressProductStatus,
   syncWordPressProductPricing, replaceWordPressBestSellers,
-  resolveWordPressProduct } from './wordpress-publisher.js';
+  resolveWordPressProduct, updateWordPressProductStyleNumber } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -744,6 +744,40 @@ app.get('/api/wordpress/products/resolve', { preHandler: requireApiKey }, async 
   } catch (error) {
     request.log.warn({ err: error, identifier: identifier.kind }, 'Product resolver fallback failed');
     return reply.code(404).send({ error: 'product_not_found', message: error.message });
+  }
+});
+
+app.post('/api/product-details/:id/wordpress/style-number', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const publication = await db.getWordPressPublication(detail.id);
+  if (!publication?.wp_post_id) return reply.code(409).send({ error: 'wordpress_publication_required' });
+  const styleNo = String(request.body?.styleNo ?? '').trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9_-]{1,39}$/.test(styleNo)) {
+    return reply.code(400).send({ error: 'invalid_style_number' });
+  }
+  const conflicts = await db.resolveWordPressPublication({ styleNo });
+  if (conflicts.some((row) => Number(row.product_detail_id) !== Number(detail.id))) {
+    return reply.code(409).send({ error: 'style_number_conflict' });
+  }
+  try {
+    const synced = await updateWordPressProductStyleNumber({ publication, styleNo, config });
+    const wp = synced.wordpress;
+    const syncHash = crypto.createHash('sha256').update(JSON.stringify(synced.payload)).digest('hex');
+    const saved = await db.saveWordPressPublication(detail.id, {
+      translationId: publication.translation_id, externalId: publication.external_id,
+      styleNo, wpPostId: wp.post_id ?? publication.wp_post_id,
+      wpUrl: wp.permalink ?? publication.wp_url, wpEditUrl: wp.edit_link ?? publication.wp_edit_url,
+      wpStatus: wp.status ?? publication.wp_status, syncHash, payload: synced.payload,
+      result: { ...(publication.result ?? {}), ...wp }, lastError: null,
+    });
+    const rag = await scheduleProductRagSync(detail.id, { trigger: 'wordpress_style_number_update' });
+    return { status: 'updated', productDetailId: detail.id, oldStyleNo: publication.style_no,
+      styleNo: saved.style_no, wordpressPostId: saved.wp_post_id,
+      ragSyncScheduled: rag.scheduled };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: detail.id }, 'WordPress style number update failed');
+    return reply.code(502).send({ error: 'wordpress_style_number_update_failed', message: error.message });
   }
 });
 
