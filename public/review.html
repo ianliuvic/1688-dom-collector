@@ -99,6 +99,7 @@
   </div>
 
   <div id="error" class="error"></div>
+  <div id="trunc" class="notice" style="display:none;background:var(--amber2);border-color:#f0dcbb;color:var(--amber)"></div>
 
   <nav class="tabs" id="tabs"></nav>
 
@@ -143,6 +144,21 @@ function warningRow(w) {
   </div>`;
 }
 
+function blockersHtml(item) {
+  if (item.bucket === 'published') {
+    return item.blockingWarnings.length
+      ? `<details><summary>发布时的审计问题 ${item.blockingWarnings.length} 条 · 该商品已发布，仅供参考</summary><div style="margin-top:8px">${item.blockingWarnings.map(warningRow).join('')}</div></details>`
+      : '';
+  }
+  if (item.blockingWarnings.length) {
+    return `<div class="block red"><h4>发布卡点 · ${item.blockingWarnings.length} 项</h4>${item.blockingWarnings.map(warningRow).join('')}</div>`;
+  }
+  if (item.bucket === 'ready_to_publish') {
+    return `<div class="block" style="background:var(--green2);border:1px solid #c9e4d5"><h4>无发布卡点</h4>审计未发现需要人工判断的问题，可按现有规则发布。</div>`;
+  }
+  return '';
+}
+
 function card(item) {
   const images = item.images.length ? item.images : [];
   const main = images.find((i) => i.type === 'main') || images[0];
@@ -151,11 +167,7 @@ function card(item) {
     ? `<img class="shot" src="${esc(main.sourceUrl)}" alt="" data-full="${esc(main.sourceUrl)}" loading="lazy">`
     : `<div class="shot" style="display:grid;place-items:center;color:var(--muted);font-size:12px">无图片</div>`;
   const thumbHtml = thumbs.map((t) => `<img src="${esc(t.sourceUrl)}" alt="" data-full="${esc(t.sourceUrl)}" loading="lazy">`).join('');
-  const blocking = item.blockingWarnings.length
-    ? `<div class="block red"><h4>发布卡点 · ${item.blockingWarnings.length} 项</h4>${item.blockingWarnings.map(warningRow).join('')}</div>`
-    : item.bucket === 'published'
-      ? ''
-      : `<div class="block" style="background:var(--green2);border:1px solid #c9e4d5"><h4>无发布卡点</h4>审计未发现需要人工判断的问题。</div>`;
+  const blocking = blockersHtml(item);
   const rerun = item.bucket === 'needs_audit_rerun'
     ? `<div class="block amber"><h4>审计未完成</h4>图片审计：${esc(item.imageAudit.runStatus ?? '无记录')}${item.imageAudit.error ? ` · ${esc(item.imageAudit.error)}` : ''}<br>SKU 审计：${esc(item.skuAudit.runStatus ?? '无记录')}${item.skuAudit.error ? ` · ${esc(item.skuAudit.error)}` : ''}</div>`
     : '';
@@ -230,10 +242,17 @@ function render() {
   $('list').innerHTML = rows.length
     ? rows.map(card).join('')
     : '<div class="empty">这个筛选下没有商品。切换到「全部」或清空搜索看看。</div>';
-  const stamp = state.data ? new Date(state.data.generatedAt).toLocaleString('zh-CN') : null;
+  const data = state.data;
+  const stamp = data ? new Date(data.generatedAt).toLocaleString('zh-CN') : null;
   $('generated').textContent = stamp ?? '—';
-  $('days').textContent = state.data?.window?.days ?? 30;
+  $('days').textContent = data?.window?.days ?? 30;
   $('stamp').textContent = stamp ? `生成于 ${stamp}` : '连接中…';
+  if (data?.truncated) {
+    $('trunc').textContent = `本次只读取了最近 ${data.scanned} 条（已达上限）。未发布商品已优先排入，但更早的已发布记录可能未包含在内。`;
+    $('trunc').style.display = 'block';
+  } else {
+    $('trunc').style.display = 'none';
+  }
 }
 
 function fillShops() {

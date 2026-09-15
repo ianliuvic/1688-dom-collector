@@ -21,7 +21,7 @@ import { buildRagProduct, createRagClient } from './rag-client.js';
 import { analyzeProductDuplicates } from './duplicate-analyzer.js';
 import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
-import { buildReviewItem, summarizeReviewQueue } from './review-queue.js';
+import { buildReviewQueue } from './review-queue.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -513,14 +513,17 @@ app.get('/api/review/queue', { preHandler: requireDashboardAuth }, async (reques
     const limit = request.query?.limit;
     const shopId = request.query?.shopId ?? null;
     const rows = await db.listReviewQueue({ limit, days, shopId });
+    const window = {
+      days: Number(days) || 30,
+      limit: Number(limit) || 300,
+      shopId: shopId === null || shopId === '' ? null : Number(shopId),
+    };
     return {
       generatedAt: new Date().toISOString(),
-      window: {
-        days: Number(days) || 30,
-        limit: Number(limit) || 300,
-        shopId: shopId === null || shopId === '' ? null : Number(shopId),
-      },
-      ...summarizeReviewQueue(rows.map(buildReviewItem)),
+      window,
+      scanned: rows.length,
+      truncated: rows.length >= window.limit,
+      ...buildReviewQueue(rows),
     };
   } catch (error) {
     request.log.error({ err: error }, 'failed to build review queue');

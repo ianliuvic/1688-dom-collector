@@ -1645,7 +1645,10 @@ export function createDatabase(databaseUrl) {
       ) images ON true
       WHERE details.last_crawled_at >= now() - ($2::int * interval '1 day')
         AND ($3::bigint IS NULL OR source.shop_id = $3::bigint)
-      ORDER BY details.last_crawled_at DESC
+      -- Unpublished products come first so a busy window can never truncate the
+      -- work that still needs a human; published ones fill the remainder.
+      ORDER BY (publication.wp_status IS DISTINCT FROM 'publish') DESC,
+        details.last_crawled_at DESC
       LIMIT $1`, [safeLimit, safeDays, normalizedShopId]);
     return result.rows;
   }

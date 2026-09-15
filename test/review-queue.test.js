@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildReviewItem, buildAuditView, classifyAuditWarnings } from '../src/review-queue.js';
+import { buildReviewItem, buildReviewQueue, buildAuditView, classifyAuditWarnings } from '../src/review-queue.js';
 
 // Shapes below mirror real auditor output pulled from production audits.
 const warn = (code, severity, extra = {}) => ({ code, severity, ...extra });
@@ -166,4 +166,32 @@ test('an audit view without a result object is still safe', () => {
   const view = buildAuditView({ runStatus: 'completed', result: null });
   assert.deepEqual(view.blocking, []);
   assert.equal(view.usable, true);
+});
+
+// Regression: the page rendered its counters but no products because the API
+// response carried the summary without the items themselves.
+test('buildReviewQueue returns items next to the counters', () => {
+  const queue = buildReviewQueue([
+    row({ id: 1 }),
+    row({ id: 2, sku_audit_result: { warnings: [warn('sku_row_dimension_mismatch', 'review')] } }),
+    row({ id: 3, sku_audit_run_status: null, sku_audit_status: null }),
+  ]);
+  assert.equal(queue.items.length, 3);
+  assert.deepEqual(queue.items.map((i) => i.id), [1, 2, 3]);
+  assert.deepEqual(queue.counts, {
+    total: 3, needs_review: 1, needs_audit_rerun: 1, ready_to_publish: 1, published: 0,
+  });
+});
+
+test('the blocking-code distribution ignores published history', () => {
+  const queue = buildReviewQueue([
+    row({
+      id: 1,
+      wp_status: 'publish',
+      sku_audit_result: { warnings: [warn('nonstandard_size_names', 'review')] },
+    }),
+    row({ id: 2, sku_audit_result: { warnings: [warn('sku_row_dimension_mismatch', 'review')] } }),
+  ]);
+  assert.deepEqual(queue.topBlockingCodes, [{ label: 'sku_row_dimension_mismatch', products: 1 }]);
+  assert.deepEqual(queue.pendingByShop, [{ label: '测试店铺', products: 1 }]);
 });

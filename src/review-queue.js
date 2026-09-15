@@ -162,13 +162,15 @@ export function summarizeReviewQueue(items) {
   const shopCounts = new Map();
   for (const item of items) {
     counts[item.bucket] = (counts[item.bucket] ?? 0) + 1;
+    // Published products keep the warnings their audits reported, but those are
+    // history: they must not shape the "what is blocking work today" summary.
+    const pending = item.bucket === 'needs_review' || item.bucket === 'needs_audit_rerun';
+    if (!pending) continue;
     for (const warning of item.blockingWarnings) {
       codeCounts.set(warning.code, (codeCounts.get(warning.code) ?? 0) + 1);
     }
-    if (item.bucket === 'needs_review' || item.bucket === 'needs_audit_rerun') {
-      const shop = item.shopName ?? '未知店铺';
-      shopCounts.set(shop, (shopCounts.get(shop) ?? 0) + 1);
-    }
+    const shop = item.shopName ?? '未知店铺';
+    shopCounts.set(shop, (shopCounts.get(shop) ?? 0) + 1);
   }
   const rank = (map) => [...map.entries()]
     .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
