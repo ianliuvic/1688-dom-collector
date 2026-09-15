@@ -29,14 +29,18 @@ const UNUSABLE_AUDIT_CODES = new Set([
   'invalid_json_response',
 ]);
 
-export const REVIEW_BUCKETS = ['needs_review', 'needs_audit_rerun', 'ready_to_publish', 'published'];
+export const REVIEW_BUCKETS = ['needs_review', 'needs_audit_rerun', 'ready_to_publish', 'source_policy_skipped', 'published'];
 
 export const REVIEW_BUCKET_LABELS = {
   needs_review: '待人工审核',
   needs_audit_rerun: '需重跑审计',
   ready_to_publish: '可放行',
+  source_policy_skipped: '来源策略跳过',
   published: '已发布',
 };
+
+// Buckets that represent work a human can act on.
+const ACTIONABLE_BUCKETS = new Set(['needs_review', 'needs_audit_rerun']);
 
 export function classifyAuditWarnings(result) {
   const raw = result && typeof result === 'object' && Array.isArray(result.warnings) ? result.warnings : [];
@@ -103,9 +107,13 @@ export function buildReviewItem(row) {
   const blockingWarnings = [...imageAudit.blocking, ...skuAudit.blocking, ...buildPolicyBlockers(row)];
   const published = row.wp_status === 'publish';
   const needsRerun = !imageAudit.usable || !skuAudit.usable;
+  // Legacy captures from a shop whose source category is not an allowed swim
+  // cover-up can never be published, so they must not queue up as human work.
+  const sourceSkipped = row.ingestion_eligible === false || Boolean(row.ingestion_reason);
 
   let bucket = 'ready_to_publish';
   if (published) bucket = 'published';
+  else if (sourceSkipped) bucket = 'source_policy_skipped';
   else if (needsRerun) bucket = 'needs_audit_rerun';
   else if (blockingWarnings.length) bucket = 'needs_review';
 
@@ -129,6 +137,8 @@ export function buildReviewItem(row) {
     duplicateStatus: row.duplicate_status ?? null,
     duplicateDecision: row.duplicate_analysis?.decision ?? null,
     duplicateReason: row.duplicate_analysis?.reason ?? null,
+    sourceSkipped,
+    ingestionReason: row.ingestion_reason ?? null,
     publication: {
       status: row.wp_status ?? null,
       url: row.wp_url ?? null,
@@ -158,16 +168,23 @@ export function buildReviewQueue(rows) {
 export function summarizeReviewQueue(items) {
   const counts = { total: items.length };
   for (const bucket of REVIEW_BUCKETS) counts[bucket] = 0;
-  const codeCounts = new Map();
+  // Auditors spell the same cause differently (`nonstandard_variant_name`,
+  // `NON_STANDARD_VARIANT_NAME`), which would otherwise split one cause across
+  // several rows. Group on a punctuation- and case-insensitive key, then show
+  // the most common spelling.
+  const codeGroups = new Map();
   const shopCounts = new Map();
   for (const item of items) {
     counts[item.bucket] = (counts[item.bucket] ?? 0) + 1;
-    // Published products keep the warnings their audits reported, but those are
-    // history: they must not shape the "what is blocking work today" summary.
-    const pending = item.bucket === 'needs_review' || item.bucket === 'needs_audit_rerun';
-    if (!pending) continue;
+    // Published and source-policy-skipped products are not work: the first is
+    // history, the second can never be published. Neither may shape the
+    // "what is blocking work today" summary.
+    if (!ACTIONABLE_BUCKETS.has(item.bucket)) continue;
     for (const warning of item.blockingWarnings) {
-      codeCounts.set(warning.code, (codeCounts.get(warning.code) ?? 0) + 1);
+      const key = normalizeCodeKey(warning.code);
+      const spellings = codeGroups.get(key) ?? new Map();
+      spellings.set(warning.code, (spellings.get(warning.code) ?? 0) + 1);
+      codeGroups.set(key, spellings);
     }
     const shop = item.shopName ?? '未知店铺';
     shopCounts.set(shop, (shopCounts.get(shop) ?? 0) + 1);
@@ -175,7 +192,24 @@ export function summarizeReviewQueue(items) {
   const rank = (map) => [...map.entries()]
     .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
     .map(([label, products]) => ({ label, products }));
-  return { counts, topBlockingCodes: rank(codeCounts), pendingByShop: rank(shopCounts) };
+  const codes = [...codeGroups.entries()].map(([key, spellings]) => {
+    const entries = [...spellings.entries()];
+    const products = entries.reduce((sum, [, count]) => sum + count, 0);
+    const label = entries.sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      const aLower = a[0] === a[0].toLowerCase();
+      const bLower = b[0] === b[0].toLowerCase();
+      if (aLower !== bLower) return aLower ? -1 : 1;
+      return a[0].localeCompare(b[0]);
+    })[0][0];
+    return { key, label, products };
+  }).sort((a, b) => b.products - a.products || a.key.localeCompare(b.key))
+    .map(({ label, products }) => ({ label, products }));
+  return { counts, topBlockingCodes: codes, pendingByShop: rank(shopCounts) };
+}
+
+function normalizeCodeKey(code) {
+  return String(code ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
 function buildNotices(row, imageAudit) {

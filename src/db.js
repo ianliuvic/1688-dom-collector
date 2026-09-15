@@ -1583,6 +1583,7 @@ export function createDatabase(databaseUrl) {
       details.first_seen_at, details.last_crawled_at,
       source.shop_id, source.shop_name, source.category AS source_category,
       source.listing_time, source.availability_status, source.ingestion_reason,
+      source.ingestion_eligible,
       item_no.item_no,
       image_audit.audit_status AS image_audit_status,
       image_audit.status AS image_audit_run_status,
@@ -1603,7 +1604,8 @@ export function createDatabase(databaseUrl) {
       FROM product_details details
       LEFT JOIN LATERAL (
         SELECT products.shop_id, products.category, products.listing_time,
-          products.availability_status, products.ingestion_reason, shops.shop_name
+          products.availability_status, products.ingestion_reason,
+          products.ingestion_eligible, shops.shop_name
         FROM shop_products products
         JOIN shop_profiles shops ON shops.id = products.shop_id
         WHERE products.offer_id = details.offer_id

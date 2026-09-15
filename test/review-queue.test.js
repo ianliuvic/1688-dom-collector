@@ -179,8 +179,35 @@ test('buildReviewQueue returns items next to the counters', () => {
   assert.equal(queue.items.length, 3);
   assert.deepEqual(queue.items.map((i) => i.id), [1, 2, 3]);
   assert.deepEqual(queue.counts, {
-    total: 3, needs_review: 1, needs_audit_rerun: 1, ready_to_publish: 1, published: 0,
+    total: 3, needs_review: 1, needs_audit_rerun: 1, ready_to_publish: 1,
+    source_policy_skipped: 0, published: 0,
   });
+});
+
+test('legacy captures outside the source policy are not human work', () => {
+  const queue = buildReviewQueue([
+    row({
+      id: 1,
+      ingestion_eligible: false,
+      ingestion_reason: 'source_category_is_not_swim_coverup',
+      sku_audit_result: { warnings: [warn('sku_matrix_missing_color_dimension', 'review')] },
+    }),
+    row({ id: 2, sku_audit_result: { warnings: [warn('sku_row_dimension_mismatch', 'review')] } }),
+  ]);
+  assert.equal(queue.items[0].bucket, 'source_policy_skipped');
+  assert.equal(queue.counts.source_policy_skipped, 1);
+  // The skipped shop must not appear as pending work nor inflate the causes.
+  assert.deepEqual(queue.topBlockingCodes, [{ label: 'sku_row_dimension_mismatch', products: 1 }]);
+  assert.deepEqual(queue.pendingByShop, [{ label: '测试店铺', products: 1 }]);
+});
+
+test('the cause distribution merges auditor code casing variants', () => {
+  const queue = buildReviewQueue([
+    row({ id: 1, sku_audit_result: { warnings: [warn('nonstandard_variant_name', 'review')] } }),
+    row({ id: 2, sku_audit_result: { warnings: [warn('NON_STANDARD_VARIANT_NAME', 'review')] } }),
+  ]);
+  assert.deepEqual(queue.topBlockingCodes, [{ label: 'nonstandard_variant_name', products: 2 }]);
+  assert.equal(queue.counts.needs_review, 2);
 });
 
 test('the blocking-code distribution ignores published history', () => {

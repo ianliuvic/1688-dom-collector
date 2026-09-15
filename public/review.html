@@ -130,6 +130,7 @@ const TABS = [
   ['needs_review', '待人工审核', 'review'],
   ['needs_audit_rerun', '需重跑审计', 'rerun'],
   ['ready_to_publish', '可放行', 'ready'],
+  ['source_policy_skipped', '来源策略跳过', ''],
   ['published', '已发布', ''],
   ['all', '全部', ''],
 ];
@@ -149,6 +150,9 @@ function blockersHtml(item) {
     return item.blockingWarnings.length
       ? `<details><summary>发布时的审计问题 ${item.blockingWarnings.length} 条 · 该商品已发布，仅供参考</summary><div style="margin-top:8px">${item.blockingWarnings.map(warningRow).join('')}</div></details>`
       : '';
+  }
+  if (item.bucket === 'source_policy_skipped') {
+    return `<div class="block amber"><h4>来源策略跳过</h4>来源类目不符合泳装/罩衫允许范围（${esc(item.ingestionReason || 'source_category_is_not_swim_coverup')}），该商品不会发布，也无需人工审核。</div>`;
   }
   if (item.blockingWarnings.length) {
     return `<div class="block red"><h4>发布卡点 · ${item.blockingWarnings.length} 项</h4>${item.blockingWarnings.map(warningRow).join('')}</div>`;

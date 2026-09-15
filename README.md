@@ -87,8 +87,11 @@ replays those credentials on the same-origin fetch.
 
 `GET /api/review/queue` accepts optional `days` (default 30, window over
 `product_details.last_crawled_at`), `limit` (default 300, max 2000) and `shopId`.
-Every product is classified into `needs_review`, `needs_audit_rerun`,
-`ready_to_publish` or `published` by `src/review-queue.js`:
+Unpublished rows are returned first, so a busy window can never truncate the work
+that still needs a human; `truncated` reports when the limit was reached. Every
+product is classified into `needs_review`, `needs_audit_rerun`,
+`ready_to_publish`, `source_policy_skipped` or `published` by
+`src/review-queue.js`:
 
 - a warning blocks only when the auditor marks it `review`; `info` and `warning`
   entries are advisory;
@@ -97,7 +100,12 @@ Every product is classified into `needs_review`, `needs_audit_rerun`,
 - a first image that is not the front view, a single-colour-only dimension and
   similar-product candidates are notices, never blockers;
 - an unfinished, failed or non-JSON audit run means the audit has to be re-run
-  rather than judged by hand.
+  rather than judged by hand;
+- legacy captures whose source category is outside the shop's ingest policy
+  (`ingestion_eligible = false`) can never be published, so they get their own
+  bucket and stay out of the pending counts;
+- the cause/shop summaries only count actionable buckets, and merge auditor code
+  spellings that differ in case or underscores.
 
 The page never writes. Approve/hold/re-run actions are a later phase.
 
