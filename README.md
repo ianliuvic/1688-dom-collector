@@ -109,6 +109,12 @@ product is classified into `needs_review`, `needs_audit_rerun`,
 
 The page never writes. Approve/hold/re-run actions are a later phase.
 
+Images are served by `GET /api/review/image/:id` (Basic-protected) straight from
+the collector's own copy under `STORAGE_PATH`, because Alibaba's CDN answers 403
+when the `Referer` is not a 1688 page; a capture without a local file falls back
+to a redirect to its source URL, which is why the page also sends
+`referrerpolicy="no-referrer"`.
+
 ## Next phase
 
 The `login/` image provides a temporary, Basic-Auth-protected noVNC console. It

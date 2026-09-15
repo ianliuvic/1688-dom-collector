@@ -145,6 +145,10 @@ function warningRow(w) {
   </div>`;
 }
 
+// Alibaba's CDN returns 403 for a Referer that is not a 1688 page, so the page
+// prefers the collector's own copy of the image and always omits the Referer.
+const imgSrc = (image) => image.local && image.id ? `/api/review/image/${image.id}` : image.sourceUrl;
+
 function blockersHtml(item) {
   if (item.bucket === 'published') {
     return item.blockingWarnings.length
@@ -168,9 +172,9 @@ function card(item) {
   const main = images.find((i) => i.type === 'main') || images[0];
   const thumbs = images.filter((i) => i !== main).slice(0, 8);
   const shot = main
-    ? `<img class="shot" src="${esc(main.sourceUrl)}" alt="" data-full="${esc(main.sourceUrl)}" loading="lazy">`
+    ? `<img class="shot" src="${esc(imgSrc(main))}" alt="" data-full="${esc(imgSrc(main))}" referrerpolicy="no-referrer" loading="lazy">`
     : `<div class="shot" style="display:grid;place-items:center;color:var(--muted);font-size:12px">无图片</div>`;
-  const thumbHtml = thumbs.map((t) => `<img src="${esc(t.sourceUrl)}" alt="" data-full="${esc(t.sourceUrl)}" loading="lazy">`).join('');
+  const thumbHtml = thumbs.map((t) => `<img src="${esc(imgSrc(t))}" alt="" data-full="${esc(imgSrc(t))}" referrerpolicy="no-referrer" loading="lazy">`).join('');
   const blocking = blockersHtml(item);
   const rerun = item.bucket === 'needs_audit_rerun'
     ? `<div class="block amber"><h4>审计未完成</h4>图片审计：${esc(item.imageAudit.runStatus ?? '无记录')}${item.imageAudit.error ? ` · ${esc(item.imageAudit.error)}` : ''}<br>SKU 审计：${esc(item.skuAudit.runStatus ?? '无记录')}${item.skuAudit.error ? ` · ${esc(item.skuAudit.error)}` : ''}</div>`

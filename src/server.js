@@ -531,6 +531,43 @@ app.get('/api/review/queue', { preHandler: requireDashboardAuth }, async (reques
   }
 });
 
+// Product images for the review page. Alibaba's CDN answers 403 when the
+// Referer is not a 1688 page, so embedding the original URLs directly breaks in
+// the browser. Serving the copy the audit actually analysed keeps the page
+// same-origin; the CDN URL stays as a fallback for captures without a local file.
+app.get('/api/review/image/:id', { preHandler: requireDashboardAuth }, async (request, reply) => {
+  const id = Number(request.params?.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_image_id' });
+  let image;
+  try {
+    image = await db.getProductImage(id);
+  } catch (error) {
+    request.log.error({ err: error }, 'failed to load product image');
+    return reply.code(500).send({ error: 'image_lookup_failed' });
+  }
+  if (!image) return reply.code(404).send({ error: 'image_not_found' });
+
+  if (image.storage_path) {
+    const resolved = path.resolve(String(image.storage_path));
+    const root = path.resolve(config.storagePath);
+    if (resolved === root || resolved.startsWith(root + path.sep)) {
+      try {
+        const data = await fs.readFile(resolved);
+        return reply.type(image.mime_type || 'image/webp')
+          .header('Cache-Control', 'private, max-age=86400')
+          .send(data);
+      } catch (error) {
+        request.log.warn({ err: error, imageId: id }, 'local product image unreadable, falling back to source URL');
+      }
+    } else {
+      request.log.warn({ imageId: id, storagePath: image.storage_path }, 'refusing image outside the storage root');
+    }
+  }
+
+  if (!image.source_url) return reply.code(404).send({ error: 'image_unavailable' });
+  return reply.code(302).header('Location', String(image.source_url)).send();
+});
+
 app.get('/health', async (_request, reply) => {
   try {
     await db.ping();

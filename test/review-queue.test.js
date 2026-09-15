@@ -168,6 +168,20 @@ test('an audit view without a result object is still safe', () => {
   assert.equal(view.usable, true);
 });
 
+test('images expose the id and locality the page needs to stay same-origin', () => {
+  const item = buildReviewItem(row({
+    images: [
+      { id: 91, type: 'main', sortOrder: 0, sourceUrl: 'https://cdn.test/a.webp', local: true },
+      { id: null, type: 'gallery', sortOrder: 1, sourceUrl: 'https://cdn.test/b.webp', local: false },
+      { id: 93, type: 'gallery', sortOrder: 2, sourceUrl: null, local: true },
+    ],
+  }));
+  assert.deepEqual(item.images, [
+    { id: 91, type: 'main', sortOrder: 0, sourceUrl: 'https://cdn.test/a.webp', local: true },
+    { id: null, type: 'gallery', sortOrder: 1, sourceUrl: 'https://cdn.test/b.webp', local: false },
+  ]);
+});
+
 // Regression: the page rendered its counters but no products because the API
 // response carried the summary without the items themselves.
 test('buildReviewQueue returns items next to the counters', () => {

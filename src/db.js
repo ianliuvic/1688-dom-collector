@@ -1638,8 +1638,9 @@ export function createDatabase(databaseUrl) {
         ORDER BY syncs.created_at DESC LIMIT 1
       ) rag ON true
       LEFT JOIN LATERAL (
-        SELECT json_agg(json_build_object('type', images.image_type,
-          'sortOrder', images.sort_order, 'sourceUrl', images.source_url)
+        SELECT json_agg(json_build_object('id', images.id, 'type', images.image_type,
+          'sortOrder', images.sort_order, 'sourceUrl', images.source_url,
+          'local', images.storage_path IS NOT NULL)
           ORDER BY CASE images.image_type WHEN 'main' THEN 0 WHEN 'gallery' THEN 1 ELSE 2 END,
             images.sort_order) AS items
         FROM product_detail_images images
@@ -1653,6 +1654,12 @@ export function createDatabase(databaseUrl) {
         details.last_crawled_at DESC
       LIMIT $1`, [safeLimit, safeDays, normalizedShopId]);
     return result.rows;
+  }
+
+  async function getProductImage(id) {
+    const result = await pool.query(`SELECT id, product_detail_id, storage_path, mime_type,
+      source_url FROM product_detail_images WHERE id=$1`, [id]);
+    return result.rows[0] ?? null;
   }
 
   async function ping() {
@@ -1673,7 +1680,7 @@ export function createDatabase(databaseUrl) {
     saveWordPressArrivalDate, auditAndRepairProductPrices,
     saveWordPressPublication, createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
-    listReviewQueue, ping };
+    listReviewQueue, getProductImage, ping };
 }
 
 function parseScore(value) {

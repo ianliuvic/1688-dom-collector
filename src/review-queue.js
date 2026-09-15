@@ -151,9 +151,11 @@ export function buildReviewItem(row) {
     blockingWarnings,
     notices: buildNotices(row, imageAudit),
     images: Array.isArray(row.images) ? row.images.map((image) => ({
+      id: image?.id == null ? null : Number(image.id),
       type: image?.type ?? null,
       sortOrder: Number(image?.sortOrder ?? 0),
       sourceUrl: image?.sourceUrl ?? null,
+      local: image?.local === true,
     })).filter((image) => image.sourceUrl) : [],
     bucket,
     bucketLabel: REVIEW_BUCKET_LABELS[bucket],
