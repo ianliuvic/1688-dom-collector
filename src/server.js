@@ -21,6 +21,7 @@ import { buildRagProduct, createRagClient } from './rag-client.js';
 import { analyzeProductDuplicates } from './duplicate-analyzer.js';
 import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
+import { buildReviewItem, summarizeReviewQueue } from './review-queue.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -475,6 +476,7 @@ app.get('/', async () => ({
   name: '1688 DOM Collector',
   status: 'framework-ready',
   dashboard: '/dashboard',
+  review: '/review',
   browserMode: getBrowserModeStatus(),
   session: collector.getSessionStatus(),
 }));
@@ -497,6 +499,34 @@ app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () =
     },
   },
 }));
+
+// Read-only review queue. Same HTTP Basic gate as /dashboard: the page is served
+// by this app, so the browser replays the credentials on the same-origin fetch.
+app.get('/review', { preHandler: requireDashboardAuth }, async (_request, reply) => {
+  const html = await fs.readFile(new URL('../public/review.html', import.meta.url), 'utf8');
+  return reply.type('text/html; charset=utf-8').send(html);
+});
+
+app.get('/api/review/queue', { preHandler: requireDashboardAuth }, async (request, reply) => {
+  try {
+    const days = request.query?.days;
+    const limit = request.query?.limit;
+    const shopId = request.query?.shopId ?? null;
+    const rows = await db.listReviewQueue({ limit, days, shopId });
+    return {
+      generatedAt: new Date().toISOString(),
+      window: {
+        days: Number(days) || 30,
+        limit: Number(limit) || 300,
+        shopId: shopId === null || shopId === '' ? null : Number(shopId),
+      },
+      ...summarizeReviewQueue(rows.map(buildReviewItem)),
+    };
+  } catch (error) {
+    request.log.error({ err: error }, 'failed to build review queue');
+    return reply.code(500).send({ error: 'review_queue_failed', message: error.message });
+  }
+});
 
 app.get('/health', async (_request, reply) => {
   try {

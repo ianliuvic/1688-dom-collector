@@ -78,6 +78,29 @@ the normal `GET /api/jobs/:id` endpoint.
 `GET /api/jobs/:id` and `GET /api/session` use the same bearer token.
 `GET /api/jobs/:id/dom` downloads the archived HTML and is also bearer-token protected.
 
+## Review queue
+
+`GET /review` serves a read-only review page for captured products that a human
+still has to judge. It uses the same HTTP Basic credentials as `/dashboard`, and
+the page reads `GET /api/review/queue` (also Basic-protected) so the browser
+replays those credentials on the same-origin fetch.
+
+`GET /api/review/queue` accepts optional `days` (default 30, window over
+`product_details.last_crawled_at`), `limit` (default 300, max 2000) and `shopId`.
+Every product is classified into `needs_review`, `needs_audit_rerun`,
+`ready_to_publish` or `published` by `src/review-queue.js`:
+
+- a warning blocks only when the auditor marks it `review`; `info` and `warning`
+  entries are advisory;
+- a missing size chart is `review`-level but passes through, matching the
+  existing rule that keeps fresh data and falls back to the standard size chart;
+- a first image that is not the front view, a single-colour-only dimension and
+  similar-product candidates are notices, never blockers;
+- an unfinished, failed or non-JSON audit run means the audit has to be re-run
+  rather than judged by hand.
+
+The page never writes. Approve/hold/re-run actions are a later phase.
+
 ## Next phase
 
 The `login/` image provides a temporary, Basic-Auth-protected noVNC console. It

@@ -1568,6 +1568,88 @@ export function createDatabase(databaseUrl) {
     };
   }
 
+  // Feeds the read-only review page (`/review`): each captured product with its
+  // newest image/SKU audit, the shop row it came from, its publication and RAG
+  // state and its saved images. Classification happens in review-queue.js.
+  async function listReviewQueue({ limit = 300, days = 30, shopId = null } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 300, 1), 2000);
+    const safeDays = Math.min(Math.max(Number(days) || 30, 1), 3650);
+    const normalizedShopId = shopId === null || shopId === undefined || shopId === ''
+      ? null : Number(shopId);
+    const result = await pool.query(`SELECT details.id, details.offer_id, details.title,
+      details.source_url, details.currency, details.price_min, details.price_max,
+      details.gallery_verified_complete, details.gallery_image_count,
+      details.duplicate_status, details.duplicate_analysis,
+      details.first_seen_at, details.last_crawled_at,
+      source.shop_id, source.shop_name, source.category AS source_category,
+      source.listing_time, source.availability_status, source.ingestion_reason,
+      item_no.item_no,
+      image_audit.audit_status AS image_audit_status,
+      image_audit.status AS image_audit_run_status,
+      image_audit.error AS image_audit_error,
+      image_audit.summary AS image_audit_summary,
+      image_audit.result AS image_audit_result,
+      image_audit.completed_at AS image_audit_completed_at,
+      sku_audit.audit_status AS sku_audit_status,
+      sku_audit.status AS sku_audit_run_status,
+      sku_audit.error AS sku_audit_error,
+      sku_audit.summary AS sku_audit_summary,
+      sku_audit.result AS sku_audit_result,
+      sku_audit.completed_at AS sku_audit_completed_at,
+      publication.wp_status, publication.wp_url, publication.style_no,
+      publication.last_error AS publication_error,
+      rag.active AS rag_active, rag.status AS rag_status,
+      images.items AS images
+      FROM product_details details
+      LEFT JOIN LATERAL (
+        SELECT products.shop_id, products.category, products.listing_time,
+          products.availability_status, products.ingestion_reason, shops.shop_name
+        FROM shop_products products
+        JOIN shop_profiles shops ON shops.id = products.shop_id
+        WHERE products.offer_id = details.offer_id
+        ORDER BY products.last_crawled_at DESC LIMIT 1
+      ) source ON true
+      LEFT JOIN LATERAL (
+        SELECT attributes.value AS item_no FROM product_detail_attributes attributes
+        WHERE attributes.product_detail_id = details.id AND attributes.name = '货号'
+        ORDER BY attributes.sort_order LIMIT 1
+      ) item_no ON true
+      LEFT JOIN LATERAL (
+        SELECT audits.audit_status, audits.status, audits.error, audits.summary,
+          audits.result, audits.completed_at
+        FROM product_image_audits audits
+        WHERE audits.product_detail_id = details.id
+        ORDER BY audits.created_at DESC LIMIT 1
+      ) image_audit ON true
+      LEFT JOIN LATERAL (
+        SELECT audits.audit_status, audits.status, audits.error, audits.summary,
+          audits.result, audits.completed_at
+        FROM product_sku_audits audits
+        WHERE audits.product_detail_id = details.id
+        ORDER BY audits.created_at DESC LIMIT 1
+      ) sku_audit ON true
+      LEFT JOIN product_wordpress_publications publication
+        ON publication.product_detail_id = details.id
+      LEFT JOIN LATERAL (
+        SELECT syncs.active, syncs.status FROM product_rag_syncs syncs
+        WHERE syncs.product_detail_id = details.id
+        ORDER BY syncs.created_at DESC LIMIT 1
+      ) rag ON true
+      LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object('type', images.image_type,
+          'sortOrder', images.sort_order, 'sourceUrl', images.source_url)
+          ORDER BY CASE images.image_type WHEN 'main' THEN 0 WHEN 'gallery' THEN 1 ELSE 2 END,
+            images.sort_order) AS items
+        FROM product_detail_images images
+        WHERE images.product_detail_id = details.id
+      ) images ON true
+      WHERE details.last_crawled_at >= now() - ($2::int * interval '1 day')
+        AND ($3::bigint IS NULL OR source.shop_id = $3::bigint)
+      ORDER BY details.last_crawled_at DESC
+      LIMIT $1`, [safeLimit, safeDays, normalizedShopId]);
+    return result.rows;
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -1585,7 +1667,8 @@ export function createDatabase(databaseUrl) {
     saveShopifyPublication, listWordPressPublicationDates, listWordPressArrivalDates,
     saveWordPressArrivalDate, auditAndRepairProductPrices,
     saveWordPressPublication, createProductRagSync, startProductRagSync,
-    completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats, ping };
+    completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
+    listReviewQueue, ping };
 }
 
 function parseScore(value) {
