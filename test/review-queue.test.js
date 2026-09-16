@@ -90,11 +90,35 @@ test('a missing size chart passes through even at review level', () => {
   assert.equal(item.notices[0].code, 'first_image_not_front');
 });
 
-test('size-chart codes are matched case-insensitively', () => {
+test('the same cause spelling differently is still one cause', () => {
+  // Observed in production across model versions and between runs: V4.1-Flash
+  // mixes snake_case with ALL_CAPS_UNDERSCORE for identical meanings.
+  for (const code of ['missing_size_chart', 'MISSING_SIZE_CHART', 'SIZE_CHART_MISSING',
+    'size_chart_absent', 'SizeChartAbsent']) {
+    const { blocking, passThrough } = classifyAuditWarnings({ warnings: [warn(code, 'review')] });
+    assert.equal(blocking.length, 0, code);
+    assert.equal(passThrough.length, 1, code);
+  }
+});
+
+test('an unusable audit response is detected whatever the spelling', () => {
+  for (const code of ['model_response_not_json', 'MODEL_RESPONSE_NOT_JSON',
+    'modelResponseInvalid', 'invalid_json_response']) {
+    const { unusable } = classifyAuditWarnings({ warnings: [warn(code, 'review')] });
+    assert.equal(unusable.length, 1, code);
+  }
+});
+
+test('a real blocker stays a blocker under any spelling', () => {
   const { blocking } = classifyAuditWarnings({
-    warnings: [warn('MISSING_SIZE_CHART', 'review')],
+    warnings: [warn('COLOR_TEXT_IMAGE_INCONSISTENT', 'review')],
   });
-  assert.equal(blocking.length, 0);
+  assert.equal(blocking.length, 1);
+});
+
+test('a merely similar code is not over-allowed', () => {
+  const { blocking } = classifyAuditWarnings({ warnings: [warn('size_chart_not_standard', 'review')] });
+  assert.equal(blocking.length, 1);
 });
 
 test('an unusable auditor response needs a re-run instead of a human decision', () => {

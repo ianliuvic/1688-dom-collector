@@ -17,16 +17,22 @@
 // Auditors mix code casing (`missing_size_chart` vs `SIZE_CHART_MISSING`), so
 // codes are compared case-insensitively.
 
+// Warning codes are matched on a punctuation- and case-insensitive key: the
+// auditors already emit the same cause as `missing_size_chart`,
+// `SIZE_CHART_MISSING` and `size_chart_absent`, and V4.1-Flash mixes snake_case
+// with ALL_CAPS_UNDERSCORE spellings between runs.
 export const PASS_THROUGH_REVIEW_CODES = new Set([
-  'missing_size_chart',
+  'missingsizechart',
+  'sizechartmissing',
+  'sizechartabsent',
 ]);
 
 // These codes mean the auditor never produced a usable verdict: the audit has to
 // be re-run rather than judged by hand.
 const UNUSABLE_AUDIT_CODES = new Set([
-  'model_response_not_json',
-  'model_response_invalid',
-  'invalid_json_response',
+  'modelresponsenotjson',
+  'modelresponseinvalid',
+  'invalidjsonresponse',
 ]);
 
 export const REVIEW_BUCKETS = ['needs_review', 'needs_audit_rerun', 'ready_to_publish', 'source_policy_skipped', 'published'];
@@ -260,7 +266,7 @@ function normalizeWarning(warning) {
   if (!code) return null;
   return {
     code,
-    codeKey: code.toLowerCase(),
+    codeKey: normalizeCodeKey(code),
     severity: typeof warning.severity === 'string' && warning.severity.trim()
       ? warning.severity.trim().toLowerCase() : 'unknown',
     scope: typeof warning.scope === 'string' && warning.scope.trim() ? warning.scope.trim() : null,
