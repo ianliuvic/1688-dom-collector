@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { applyReasoning } from './model-request.js';
 
 const ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
@@ -19,12 +20,14 @@ function contentText(content) {
   return Array.isArray(content) ? content.map((part) => part?.text || '').join('') : String(content || '');
 }
 
-async function callVision(content, config, { model, maxTokens = 2500, label = 'gallery analysis' } = {}) {
+async function callVision(content, config, { model, maxTokens = 16000, label = 'gallery analysis' } = {}) {
   const response = await fetch(endpointFrom(config.baseUrl), {
     method: 'POST', headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content }],
-      response_format: { type: 'json_object' }, temperature: 0, max_tokens: maxTokens }),
-    signal: AbortSignal.timeout(180000),
+    // Thinking is billed as output, so the cap must leave room for the JSON answer.
+    body: JSON.stringify(applyReasoning({ model, messages: [{ role: 'user', content }],
+      response_format: { type: 'json_object' }, temperature: 0, max_tokens: maxTokens },
+    config.reasoningEffort)),
+    signal: AbortSignal.timeout(420000),
   });
   if (!response.ok) throw new Error(`DeepSeek ${label} failed (${response.status}).`);
   const payload = await response.json();
@@ -59,9 +62,9 @@ export async function analyzeGalleryImages({ images, config }) {
 6. duplicate_sets 只收录源自同一张原始照片或完全相同构图的图片；换背景、抠图、格式/缩放/轻微裁切、加文字或局部框仍算重复。相同商品但角度、姿势、摆放不同不算重复。置信度低于0.85不要列入。
 不要根据商品相同就推测其他属性，不可见信息不要编造。图片编号从0开始。\n${files.map((_, i) => `图片编号 ${i}`).join('、')}`;
   const content = [{ type: 'text', text: prompt }, ...files.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } }))];
-  const visionModel = config.visionModel || 'deepseek-v4-flash-vision-exp';
-  const complexModel = config.complexModel || 'deepseek-v4-flash-vision-exp';
-  const auditResult = await callVision(content, config, { model: complexModel, maxTokens: 4000,
+  const visionModel = config.visionModel || 'deepseek-flash';
+  const complexModel = config.complexModel || 'deepseek-flash';
+  const auditResult = await callVision(content, config, { model: complexModel, maxTokens: 20000,
     label: 'combined gallery audit' });
   const auditedBackIndices = new Set((Array.isArray(auditResult.parsed?.back_or_reverse_indices)
     ? auditResult.parsed.back_or_reverse_indices : []).map(Number)

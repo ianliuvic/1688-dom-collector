@@ -1036,7 +1036,7 @@ export function createDatabase(databaseUrl) {
     const saved = await pool.query(`INSERT INTO ${table}
       (product_detail_id, trigger_type, model, status)
       VALUES ($1,$2,$3,'queued') RETURNING *`, [productDetailId,
-      values.trigger ?? 'manual', values.model ?? 'deepseek-v4-flash-vision-exp']);
+      values.trigger ?? 'manual', values.model ?? 'deepseek-flash']);
     return saved.rows[0];
   }
 
@@ -1053,7 +1053,7 @@ export function createDatabase(databaseUrl) {
     const table = auditType === 'image' ? 'product_image_audits'
       : auditType === 'sku' ? 'product_sku_audits' : null;
     if (!table) throw new Error('Unsupported product audit type.');
-    const model = result?.models?.complex ?? result?.models?.vision ?? 'deepseek-v4-flash-vision-exp';
+    const model = result?.models?.complex ?? result?.models?.vision ?? 'deepseek-flash';
     const saved = await pool.query(`UPDATE ${table} SET status='completed', model=$2,
       schema_version=$3, source_hash=$4, audit_status=$5, summary=$6, result=$7,
       error=NULL, completed_at=now() WHERE id=$1 RETURNING *`, [id, model,

@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { applyReasoning } from './model-request.js';
 
 const DEFAULT_ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
@@ -88,7 +89,7 @@ export async function analyzeProductMerchandising({ detail, translation, taxonom
   if (!categories.length) throw new Error('WordPress has no product categories available for matching.');
   const existingTags = (taxonomies.tags || []).map(({ id, name }) => ({ id, name }));
   const images = await loadImages(detail, config, 4);
-  const model = config.complexModel || 'deepseek-v4-flash-vision-exp';
+  const model = config.complexModel || 'deepseek-flash';
   const source = {
     englishTitle: translation.title,
     englishDescription: translation.description,
@@ -134,9 +135,10 @@ PRODUCT DATA: ${JSON.stringify(source)}`;
     const response = await fetch(endpointFrom(config.baseUrl), {
       method: 'POST',
       headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: requestContent }],
-        response_format: { type: 'json_object' }, temperature: 0, max_tokens: 8000 }),
-      signal: AbortSignal.timeout(360000),
+      body: JSON.stringify(applyReasoning({ model, messages: [{ role: 'user', content: requestContent }],
+        response_format: { type: 'json_object' }, temperature: 0, max_tokens: 16000 },
+      config.reasoningEffort)),
+      signal: AbortSignal.timeout(600000),
     });
     if (!response.ok) throw new Error(`DeepSeek merchandising classification failed (${response.status}).`);
     body = await response.json();

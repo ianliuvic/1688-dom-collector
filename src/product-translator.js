@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { applyReasoning } from './model-request.js';
 
 const ENDPOINT = 'https://api.deepseek.com/chat/completions';
 const TITLE_NOISE_RE = /\b(?:20\d{2}|new arrival|new style|hot sale|best seller|cross[- ]border|aliexpress|amazon|export|wholesale)\b/i;
@@ -213,7 +214,7 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
   if (!config?.apiKey) throw new Error('DEEPSEEK_API_KEY is not configured.');
   if (targetLanguage !== 'en') throw new Error('Only English translation is currently supported.');
   const source = buildProductTranslationSource(detail);
-  const model = config.complexModel || 'deepseek-v4-flash-vision-exp';
+  const model = config.complexModel || 'deepseek-flash';
   const images = await loadTranslationImages(detail, config);
   const translationShape = {
     sellerName: '',
@@ -233,9 +234,10 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
     const response = await fetch(endpointFrom(config.baseUrl), {
       method: 'POST',
       headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content }],
-        response_format: { type: 'json_object' }, temperature: 0, max_tokens: maxTokens }),
-      signal: AbortSignal.timeout(360000),
+      body: JSON.stringify(applyReasoning({ model, messages: [{ role: 'user', content }],
+        response_format: { type: 'json_object' }, temperature: 0, max_tokens: maxTokens },
+      config.reasoningEffort)),
+      signal: AbortSignal.timeout(600000),
     });
     if (!response.ok) throw new Error(`DeepSeek ${label} failed (${response.status}).`);
     const payload = await response.json();
@@ -252,7 +254,7 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
     const text = correction
       ? `${visualPrompt}\n上一次输出：${previousOutput}\n未通过校验：${correction}。必须修正违规字段并重新输出。`
       : visualPrompt;
-    return callModel([{ type: 'text', text }, ...imageContent], 3000, 'visual product copy generation');
+    return callModel([{ type: 'text', text }, ...imageContent], 16000, 'visual product copy generation');
   }
   let visualAttempt;
   let visualCopy;
@@ -281,7 +283,7 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
     const text = correction
       ? `${translationPrompt}\n上一次输出：${previousOutput}\n未通过校验：${correction}。请完整修正并重新输出。`
       : translationPrompt;
-    return callModel(text, 10000, 'structured product translation');
+    return callModel(text, 32000, 'structured product translation');
   }
   let translationAttempt;
   let translated;

@@ -39,8 +39,9 @@ const config = {
   clearStaleBrowserLocks: process.env.CLEAR_STALE_BROWSER_LOCKS === 'true',
   modelApiKey: process.env.DEEPSEEK_API_KEY,
   modelBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-  visionModel: process.env.DEEPSEEK_VISION_MODEL || 'deepseek-v4-flash-vision-exp',
-  complexModel: process.env.DEEPSEEK_COMPLEX_MODEL || 'deepseek-v4-flash-vision-exp',
+  visionModel: process.env.DEEPSEEK_VISION_MODEL || 'deepseek-flash',
+  complexModel: process.env.DEEPSEEK_COMPLEX_MODEL || 'deepseek-flash',
+  reasoningEffort: process.env.DEEPSEEK_REASONING_EFFORT || 'high',
   translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
   translationConcurrency: Math.min(Math.max(Number(process.env.TRANSLATION_CONCURRENCY) || 1, 1), 10),
   savedAuditConcurrency: Math.min(Math.max(Number(process.env.SAVED_AUDIT_CONCURRENCY) || 3, 1), 5),
@@ -250,6 +251,7 @@ function auditModelConfig() {
     baseUrl: config.modelBaseUrl,
     visionModel: config.visionModel,
     complexModel: config.complexModel,
+    reasoningEffort: config.reasoningEffort,
     storagePath: config.storagePath,
   };
 }
@@ -713,6 +715,7 @@ app.post('/api/product-details/:id/translations', { preHandler: requireApiKey },
       const translated = await translateProductDetail({ detail, targetLanguage, config: {
         apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
         complexModel: config.complexModel, storagePath: config.storagePath,
+        reasoningEffort: config.reasoningEffort,
         maxTranslationImages: config.translationImageLimit,
         modelImageTransport: config.modelImageTransport,
       } });
@@ -1270,6 +1273,7 @@ app.post('/api/product-details/:id/vision', { preHandler: requireApiKey }, async
       offerId: detail.offer_id, prompt: request.body?.prompt, config: {
         apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
         model: config.visionModel, storagePath: config.storagePath,
+        reasoningEffort: config.reasoningEffort,
       },
     });
     const saved = await db.saveProductVision(detail.id, firstImage.id, result);
@@ -1334,6 +1338,7 @@ app.post('/api/image-audit/test', { preHandler: requireApiKey }, async (request,
     return await analyzeGalleryImages({ images: request.body.images, config: {
       apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
       visionModel: config.visionModel, complexModel: config.complexModel,
+      reasoningEffort: config.reasoningEffort,
       storagePath: config.storagePath,
     } });
   } catch (error) {
@@ -1365,6 +1370,7 @@ app.post('/api/image-audit/live', { preHandler: [requireApiKey, requireCollector
           const analysis = await analyzeGalleryImages({ images: source.images, config: {
             apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
             visionModel: config.visionModel, complexModel: config.complexModel,
+            reasoningEffort: config.reasoningEffort,
             storagePath: config.storagePath,
           } });
           results.push({ url, offerId: source.offerId, title: source.title,
@@ -1417,7 +1423,8 @@ app.post('/api/sku-audit/live', { preHandler: [requireApiKey, requireCollectorMo
           const audit = await auditProductSkus({
             product: source.product, skuImages: source.skuImages, galleryImages: source.galleryImages,
             config: { apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
-              visionModel: config.visionModel, complexModel: config.complexModel },
+              visionModel: config.visionModel, complexModel: config.complexModel,
+              reasoningEffort: config.reasoningEffort },
           });
           results.push({ url, offerId: source.offerId, title: source.title,
             skuImageCount: source.skuImages.length, galleryContextCount: source.galleryImages.length, ...audit });

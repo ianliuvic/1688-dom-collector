@@ -609,6 +609,7 @@ export async function prepareWordPressProductDraft({
     ? await analyzeProductMerchandising({ detail, translation, taxonomies, config: {
       apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
       complexModel: config.complexModel, storagePath: config.storagePath,
+      reasoningEffort: config.reasoningEffort,
       modelImageTransport: config.modelImageTransport,
     } }) : null;
   const selection = resolveMerchandisingSelection({ options, merchandising, taxonomies });

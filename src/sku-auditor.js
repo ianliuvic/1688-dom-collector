@@ -1,3 +1,5 @@
+import { applyReasoning } from './model-request.js';
+
 const ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
 const AVAILABILITY_RE = /(现货|有货|预售|缺货|补货|下单|联系客服|咨询客服|拍下|备注|随机发|不退不换)/i;
@@ -103,13 +105,17 @@ export function auditSkuRules(product = {}) {
 }
 
 async function callComplexModel(content, config) {
-  const model = config.complexModel || 'deepseek-v4-flash-vision-exp';
+  const model = config.complexModel || 'deepseek-flash';
   const response = await fetch(endpointFrom(config.baseUrl), {
     method: 'POST',
     headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content }],
-      response_format: { type: 'json_object' }, temperature: 0, max_tokens: 5000 }),
-    signal: AbortSignal.timeout(240000),
+    // Thinking is billed as output, so the cap has to leave room for the JSON
+    // answer on top of the chain of thought (5k was consumed entirely by
+    // reasoning and produced an empty response).
+    body: JSON.stringify(applyReasoning({ model, messages: [{ role: 'user', content }],
+      response_format: { type: 'json_object' }, temperature: 0, max_tokens: 32000 },
+    config.reasoningEffort)),
+    signal: AbortSignal.timeout(480000),
   });
   if (!response.ok) throw new Error(`DeepSeek SKU audit failed (${response.status}).`);
   const payload = await response.json();
@@ -155,7 +161,7 @@ export async function auditProductSkus({ product, skuImages = [], galleryImages 
   return {
     schemaVersion: 1,
     mode: 'audit_only',
-    models: { vision: config.visionModel || 'deepseek-v4-flash-vision-exp', complex: result.model },
+    models: { vision: config.visionModel || 'deepseek-flash', complex: result.model },
     auditStatus: requiresReview ? 'issues_detected' : 'clear',
     summary: { ...modelSummary, requiresReview },
     source: { offerId: product.offerId ?? null, title: product.title ?? null,
