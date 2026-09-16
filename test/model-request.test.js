@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyReasoning, resolveReasoningEffort, DEFAULT_REASONING_EFFORT } from '../src/model-request.js';
+import fs from 'node:fs/promises';
+import { applyReasoning, resolveReasoningEffort, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS } from '../src/model-request.js';
 
 test('an empty value falls back to the high default', () => {
   assert.equal(resolveReasoningEffort(undefined), 'high');
@@ -50,4 +51,26 @@ test('the caller body is not mutated', () => {
   const original = { model: 'deepseek-flash' };
   applyReasoning(original, 'max');
   assert.deepEqual(original, { model: 'deepseek-flash' });
+});
+
+test('the shared output ceiling is 64000', () => {
+  assert.equal(DEFAULT_MAX_TOKENS, 64000);
+});
+
+// Every model call must take its output ceiling from the shared constant, so a
+// single edit changes all of them and no call site can keep a private number.
+test('no source file hardcodes a numeric max_tokens', async () => {
+  const dir = new URL('../src/', import.meta.url);
+  const files = (await fs.readdir(dir)).filter((name) => name.endsWith('.js'));
+  const offenders = [];
+  for (const name of files) {
+    const text = await fs.readFile(new URL(name, dir), 'utf8');
+    for (const match of text.matchAll(/max_tokens:\s*([^,\n}]+)/g)) {
+      const value = match[1].trim();
+      if (value !== 'DEFAULT_MAX_TOKENS' && value !== 'maxTokens') {
+        offenders.push(`${name}: max_tokens: ${value}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, []);
 });

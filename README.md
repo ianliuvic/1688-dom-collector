@@ -115,6 +115,21 @@ when the `Referer` is not a 1688 page; a capture without a local file falls back
 to a redirect to its source URL, which is why the page also sends
 `referrerpolicy="no-referrer"`.
 
+## Model calls
+
+Every model call goes through `src/model-request.js`, which owns the shared
+output ceiling (`DEFAULT_MAX_TOKENS`, 64000) and the DeepSeek thinking
+parameters. `DEEPSEEK_REASONING_EFFORT` (default `high`; set to `off` to disable
+thinking) and the model ids `DEEPSEEK_VISION_MODEL` / `DEEPSEEK_COMPLEX_MODEL`
+(default `deepseek-flash`) come from the environment.
+
+Thinking tokens are billed as output and count against `max_tokens`, so a tight
+cap can be spent entirely on reasoning and return an empty answer — that is what
+produced `model_response_not_json` audit rows in the past. Keep the ceiling
+generous: each call's request timeout is the constraint that binds first for very
+long generations. A test fails the build if any source file hardcodes its own
+numeric `max_tokens`.
+
 ## Next phase
 
 The `login/` image provides a temporary, Basic-Auth-protected noVNC console. It

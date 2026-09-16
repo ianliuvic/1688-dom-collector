@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { applyReasoning } from './model-request.js';
+import { applyReasoning, DEFAULT_MAX_TOKENS } from './model-request.js';
 
 const ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
@@ -20,7 +20,7 @@ function contentText(content) {
   return Array.isArray(content) ? content.map((part) => part?.text || '').join('') : String(content || '');
 }
 
-async function callVision(content, config, { model, maxTokens = 16000, label = 'gallery analysis' } = {}) {
+async function callVision(content, config, { model, maxTokens = DEFAULT_MAX_TOKENS, label = 'gallery analysis' } = {}) {
   const response = await fetch(endpointFrom(config.baseUrl), {
     method: 'POST', headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
     // Thinking is billed as output, so the cap must leave room for the JSON answer.
@@ -64,8 +64,8 @@ export async function analyzeGalleryImages({ images, config }) {
   const content = [{ type: 'text', text: prompt }, ...files.map((file) => ({ type: 'image_url', image_url: { url: file.dataUrl } }))];
   const visionModel = config.visionModel || 'deepseek-flash';
   const complexModel = config.complexModel || 'deepseek-flash';
-  const auditResult = await callVision(content, config, { model: complexModel, maxTokens: 20000,
-    label: 'combined gallery audit' });
+  const auditResult = await callVision(content, config, { model: complexModel,
+    maxTokens: DEFAULT_MAX_TOKENS, label: 'combined gallery audit' });
   const auditedBackIndices = new Set((Array.isArray(auditResult.parsed?.back_or_reverse_indices)
     ? auditResult.parsed.back_or_reverse_indices : []).map(Number)
     .filter((index) => Number.isInteger(index) && index >= 0 && index < files.length));

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { applyReasoning } from './model-request.js';
+import { applyReasoning, DEFAULT_MAX_TOKENS } from './model-request.js';
 
 const ENDPOINT = 'https://api.deepseek.com/chat/completions';
 const TITLE_NOISE_RE = /\b(?:20\d{2}|new arrival|new style|hot sale|best seller|cross[- ]border|aliexpress|amazon|export|wholesale)\b/i;
@@ -254,7 +254,7 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
     const text = correction
       ? `${visualPrompt}\n上一次输出：${previousOutput}\n未通过校验：${correction}。必须修正违规字段并重新输出。`
       : visualPrompt;
-    return callModel([{ type: 'text', text }, ...imageContent], 16000, 'visual product copy generation');
+    return callModel([{ type: 'text', text }, ...imageContent], DEFAULT_MAX_TOKENS, 'visual product copy generation');
   }
   let visualAttempt;
   let visualCopy;
@@ -283,7 +283,7 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
     const text = correction
       ? `${translationPrompt}\n上一次输出：${previousOutput}\n未通过校验：${correction}。请完整修正并重新输出。`
       : translationPrompt;
-    return callModel(text, 32000, 'structured product translation');
+    return callModel(text, DEFAULT_MAX_TOKENS, 'structured product translation');
   }
   let translationAttempt;
   let translated;

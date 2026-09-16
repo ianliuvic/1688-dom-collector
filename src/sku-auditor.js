@@ -1,4 +1,4 @@
-import { applyReasoning } from './model-request.js';
+import { applyReasoning, DEFAULT_MAX_TOKENS } from './model-request.js';
 
 const ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
@@ -113,7 +113,7 @@ async function callComplexModel(content, config) {
     // answer on top of the chain of thought (5k was consumed entirely by
     // reasoning and produced an empty response).
     body: JSON.stringify(applyReasoning({ model, messages: [{ role: 'user', content }],
-      response_format: { type: 'json_object' }, temperature: 0, max_tokens: 32000 },
+      response_format: { type: 'json_object' }, temperature: 0, max_tokens: DEFAULT_MAX_TOKENS },
     config.reasoningEffort)),
     signal: AbortSignal.timeout(480000),
   });

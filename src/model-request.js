@@ -12,6 +12,13 @@
 
 export const DEFAULT_REASONING_EFFORT = 'high';
 
+// Every model call shares this output ceiling. It is a ceiling, not a cost:
+// output is billed only for tokens actually generated, and real answers run in
+// the low thousands of tokens. It exists to bound a runaway chain of thought,
+// together with each call's request timeout (which, at 64k, is the constraint
+// that binds first for very long generations).
+export const DEFAULT_MAX_TOKENS = 64000;
+
 const EFFORT_ALIASES = {
   minimal: 'low',
   low: 'low',

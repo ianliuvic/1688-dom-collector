@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { applyReasoning } from './model-request.js';
+import { applyReasoning, DEFAULT_MAX_TOKENS } from './model-request.js';
 
 const DEFAULT_ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
@@ -136,7 +136,7 @@ PRODUCT DATA: ${JSON.stringify(source)}`;
       method: 'POST',
       headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify(applyReasoning({ model, messages: [{ role: 'user', content: requestContent }],
-        response_format: { type: 'json_object' }, temperature: 0, max_tokens: 16000 },
+        response_format: { type: 'json_object' }, temperature: 0, max_tokens: DEFAULT_MAX_TOKENS },
       config.reasoningEffort)),
       signal: AbortSignal.timeout(600000),
     });

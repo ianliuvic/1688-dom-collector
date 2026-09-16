@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { applyReasoning } from './model-request.js';
+import { applyReasoning, DEFAULT_MAX_TOKENS } from './model-request.js';
 
 const DEFAULT_ENDPOINT = 'https://api.deepseek.com/chat/completions';
 const DEFAULT_PROMPT = '请分析这张1688商品主图。仅返回JSON，字段包括：product_type（产品类型）、color（主要颜色）、design_details（可见设计细节数组）、material_cues（可见材质线索数组）、pattern（图案）、quality_notes（做工/品质可见特征数组）、confidence（0到1的小数）。不要编造图片中不可见的信息。';
@@ -42,7 +42,7 @@ export async function analyzeProductImage({ imagePath, sourceUrl = null, offerId
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: dataUrl } }] }],
       response_format: { type: 'json_object' },
       temperature: 0.1,
-      max_tokens: 8000,
+      max_tokens: DEFAULT_MAX_TOKENS,
     }, config.reasoningEffort)),
     signal: AbortSignal.timeout(300000),
   });
