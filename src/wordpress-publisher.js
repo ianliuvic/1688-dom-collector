@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { analyzeProductMerchandising } from './product-merchandiser.js';
+import { applyOptionMapOverrides, buildOptionOverrideIndex,
+  resolveOptionDisplayLabel } from './option-overrides.js';
 
 function clean(value) {
   return value == null ? '' : String(value).trim();
@@ -156,7 +158,7 @@ function selectPublishingImages(detail, translation, imageMode = 'translated') {
   });
 }
 
-function buildSkuMatrix(detail, translation) {
+function buildSkuMatrix(detail, translation, overrideIndex = null) {
   const translatedRows = new Map(
     (translation?.sku_rows ?? []).map((row) => [clean(row.skuKey), row]),
   );
@@ -164,15 +166,17 @@ function buildSkuMatrix(detail, translation) {
     const translated = translatedRows.get(clean(sku.sku_key)) ?? {};
     const sourceOptions = sku.option_data ?? {};
     const translatedOptions = translated.options ?? {};
+    const colorOption = optionValue(translatedOptions, ['color', '颜色'])
+      || optionValue(sourceOptions, ['color', '颜色']);
     return {
       index,
       source_sku_key: clean(sku.sku_key),
       source_sku_text: clean(sku.sku_text),
       label: clean(translated.skuText) || clean(sku.sku_text) || clean(sku.sku_key),
-      options: translatedOptions,
+      // Display copy is renamed; source_options below keeps the captured text.
+      options: applyOptionMapOverrides(translatedOptions, overrideIndex),
       source_options: sourceOptions,
-      color: optionValue(translatedOptions, ['color', '颜色'])
-        || optionValue(sourceOptions, ['color', '颜色']),
+      color: resolveOptionDisplayLabel(overrideIndex, colorOption) || colorOption,
       size: optionValue(translatedOptions, ['size', '尺码'])
         || optionValue(sourceOptions, ['size', '尺码']),
       source_price: numberOrNull(sku.price),
@@ -190,7 +194,7 @@ function normalizedImageKey(value) {
     .replace(/_\d+x\d+[^/]*$/i, '');
 }
 
-function buildColorOptions(detail, translation) {
+function buildColorOptions(detail, translation, overrideIndex = null) {
   const dimension = findDimension(translation, ['color', '颜色']);
   const colors = unique(dimension?.values ?? []);
   const optionImages = new Map();
@@ -204,35 +208,66 @@ function buildColorOptions(detail, translation) {
   const skuImages = new Map((detail.images ?? [])
     .filter((image) => image.image_type === 'sku')
     .map((image) => [normalizedImageKey(image.source_url), image]));
-  return colors.map((label, index) => {
-    const imageUrl = optionImages.get(label) || '';
+  return colors.map((sourceLabel, index) => {
+    // The swatch image is keyed by the captured text, so resolve it before the
+    // display label is replaced by an override.
+    const imageUrl = optionImages.get(sourceLabel) || '';
     const matched = skuImages.get(normalizedImageKey(imageUrl)) ?? null;
+    const label = resolveOptionDisplayLabel(overrideIndex, sourceLabel) || sourceLabel;
     return {
       label,
       value: `color-${index + 1}`,
+      ...(label === sourceLabel ? {} : { source_label: sourceLabel }),
       source_image_url: imageUrl,
       image_source_id: matched?.id ? String(matched.id) : '',
     };
   });
 }
 
-export function buildWordPressProductDraft({ detail, translation, options = {}, merchandising = null, taxonomies = null }) {
+// Re-applies the manual option overrides to an already saved publication
+// payload. Price, style-number, and date repairs replay that payload verbatim,
+// so a payload saved before an override existed would otherwise write the
+// captured label back to WordPress.
+export function applyOptionOverridesToPayload(payload, optionOverrides = []) {
+  const index = buildOptionOverrideIndex(optionOverrides);
+  if (!payload || typeof payload !== 'object' || index.size === 0) return payload;
+  const next = structuredClone(payload);
+  if (Array.isArray(next.colors?.colors)) {
+    next.colors.colors = next.colors.colors.map((color) => {
+      const label = resolveOptionDisplayLabel(index, color?.source_label ?? color?.label);
+      return label && label !== color?.label ? { ...color, label } : color;
+    });
+  }
+  if (Array.isArray(next.sku_matrix?.rows)) {
+    next.sku_matrix.rows = next.sku_matrix.rows.map((row) => {
+      const label = resolveOptionDisplayLabel(index, row?.color ?? row?.options?.Color);
+      if (!label) return row;
+      return { ...row, color: label, options: applyOptionMapOverrides(row?.options, index) };
+    });
+  }
+  return next;
+}
+
+export function buildWordPressProductDraft({ detail, translation, options = {}, merchandising = null, taxonomies = null, optionOverrides = [] }) {
   if (!detail?.id || !detail?.offer_id) throw new Error('A saved product detail with offer_id is required.');
   if (!translation?.id || !clean(translation.title)) throw new Error('An English product translation is required.');
 
   const attributes = translatedAttributeMap(translation);
   const styleNo = clean(options.styleNo);
   if (!styleNo) throw new Error('A wearhongxiu style number allocation is required.');
+  // Manual option-label overrides are applied to every payload this module
+  // builds, so a re-capture or a swatch repair cannot revert a corrected name.
+  const overrideIndex = buildOptionOverrideIndex(optionOverrides);
   const publishingImages = selectPublishingImages(detail, translation, options.imageMode);
   const sizeDimension = findDimension(translation, ['size', '尺码']);
   const sizes = unique(sizeDimension?.values ?? []);
-  const colorOptions = buildColorOptions(detail, translation);
+  const colorOptions = buildColorOptions(detail, translation, overrideIndex);
   const swatchImageIds = new Set(colorOptions.map((color) => color.image_source_id).filter(Boolean));
   const swatchImages = options.imageMode === 'main_only' ? []
     : (detail.images ?? []).filter((image) => swatchImageIds.has(String(image.id)));
   const uploadImages = [...publishingImages, ...swatchImages]
     .filter((image, index, values) => values.findIndex((candidate) => String(candidate.id) === String(image.id)) === index);
-  const skuMatrix = buildSkuMatrix(detail, translation);
+  const skuMatrix = buildSkuMatrix(detail, translation, overrideIndex);
   const selection = resolveMerchandisingSelection({ options, merchandising, taxonomies });
   const material = selection.material || attributes.get('fabric composition')
     || attributes.get('fabric name') || 'Polyester';
@@ -578,9 +613,12 @@ export async function resolveWordPressProduct(identifier, config) {
   return wp(`/wp-json/hx/v1/products/resolve?${query}`, { timeoutMs: 30000 });
 }
 
-export async function updateWordPressProductStyleNumber({ publication, styleNo, config }) {
+export async function updateWordPressProductStyleNumber({ publication, styleNo, config, optionOverrides = [] }) {
   const wp = wordpressClient(config);
-  const payload = structuredClone(publication?.payload ?? {});
+  // Repair paths replay the saved payload verbatim, so re-apply the manual
+  // option overrides here: a payload saved before an override existed would
+  // otherwise write the captured label back to WordPress.
+  const payload = applyOptionOverridesToPayload(structuredClone(publication?.payload ?? {}), optionOverrides);
   if (!payload.external_id) throw new Error('The saved WordPress publication has no external ID.');
   payload.style_no = clean(styleNo);
   payload.meta = { ...(payload.meta ?? {}), sku: payload.style_no };
@@ -594,7 +632,7 @@ export async function updateWordPressProductStyleNumber({ publication, styleNo, 
 }
 
 export async function prepareWordPressProductDraft({
-  detail, translation, options = {}, config, reserveStyleNumber = false,
+  detail, translation, options = {}, config, reserveStyleNumber = false, optionOverrides = [],
 }) {
   const wp = wordpressClient(config);
   const taxonomies = await wp('/wp-json/hx/v1/products/taxonomies');
@@ -628,7 +666,7 @@ export async function prepareWordPressProductDraft({
     styleNo = clean(allocated.style_no);
   }
   return buildWordPressProductDraft({
-    detail, translation, options: { ...options, styleNo }, merchandising, taxonomies,
+    detail, translation, options: { ...options, styleNo }, merchandising, taxonomies, optionOverrides,
   });
 }
 
@@ -641,9 +679,9 @@ function resolveStorageFile(storagePath, filename) {
   return resolved;
 }
 
-export async function publishProductToWordPress({ detail, translation, options = {}, config }) {
+export async function publishProductToWordPress({ detail, translation, options = {}, config, optionOverrides = [] }) {
   const draft = await prepareWordPressProductDraft({
-    detail, translation, options, config, reserveStyleNumber: true,
+    detail, translation, options, config, reserveStyleNumber: true, optionOverrides,
   });
   const wp = wordpressClient(config);
   const media = [];

@@ -22,6 +22,7 @@ import { analyzeProductDuplicates } from './duplicate-analyzer.js';
 import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
+import { MAX_OPTION_LABEL_LENGTH } from './option-overrides.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -834,7 +835,8 @@ app.post('/api/product-details/:id/wordpress/style-number', { preHandler: requir
     return reply.code(409).send({ error: 'style_number_conflict' });
   }
   try {
-    const synced = await updateWordPressProductStyleNumber({ publication, styleNo, config });
+    const synced = await updateWordPressProductStyleNumber({ publication, styleNo, config,
+      optionOverrides: await db.listProductOptionOverrides(detail.id) });
     const wp = synced.wordpress;
     const syncHash = crypto.createHash('sha256').update(JSON.stringify(synced.payload)).digest('hex');
     const saved = await db.saveWordPressPublication(detail.id, {
@@ -852,6 +854,52 @@ app.post('/api/product-details/:id/wordpress/style-number', { preHandler: requir
     request.log.error({ err: error, productDetailId: detail.id }, 'WordPress style number update failed');
     return reply.code(502).send({ error: 'wordpress_style_number_update_failed', message: error.message });
   }
+});
+
+// A captured option label can be a bare merchant code (for example `9007`).
+// The published label is rebuilt from the source SKU options on every capture,
+// translation refresh, and publication, so these overrides are what makes a
+// corrected display name durable. They are applied when the WordPress payload
+// is assembled, which every publication path shares.
+app.get('/api/product-details/:id/option-overrides', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  return { productDetailId: detail.id, offerId: detail.offer_id,
+    overrides: await db.listProductOptionOverrides(detail.id) };
+});
+
+app.post('/api/product-details/:id/option-overrides', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const sourceText = String(request.body?.sourceText ?? '').trim();
+  const displayLabel = String(request.body?.displayLabel ?? '').trim();
+  if (!sourceText || !displayLabel) {
+    return reply.code(400).send({ error: 'sourceText and displayLabel are required' });
+  }
+  if (sourceText.length > MAX_OPTION_LABEL_LENGTH || displayLabel.length > MAX_OPTION_LABEL_LENGTH) {
+    return reply.code(400).send({ error: 'sourceText and displayLabel must be 120 characters or fewer' });
+  }
+  try {
+    const override = await db.upsertProductOptionOverride(detail.id, {
+      dimensionName: request.body?.dimensionName, sourceText, displayLabel, note: request.body?.note,
+    });
+    return { status: 'saved', override, overrides: await db.listProductOptionOverrides(detail.id) };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: detail.id }, 'Option override save failed');
+    return reply.code(422).send({ error: 'option_override_failed', message: error.message });
+  }
+});
+
+app.delete('/api/product-details/:id/option-overrides/:overrideId', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const overrideId = Number(request.params.overrideId);
+  if (!Number.isSafeInteger(overrideId) || overrideId <= 0) {
+    return reply.code(400).send({ error: 'invalid_override_id' });
+  }
+  const deleted = await db.deleteProductOptionOverride(detail.id, overrideId);
+  if (!deleted) return reply.code(404).send({ error: 'not_found' });
+  return { status: 'deleted', override: deleted };
 });
 
 app.get('/api/shopify/source-match', { preHandler: requireApiKey }, async (request, reply) => {
@@ -965,6 +1013,7 @@ app.post('/api/product-details/:id/wordpress/preview', { preHandler: requireApiK
   try {
     const draft = await prepareWordPressProductDraft({
       detail, translation, options: wordpressPublishOptions(request.body), config,
+      optionOverrides: await db.listProductOptionOverrides(detail.id),
     });
     return { payload: draft.payload, publishingImageCount: draft.publishingImages.length };
   } catch (error) {
@@ -996,7 +1045,8 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
     job.startedAt = new Date().toISOString();
     let draft;
     try {
-      const published = await publishProductToWordPress({ detail, translation, options, config });
+      const published = await publishProductToWordPress({ detail, translation, options, config,
+        optionOverrides: await db.listProductOptionOverrides(detail.id) });
       draft = published.draft;
       const wp = published.wordpress;
       const syncHash = crypto.createHash('sha256').update(JSON.stringify(published.payload)).digest('hex');

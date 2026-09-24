@@ -130,6 +130,31 @@ generous: each call's request timeout is the constraint that binds first for ver
 long generations. A test fails the build if any source file hardcodes its own
 numeric `max_tokens`.
 
+## Option label overrides
+
+A captured 1688 listing sometimes carries a bare merchant code as its colour
+option text (for example `9007`). The published label is rebuilt from the source
+SKU options on every capture, translation refresh, and publication, so editing
+the WordPress product alone is not durable: the next capture, translation, or
+SKU-swatch repair writes the code back.
+
+`product_detail_option_overrides` records the corrected display name for one
+(product detail, dimension, source option text) triple, and
+`src/option-overrides.js` applies it while the WordPress payload is assembled —
+the path preview, publish, bulk synchronization, and the repair scripts all
+share. The captured text is never rewritten: `source_options` keeps the exact
+1688 value and only the published `label` / `options` copy changes.
+
+- `GET /api/product-details/:id/option-overrides` lists the overrides.
+- `POST /api/product-details/:id/option-overrides` saves one with a JSON body of
+  `sourceText` (the captured text to match) plus `displayLabel`, and optional
+  `dimensionName` (default `color`) and `note`. Matching ignores case and
+  repeated whitespace, and saving the same pair again updates it.
+- `DELETE /api/product-details/:id/option-overrides/:overrideId` removes one.
+
+Removing an override is what restores the captured label, so a wrong correction
+never needs a code change.
+
 ## Next phase
 
 The `login/` image provides a temporary, Basic-Auth-protected noVNC console. It

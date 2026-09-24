@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import pg from 'pg';
 import { deriveVerifiedProductPrice } from './parsers/1688-product.js';
 import { evaluateShopProductPolicy } from './shop-publication-policy.js';
+import { cleanOptionLabel, normalizeDimensionName, normalizeOptionText } from './option-overrides.js';
 
 const { Pool } = pg;
 
@@ -383,6 +384,24 @@ export function createDatabase(databaseUrl) {
         ON product_rag_syncs(product_detail_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS product_rag_syncs_status_idx
         ON product_rag_syncs(status, created_at);
+      -- Manual display-name overrides for captured option labels, for example a
+      -- bare 1688 merchant code such as 9007. The publisher applies them while
+      -- assembling the WordPress payload, so a later capture, translation
+      -- refresh, or swatch repair cannot revert a corrected label. The captured
+      -- source text is never rewritten, only the published display name.
+      CREATE TABLE IF NOT EXISTS product_detail_option_overrides (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        dimension_name text NOT NULL DEFAULT 'color',
+        source_text text NOT NULL,
+        display_label text NOT NULL,
+        note text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (product_detail_id, dimension_name, source_text)
+      );
+      CREATE INDEX IF NOT EXISTS product_detail_option_overrides_product_idx
+        ON product_detail_option_overrides(product_detail_id, dimension_name);
     `);
 
     // A shop can be reached through several equivalent 1688 URLs (homepage,
@@ -1451,6 +1470,36 @@ export function createDatabase(databaseUrl) {
     return saved.rows;
   }
 
+  async function listProductOptionOverrides(productDetailId) {
+    const saved = await pool.query(`SELECT * FROM product_detail_option_overrides
+      WHERE product_detail_id=$1 ORDER BY dimension_name, source_text`, [productDetailId]);
+    return saved.rows;
+  }
+
+  async function upsertProductOptionOverride(productDetailId, values = {}) {
+    const dimensionName = normalizeDimensionName(values.dimensionName ?? values.dimension_name);
+    const sourceText = normalizeOptionText(values.sourceText ?? values.source_text);
+    const displayLabel = cleanOptionLabel(values.displayLabel ?? values.display_label);
+    const note = String(values.note ?? '').trim() || null;
+    if (!sourceText || !displayLabel) {
+      throw new Error('A source option text and a display label are required.');
+    }
+    const saved = await pool.query(`INSERT INTO product_detail_option_overrides
+      (product_detail_id, dimension_name, source_text, display_label, note)
+      VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT (product_detail_id, dimension_name, source_text) DO UPDATE
+        SET display_label=EXCLUDED.display_label, note=EXCLUDED.note, updated_at=now()
+      RETURNING *`,
+    [productDetailId, dimensionName, sourceText, displayLabel, note]);
+    return saved.rows[0] ?? null;
+  }
+
+  async function deleteProductOptionOverride(productDetailId, overrideId) {
+    const deleted = await pool.query(`DELETE FROM product_detail_option_overrides
+      WHERE id=$1 AND product_detail_id=$2 RETURNING *`, [overrideId, productDetailId]);
+    return deleted.rows[0] ?? null;
+  }
+
   async function getDashboardStats() {
     const [overview, shops, sourceCategories, listingYears, detailQuality, duplicateStatus,
       images, skus, prices, imageAudits, skuAudits, publications, rag, stylePrefixes,
@@ -1680,6 +1729,7 @@ export function createDatabase(databaseUrl) {
     saveWordPressArrivalDate, auditAndRepairProductPrices,
     saveWordPressPublication, createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
+    listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     listReviewQueue, getProductImage, ping };
 }
 
