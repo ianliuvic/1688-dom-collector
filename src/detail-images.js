@@ -2,9 +2,10 @@
  * Detail (description) image capture for 1688 product pages.
  *
  * The description block renders and lazy-loads its images only after the page
- * has been scrolled, so the capture warms the page up first, then finds the
- * description container (class/id hints first, largest image block as a
- * fallback), then keeps scrolling while the image set grows.
+ * has been scrolled. The capture warms the page up (scroll + tab click + waits),
+ * then searches every frame for the description container (class/id hints first,
+ * largest large-image block as a fallback) and keeps scrolling while the image
+ * set grows.
  */
 
 const IMAGE_ATTRIBUTES = ['src', 'data-src', 'data-lazyload-src', 'data-ks-lazyload',
@@ -20,11 +21,66 @@ const CONTAINER_SELECTORS = [
   '[class*="detail-desc"]',
   '[class*="offer-desc"]',
   '[class*="desc-content"]',
-  '[id*="desc"]',
-  '[class*="desc"]',
+  '[class*="desc" i]',
+  '[id*="desc" i]',
 ];
 
-const TAB_LABELS = [/商品详情/, /图文详情/, /产品详情/, /详情/];
+const TAB_LABELS = ['商品详情', '图文详情', '产品详情', '宝贝详情', '详情'];
+
+const LOCATE_SCRIPT = `(selectors) => {
+  const describe = (node) => node.tagName.toLowerCase()
+    + (node.id ? '#' + node.id : '')
+    + (typeof node.className === 'string' && node.className ? '.' + node.className.split(/\\s+/).slice(0, 3).join('.') : '');
+  const excluded = (node) => Boolean(node.closest('header, footer, nav, [class*="gallery" i], [class*="sku" i], [class*="recommend" i], [class*="header" i], [class*="footer" i], [class*="nav" i]'));
+  for (const marker of document.querySelectorAll('[data-collector-detail-container]')) marker.removeAttribute('data-collector-detail-container');
+
+  const diagnostics = [];
+  let best = null;
+  let bestScore = 0;
+  for (const selector of selectors) {
+    let nodes = [];
+    try { nodes = document.querySelectorAll(selector); } catch { continue; }
+    for (const node of nodes) {
+      const images = node.querySelectorAll('img').length;
+      if (!images) continue;
+      const label = (node.id || '') + ' ' + (typeof node.className === 'string' ? node.className : '');
+      const score = images * 2 + (/(desc|detail)/i.test(label) ? 4 : 0);
+      diagnostics.push({ node: describe(node), images, score, kind: 'hint' });
+      if (score > bestScore) { best = node; bestScore = score; }
+    }
+  }
+  if (!best) {
+    const groups = new Map();
+    for (const image of document.querySelectorAll('img')) {
+      if (excluded(image)) continue;
+      const width = image.naturalWidth || image.width || 0;
+      const height = image.naturalHeight || image.height || 0;
+      if (width < 380 || height < 160) continue;
+      let node = image.parentElement;
+      let key = null;
+      for (let depth = 0; node && depth < 6; depth += 1) {
+        if (node.querySelectorAll('img').length >= 2) key = node;
+        node = node.parentElement;
+      }
+      if (!key) continue;
+      const entry = groups.get(key) || { node: key, images: 0 };
+      entry.images += 1;
+      groups.set(key, entry);
+    }
+    for (const entry of groups.values()) {
+      diagnostics.push({ node: describe(entry.node), images: entry.images, score: entry.images, kind: 'fallback' });
+      if (entry.images > bestScore) { best = entry.node; bestScore = entry.images; }
+    }
+  }
+  diagnostics.sort((left, right) => right.score - left.score);
+  if (!best) return { container: null, diagnostics: diagnostics.slice(0, 6), totalImages: document.querySelectorAll('img').length };
+  best.setAttribute('data-collector-detail-container', '1');
+  return {
+    container: { node: describe(best), imageCount: best.querySelectorAll('img').length },
+    diagnostics: diagnostics.slice(0, 6),
+    totalImages: document.querySelectorAll('img').length,
+  };
+}`;
 
 function normalizeImageUrl(value, baseUrl) {
   if (!value || typeof value !== 'string') return null;
@@ -46,107 +102,84 @@ function normalizeImageUrl(value, baseUrl) {
   return parsed.toString();
 }
 
-/** Click a description tab if the description block is collapsed behind one. */
 async function openDescriptionTab(page) {
-  return page.evaluate((patterns) => {
-    const regexes = patterns.map((pattern) => new RegExp(pattern));
-    const nodes = Array.from(document.querySelectorAll('a, button, li, div[role="tab"], span'));
-    for (const node of nodes) {
-      const label = (node.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!label || label.length > 12) continue;
-      if (!regexes.some((regex) => regex.test(label))) continue;
-      const rect = node.getBoundingClientRect();
-      if (rect.width < 8 || rect.height < 8) continue;
-      try { node.click(); return label; } catch { /* keep looking */ }
-    }
-    return null;
-  }, TAB_LABELS.map((regex) => regex.source)).catch(() => null);
+  for (const frame of page.frames()) {
+    try {
+      const label = await frame.evaluate((labels) => {
+        const nodes = Array.from(document.querySelectorAll('a, button, li, div[role="tab"], span'));
+        for (const node of nodes) {
+          const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!text || text.length > 14) continue;
+          if (!labels.some((label) => text === label || text.includes(label))) continue;
+          const rect = node.getBoundingClientRect();
+          if (rect.width < 8 || rect.height < 8) continue;
+          try { node.click(); return text; } catch { /* keep looking */ }
+        }
+        return null;
+      }, TAB_LABELS);
+      if (label) return label;
+    } catch { /* frame not accessible */ }
+  }
+  return null;
 }
 
-/** Locate (and mark) the description container; returns diagnostics as well. */
-async function locateDescriptionContainer(page) {
-  return page.evaluate((selectors) => {
-    const describe = (node) => `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ''}`
-      + `${typeof node.className === 'string' && node.className ? `.${node.className.split(/\s+/).slice(0, 3).join('.')}` : ''}`;
-    const excluded = (node) => Boolean(node.closest('header, footer, nav, [class*="gallery" i], [class*="sku" i], [class*="recommend" i], [class*="header" i], [class*="footer" i], [class*="nav" i]'));
-
-    const diagnostics = [];
-    let best = null;
-    let bestScore = 0;
-    const primary = [];
-    for (const selector of selectors) {
-      try {
-        for (const node of document.querySelectorAll(selector)) primary.push(node);
-      } catch { /* invalid selectors are skipped */ }
-    }
-    for (const node of primary) {
-      const images = node.querySelectorAll('img').length;
-      if (!images) continue;
-      const label = `${node.id || ''} ${typeof node.className === 'string' ? node.className : ''}`;
-      const score = images * 2 + (/(desc|detail)/i.test(label) ? 4 : 0);
-      diagnostics.push({ node: describe(node), images, score, kind: 'hint' });
-      if (score > bestScore) { best = node; bestScore = score; }
-    }
-
-    if (!best) {
-      // Fallback: group large images by a shared section ancestor.
-      const groups = new Map();
-      for (const image of document.querySelectorAll('img')) {
-        if (excluded(image)) continue;
-        const width = image.naturalWidth || image.width || 0;
-        const height = image.naturalHeight || image.height || 0;
-        if (width < 420 || height < 200) continue;
-        let node = image.parentElement;
-        let key = null;
-        for (let depth = 0; node && depth < 6; depth += 1) {
-          if (node.querySelectorAll('img').length >= 2) { key = node; }
-          node = node.parentElement;
-        }
-        if (!key) continue;
-        const entry = groups.get(key) ?? { node: key, images: 0 };
-        entry.images += 1;
-        groups.set(key, entry);
+async function locateAcrossFrames(page) {
+  const summaries = [];
+  let chosenFrame = null;
+  let chosen = null;
+  for (const frame of page.frames()) {
+    try {
+      const located = await frame.evaluate(LOCATE_SCRIPT, CONTAINER_SELECTORS);
+      summaries.push({ frame: frame.url().slice(0, 120), container: located?.container ?? null,
+        totalImages: located?.totalImages ?? null, diagnostics: located?.diagnostics ?? [] });
+      const imageCount = located?.container?.imageCount ?? 0;
+      if (imageCount && (!chosen || imageCount > (chosen.container?.imageCount ?? 0))) {
+        chosenFrame = frame;
+        chosen = located;
       }
-      for (const entry of groups.values()) {
-        diagnostics.push({ node: describe(entry.node), images: entry.images, score: entry.images, kind: 'fallback' });
-        if (entry.images > bestScore) { best = entry.node; bestScore = entry.images; }
-      }
-    }
+    } catch { /* frame not accessible */ }
+  }
+  return { frame: chosenFrame, located: chosen, summaries };
+}
 
-    diagnostics.sort((left, right) => right.score - left.score);
-    if (!best) return { container: null, diagnostics: diagnostics.slice(0, 8), totalImages: document.querySelectorAll('img').length };
-    for (const node of document.querySelectorAll('[data-collector-detail-container]')) {
-      node.removeAttribute('data-collector-detail-container');
+async function collectFromFrame(frame) {
+  if (!frame) return [];
+  return frame.evaluate((attributes) => {
+    const node = document.querySelector('[data-collector-detail-container="1"]');
+    if (!node) return [];
+    const values = [];
+    for (const image of node.querySelectorAll('img')) {
+      for (const name of attributes) {
+        const value = image.getAttribute(name);
+        if (value) { values.push(value); break; }
+      }
+      const srcset = image.getAttribute('srcset');
+      if (srcset) values.push(srcset.split(',')[0].trim().split(' ')[0]);
     }
-    best.setAttribute('data-collector-detail-container', '1');
-    return {
-      container: {
-        node: describe(best),
-        imageCount: best.querySelectorAll('img').length,
-      },
-      diagnostics: diagnostics.slice(0, 8),
-      totalImages: document.querySelectorAll('img').length,
-    };
-  }, CONTAINER_SELECTORS).catch(() => ({ container: null, diagnostics: [], totalImages: null }));
+    return values;
+  }, IMAGE_ATTRIBUTES).catch(() => []);
 }
 
 /**
- * Scroll the page until the description images stop growing, then return the
- * distinct Alibaba CDN image URLs found inside the description container.
+ * Warm the page up, find the description container in any frame, then scroll
+ * until the image set stops growing.
  */
 export async function extractDetailImageUrls(page, options = {}) {
-  const maxRounds = Number(options.maxRounds) || 24;
-  const scrollStep = Number(options.scrollStep) || 800;
+  const maxRounds = Number(options.maxRounds) || 26;
+  const scrollStep = Number(options.scrollStep) || 900;
   const waitMs = Number(options.waitMs) || 900;
 
-  let located = { container: null, diagnostics: [], totalImages: null };
+  let located = { frame: null, located: null, summaries: [] };
   let tabLabel = null;
 
-  // Warm-up: the description block only renders after some scrolling.
-  for (let round = 0; round < 8 && !located.container; round += 1) {
-    if (round === 3 && !tabLabel) tabLabel = await openDescriptionTab(page);
-    located = await locateDescriptionContainer(page);
-    if (located.container) break;
+  // Warm-up: description blocks only render after the page has been scrolled.
+  for (let round = 0; round < 14 && !located.frame; round += 1) {
+    if (round === 2 || round === 6) {
+      const label = await openDescriptionTab(page);
+      if (label && !tabLabel) tabLabel = label;
+    }
+    located = await locateAcrossFrames(page);
+    if (located.frame) break;
     await page.evaluate((step) => window.scrollBy(0, step), scrollStep).catch(() => {});
     await page.waitForTimeout(waitMs);
   }
@@ -154,37 +187,25 @@ export async function extractDetailImageUrls(page, options = {}) {
   const urls = new Set();
   let stableRounds = 0;
   for (let round = 0; round < maxRounds && stableRounds < 3; round += 1) {
-    if (!located.container && round % 3 === 0) located = await locateDescriptionContainer(page);
-    const found = await page.evaluate((attributes) => {
-      const node = document.querySelector('[data-collector-detail-container="1"]');
-      if (!node) return [];
-      const values = [];
-      for (const image of node.querySelectorAll('img')) {
-        for (const name of attributes) {
-          const value = image.getAttribute(name);
-          if (value) { values.push(value); break; }
-        }
-        const srcset = image.getAttribute('srcset');
-        if (srcset) values.push(srcset.split(',')[0].trim().split(' ')[0]);
-      }
-      return values;
-    }, IMAGE_ATTRIBUTES).catch(() => []);
-
+    if (!located.frame && round % 3 === 0) located = await locateAcrossFrames(page);
+    const found = await collectFromFrame(located.frame);
     let added = 0;
     for (const raw of found) {
-      const url = normalizeImageUrl(raw, page.url());
+      const url = normalizeImageUrl(raw, located.frame?.url() ?? page.url());
       if (url && !urls.has(url)) { urls.add(url); added += 1; }
     }
     stableRounds = added ? 0 : stableRounds + 1;
-
+    if (added === 0 && round % 4 === 3 && !located.located) {
+      located = await locateAcrossFrames(page);
+    }
     await page.evaluate((step) => window.scrollBy(0, step), scrollStep).catch(() => {});
     await page.waitForTimeout(waitMs);
   }
 
   return {
-    container: located.container,
-    diagnostics: located.diagnostics,
-    totalImages: located.totalImages,
+    container: located.located?.container ?? null,
+    containerFrame: located.frame ? located.frame.url().slice(0, 160) : null,
+    frameSummaries: located.summaries,
     tabLabel,
     urls: [...urls],
   };

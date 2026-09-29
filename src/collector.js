@@ -597,8 +597,8 @@ export function createCollector({
         })
       : [];
     const images = files.filter((file) => file.type === 'description');
-    return { offerId, finalUrl, container: extracted.container, diagnostics: extracted.diagnostics,
-      totalImages: extracted.totalImages, tabLabel: extracted.tabLabel,
+    return { offerId, finalUrl, container: extracted.container, containerFrame: extracted.containerFrame,
+      frameSummaries: extracted.frameSummaries, tabLabel: extracted.tabLabel,
       imageCount: images.length, images };
   }
 
