@@ -1711,6 +1711,120 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  async function listShopsOverview() {
+    const result = await pool.query(`
+      SELECT shops.id, shops.shop_name, shops.domain, shops.shop_url, shops.offer_list_url,
+        count(products.id) AS product_count,
+        count(*) FILTER (WHERE products.availability_status='active') AS active_count,
+        count(*) FILTER (WHERE products.availability_status='delisted') AS delisted_count,
+        count(*) FILTER (WHERE products.ingestion_eligible) AS eligible_count,
+        count(*) FILTER (WHERE details.id IS NOT NULL) AS captured_count,
+        count(*) FILTER (WHERE publications.wp_status='publish') AS published_count,
+        count(*) FILTER (WHERE publications.id IS NOT NULL AND publications.wp_status<>'publish') AS draft_count,
+        count(*) FILTER (WHERE details.id IS NULL) AS not_captured_count,
+        max(products.last_crawled_at) AS last_scanned_at
+      FROM shop_profiles shops
+      LEFT JOIN shop_products products ON products.shop_id=shops.id
+      LEFT JOIN product_details details ON details.offer_id=products.offer_id
+      LEFT JOIN product_wordpress_publications publications
+        ON publications.product_detail_id=details.id
+      GROUP BY shops.id
+      ORDER BY lower(coalesce(shops.shop_name, shops.domain))
+    `);
+    return result.rows;
+  }
+
+  async function listUnassignedOverview() {
+    const result = await pool.query(`
+      SELECT count(*) AS captured_count,
+        count(*) FILTER (WHERE publications.wp_status='publish') AS published_count,
+        count(*) FILTER (WHERE publications.id IS NOT NULL AND publications.wp_status<>'publish') AS draft_count
+      FROM product_details details
+      LEFT JOIN product_wordpress_publications publications
+        ON publications.product_detail_id=details.id
+      WHERE NOT EXISTS (
+        SELECT 1 FROM shop_products products WHERE products.offer_id=details.offer_id
+      )
+    `);
+    return result.rows[0];
+  }
+
+  const overviewProductColumns = `
+    products.offer_id, products.title, products.category, products.product_url,
+    products.image_url AS shop_image_url, products.price, products.currency,
+    products.sale_quantity_text, products.listing_time,
+    products.availability_status, products.ingestion_eligible, products.ingestion_reason,
+    details.id AS product_detail_id, details.source_url AS detail_source_url,
+    details.canonical_url, details.gallery_verified_complete, details.duplicate_status,
+    details.last_crawled_at AS detail_last_crawled_at,
+    publications.style_no, publications.wp_post_id, publications.wp_url, publications.wp_status,
+    (SELECT images.source_url FROM product_detail_images images
+      WHERE images.product_detail_id=details.id AND images.image_type IN ('main','gallery')
+      ORDER BY (images.image_type='main') DESC, images.sort_order LIMIT 1) AS detail_image_url
+  `;
+
+  function buildOverviewProductFilter({ shopId, unassigned, status, search }, values) {
+    const predicates = [];
+    if (unassigned) {
+      predicates.push('NOT EXISTS (SELECT 1 FROM shop_products scoped WHERE scoped.offer_id=details.offer_id)');
+    } else {
+      values.push(shopId);
+      predicates.push(`products.shop_id=$${values.length}`);
+    }
+    if (status === 'published') predicates.push("publications.wp_status='publish'");
+    else if (status === 'draft') predicates.push("publications.id IS NOT NULL AND publications.wp_status<>'publish'");
+    else if (status === 'captured') predicates.push('details.id IS NOT NULL');
+    else if (status === 'not_captured') predicates.push('details.id IS NULL');
+    if (search) {
+      values.push(`%${search}%`);
+      const token = `$${values.length}`;
+      predicates.push(`(products.title ILIKE ${token} OR publications.style_no ILIKE ${token}
+        OR products.offer_id LIKE ${token} OR details.title ILIKE ${token})`);
+    }
+    return predicates.length ? `WHERE ${predicates.join(' AND ')}` : '';
+  }
+
+  async function listShopOverviewProducts({ shopId = null, unassigned = false, status = 'all',
+    search = '', limit = 50, offset = 0 } = {}) {
+    const values = [];
+    const where = buildOverviewProductFilter({ shopId, unassigned, status, search }, values);
+    const from = unassigned
+      ? `FROM product_details details
+         LEFT JOIN shop_products products ON products.offer_id=details.offer_id
+         LEFT JOIN product_wordpress_publications publications
+           ON publications.product_detail_id=details.id`
+      : `FROM shop_products products
+         LEFT JOIN product_details details ON details.offer_id=products.offer_id
+         LEFT JOIN product_wordpress_publications publications
+           ON publications.product_detail_id=details.id`;
+    const order = unassigned
+      ? 'ORDER BY details.last_crawled_at DESC NULLS LAST, details.id DESC'
+      : 'ORDER BY products.listing_time DESC NULLS LAST, products.id DESC';
+    values.push(Math.min(Math.max(Number(limit) || 50, 1), 200));
+    values.push(Math.max(Number(offset) || 0, 0));
+    const result = await pool.query(`
+      SELECT ${overviewProductColumns} ${from} ${where}
+      ${order} LIMIT $${values.length - 1} OFFSET $${values.length}
+    `, values);
+    return result.rows;
+  }
+
+  async function countShopOverviewProducts(options = {}) {
+    const values = [];
+    const where = buildOverviewProductFilter(options, values);
+    const from = options.unassigned
+      ? `FROM product_details details
+         LEFT JOIN shop_products products ON products.offer_id=details.offer_id
+         LEFT JOIN product_wordpress_publications publications
+           ON publications.product_detail_id=details.id`
+      : `FROM shop_products products
+         LEFT JOIN product_details details ON details.offer_id=products.offer_id
+         LEFT JOIN product_wordpress_publications publications
+           ON publications.product_detail_id=details.id`;
+    const result = await pool.query(`SELECT count(*) AS total ${from} ${where}`, values);
+    return Number(result.rows[0]?.total || 0);
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -1730,7 +1844,8 @@ export function createDatabase(databaseUrl) {
     saveWordPressPublication, createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
-    listReviewQueue, getProductImage, ping };
+    listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
+    listShopOverviewProducts, countShopOverviewProducts, ping };
 }
 
 function parseScore(value) {

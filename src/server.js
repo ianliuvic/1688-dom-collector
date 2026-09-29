@@ -480,6 +480,7 @@ app.get('/', async () => ({
   status: 'framework-ready',
   dashboard: '/dashboard',
   review: '/review',
+  shops: '/shops',
   browserMode: getBrowserModeStatus(),
   session: collector.getSessionStatus(),
 }));
@@ -487,6 +488,41 @@ app.get('/', async () => ({
 app.get('/dashboard', { preHandler: requireDashboardAuth }, async (_request, reply) => {
   const html = await fs.readFile(new URL('../public/dashboard.html', import.meta.url), 'utf8');
   return reply.type('text/html; charset=utf-8').send(html);
+});
+
+app.get('/shops', { preHandler: requireDashboardAuth }, async (_request, reply) => {
+  const html = await fs.readFile(new URL('../public/shops.html', import.meta.url), 'utf8');
+  return reply.type('text/html; charset=utf-8').send(html);
+});
+
+app.get('/api/shops-overview', { preHandler: requireDashboardAuth }, async () => {
+  const [shops, unassigned] = await Promise.all([
+    db.listShopsOverview(), db.listUnassignedOverview(),
+  ]);
+  return { generatedAt: new Date().toISOString(), shops, unassigned };
+});
+
+app.get('/api/shops-overview/products', { preHandler: requireDashboardAuth }, async (request, reply) => {
+  const query = request.query ?? {};
+  const unassigned = query.unassigned === 'true' || query.unassigned === '1';
+  const shopId = Number(query.shopId);
+  if (!unassigned && !Number.isInteger(shopId)) {
+    return reply.code(400).send({ error: 'shop_id_required' });
+  }
+  const status = ['all', 'published', 'draft', 'captured', 'not_captured'].includes(query.status)
+    ? query.status : 'all';
+  const options = {
+    shopId: unassigned ? null : shopId,
+    unassigned,
+    status,
+    search: String(query.search ?? '').trim().slice(0, 120),
+    limit: Math.min(Math.max(Number(query.limit) || 50, 1), 200),
+    offset: Math.max(Number(query.offset) || 0, 0),
+  };
+  const [items, total] = await Promise.all([
+    db.listShopOverviewProducts(options), db.countShopOverviewProducts(options),
+  ]);
+  return { total, limit: options.limit, offset: options.offset, items };
 });
 
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({

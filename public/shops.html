@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>1688 店铺产品总览</title>
+  <style>
+    :root{--bg:#f5f7f3;--surface:#fff;--ink:#17211b;--muted:#6c776f;--line:#dfe5df;--green:#176b49;--green2:#dcefe4;--amber:#a55f12;--amber2:#fff0d8;--red:#a63b32;--red2:#fbe5e2;--blue:#285f94;--blue2:#e2edf8;--grey2:#eef1ee;--shadow:0 8px 28px rgba(24,43,31,.07);font-family:Inter,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}button,input{font:inherit}a{color:var(--blue)}
+    .wrap{max-width:1480px;margin:auto;padding:24px}
+    .header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:22px}
+    .brand{display:flex;gap:13px;align-items:center}.mark{width:42px;height:42px;border-radius:12px;background:var(--ink);color:#fff;display:grid;place-items:center;font-weight:800;letter-spacing:-1px}
+    .brand h1{font-size:23px;margin:0 0 4px}.sub{font-size:13px;color:var(--muted)}
+    .actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--surface);padding:7px 10px;border-radius:999px;font-size:12px}
+    .btn{border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:8px 12px;cursor:pointer;color:var(--ink);text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+    .btn:hover{border-color:#aebbb2}.btn:disabled{opacity:.55;cursor:wait}.btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+    .cards{display:grid;grid-template-columns:repeat(6,minmax(140px,1fr));gap:12px;margin-bottom:20px}
+    .card{background:var(--surface);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:13px;padding:16px}
+    .label{color:var(--muted);font-size:12px;margin-bottom:8px}.value{font-size:28px;font-weight:760;letter-spacing:-1px}.note{font-size:11px;color:var(--muted);margin-top:6px}
+    .panel{background:var(--surface);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:14px;padding:18px;min-width:0}
+    .panelhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:12px;flex-wrap:wrap}
+    .panelhead h2{font-size:15px;margin:0}.hint{font-size:11px;color:var(--muted)}
+    .error{display:none;background:var(--red2);color:var(--red);border:1px solid #e6b8b2;border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:13px}
+    .shopgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:20px}
+    .shopcard{background:var(--surface);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:13px;padding:15px;cursor:pointer;transition:border-color .15s,transform .15s}
+    .shopcard:hover{border-color:#aebbb2;transform:translateY(-1px)}
+    .shopcard.active{border-color:var(--green);box-shadow:0 8px 28px rgba(23,107,73,.16)}
+    .shopcard h3{margin:0 0 3px;font-size:14px}.shopcard .domain{font-size:11px;color:var(--muted);word-break:break-all}
+    .minis{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
+    .mini{font-size:11px;padding:3px 8px;border-radius:999px;background:var(--grey2);color:var(--ink)}
+    .mini.green{background:var(--green2);color:var(--green)}.mini.amber{background:var(--amber2);color:var(--amber)}
+    .mini.blue{background:var(--blue2);color:var(--blue)}.mini.red{background:var(--red2);color:var(--red)}
+    .progress{height:6px;background:var(--grey2);border-radius:999px;overflow:hidden;margin-top:11px}
+    .progress i{display:block;height:100%;background:var(--green);border-radius:999px}
+    .toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+    .filters{display:flex;gap:7px;flex-wrap:wrap}
+    .filter{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:6px 12px;font-size:12px;cursor:pointer;color:var(--ink)}
+    .filter.active{background:var(--ink);color:#fff;border-color:var(--ink)}
+    .search{flex:1;min-width:200px;max-width:340px;border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:var(--surface);color:var(--ink)}
+    .productgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+    .product{display:flex;gap:12px;border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--surface)}
+    .thumb{width:96px;height:96px;flex:0 0 96px;border-radius:9px;overflow:hidden;background:var(--grey2);display:grid;place-items:center}
+    .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+    .thumb .ph{font-size:11px;color:var(--muted);padding:6px;text-align:center}
+    .pinfo{min-width:0;flex:1;display:flex;flex-direction:column;gap:5px}
+    .ptitle{font-size:13px;font-weight:600;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .pmeta{font-size:11px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap}
+    .badges{display:flex;gap:5px;flex-wrap:wrap}
+    .badge{font-size:10.5px;padding:2px 8px;border-radius:999px;background:var(--grey2);color:var(--muted);white-space:nowrap}
+    .badge.green{background:var(--green2);color:var(--green)}.badge.amber{background:var(--amber2);color:var(--amber)}
+    .badge.blue{background:var(--blue2);color:var(--blue)}.badge.red{background:var(--red2);color:var(--red)}
+    .plinks{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;margin-top:2px}
+    .plinks a{text-decoration:none}.plinks a:hover{text-decoration:underline}.plinks .off{color:#a9b2ab}
+    .more{display:flex;justify-content:center;margin-top:16px}
+    .empty{padding:34px 10px;text-align:center;color:var(--muted);font-size:13px}
+    .footer{margin:22px 0 6px;font-size:11px;color:var(--muted);text-align:center}
+    @media(max-width:1100px){.cards{grid-template-columns:repeat(3,1fr)}}
+    @media(max-width:640px){.wrap{padding:15px}.header{display:block}.actions{margin-top:14px}.cards{grid-template-columns:repeat(2,1fr)}.value{font-size:23px}.panel{padding:14px}}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <header class="header">
+    <div class="brand"><div class="mark">88</div><div><h1>1688 店铺产品总览</h1><div class="sub">按店铺分组查看产品首图、1688 原链接与 wearhongxiu 发布状态 · 只读页面</div></div></div>
+    <div class="actions">
+      <a class="btn" href="/dashboard">统计页</a>
+      <button class="btn" id="refresh">刷新</button>
+    </div>
+  </header>
+  <div id="error" class="error"></div>
+  <section id="cards" class="cards"></section>
+  <section id="shopgrid" class="shopgrid"></section>
+  <section class="panel">
+    <div class="panelhead"><h2 id="listTitle">产品列表</h2><span class="hint" id="listHint"></span></div>
+    <div class="toolbar">
+      <div class="filters" id="filters">
+        <button class="filter active" data-status="all">全部</button>
+        <button class="filter" data-status="published">已发布 WP</button>
+        <button class="filter" data-status="draft">WP 草稿/未发布</button>
+        <button class="filter" data-status="captured">已采集</button>
+        <button class="filter" data-status="not_captured">未采集</button>
+      </div>
+      <input class="search" id="search" type="search" placeholder="搜索标题 / 款号 / Offer ID">
+    </div>
+    <div id="productgrid" class="productgrid"></div>
+    <div class="more" id="moreWrap" style="display:none"><button class="btn" id="more">加载更多</button></div>
+  </section>
+  <div class="footer">生成于 <span id="generated">—</span></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const n = v => Number(v || 0).toLocaleString('zh-CN');
+const date = v => v ? new Intl.DateTimeFormat('zh-CN', {year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '—';
+const PAGE = 60;
+const state = { shops: [], unassigned: null, scope: null, status: 'all', search: '', offset: 0, total: 0, items: [] };
+
+function showError(message) {
+  $('error').textContent = message;
+  $('error').style.display = message ? 'block' : 'none';
+}
+
+function summaryCards() {
+  const shops = state.shops;
+  const sum = key => shops.reduce((s, x) => s + Number(x[key] || 0), 0);
+  const un = state.unassigned || {};
+  const cards = [
+    ['店铺数', shops.length, '已扫描店铺'],
+    ['店铺商品', sum('product_count'), '唯一 Offer ID'],
+    ['已采集详情', sum('captured_count'), '进入详情页'],
+    ['已发布 WP', sum('published_count') + Number(un.published_count || 0), 'wearhongxiu 在线'],
+    ['WP 草稿/未发布', sum('draft_count') + Number(un.draft_count || 0), '含下架转草稿'],
+    ['未采集', sum('not_captured_count'), '仅有列表快照'],
+  ];
+  $('cards').innerHTML = cards.map(([label, value, note]) =>
+    `<div class="card"><div class="label">${esc(label)}</div><div class="value">${n(value)}</div><div class="note">${esc(note)}</div></div>`
+  ).join('');
+}
+
+function shopCard({ id, shop_name, domain, product_count, published_count, draft_count, not_captured_count, captured_count, active_count, delisted_count, unassigned }) {
+  const total = Number(product_count || 0);
+  const published = Number(published_count || 0);
+  const captured = Number(captured_count || 0);
+  const pc = total ? Math.min(100, captured / total * 100) : 0;
+  const active = (!unassigned && state.scope && !state.scope.unassigned && Number(state.scope.shopId) === Number(id))
+    || (unassigned && state.scope && state.scope.unassigned);
+  return `<div class="shopcard ${active ? 'active' : ''}" data-shop="${unassigned ? '' : esc(id)}" data-unassigned="${unassigned ? '1' : ''}">
+    <h3>${esc(shop_name || (unassigned ? '未关联店铺的产品' : '未命名店铺'))}</h3>
+    <div class="domain">${esc(domain || 'product_details 未匹配到店铺扫描')}</div>
+    <div class="minis">
+      <span class="mini">商品 ${n(total || captured)}</span>
+      <span class="mini green">已发布 ${n(published)}</span>
+      <span class="mini amber">草稿 ${n(draft_count || 0)}</span>
+      <span class="mini blue">已采集 ${n(captured)}</span>
+      <span class="mini">未采集 ${n(not_captured_count || 0)}</span>
+      ${delisted_count ? `<span class="mini red">已下架 ${n(delisted_count)}</span>` : ''}
+    </div>
+    <div class="progress" title="采集覆盖 ${pc.toFixed(1)}%"><i style="width:${pc}%"></i></div>
+  </div>`;
+}
+
+function renderShops() {
+  const cards = state.shops.map(s => shopCard(s));
+  const un = state.unassigned || {};
+  if (Number(un.captured_count || 0) > 0) {
+    cards.push(shopCard({ unassigned: true, product_count: 0, captured_count: un.captured_count, published_count: un.published_count, draft_count: un.draft_count, not_captured_count: 0 }));
+  }
+  $('shopgrid').innerHTML = cards.join('') || '<div class="empty">暂无店铺数据</div>';
+  for (const el of $('shopgrid').querySelectorAll('.shopcard')) {
+    el.addEventListener('click', () => {
+      const unassigned = el.dataset.unassigned === '1';
+      state.scope = unassigned ? { unassigned: true } : { shopId: Number(el.dataset.shop), unassigned: false };
+      state.offset = 0; state.items = [];
+      renderShops(); loadProducts();
+    });
+  }
+}
+
+function badges(item) {
+  const out = [];
+  if (item.wp_status === 'publish') out.push('<span class="badge green">已发布 WP</span>');
+  else if (item.product_detail_id && item.wp_post_id) out.push(`<span class="badge amber">WP ${esc(item.wp_status || '未知')}</span>`);
+  else if (item.product_detail_id) out.push('<span class="badge blue">已采集未发布</span>');
+  else out.push('<span class="badge">未采集</span>');
+  if (item.availability_status === 'delisted') out.push('<span class="badge red">1688 已下架</span>');
+  if (item.ingestion_eligible === false) out.push('<span class="badge red">不符合采集范围</span>');
+  if (item.gallery_verified_complete === false && item.product_detail_id) out.push('<span class="badge amber">Gallery 不完整</span>');
+  return out.join('');
+}
+
+function productCard(item) {
+  const img = item.detail_image_url || item.shop_image_url || '';
+  const thumb = img
+    ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : '<div class="ph">无首图</div>';
+  const link1688 = item.product_url || item.detail_source_url || item.canonical_url || '';
+  const style = item.style_no ? `<span>款号 <b>${esc(item.style_no)}</b></span>` : '';
+  return `<article class="product">
+    <div class="thumb">${thumb}</div>
+    <div class="pinfo">
+      <div class="ptitle" title="${esc(item.title || '')}">${esc(item.title || '（无标题）')}</div>
+      <div class="badges">${badges(item)}</div>
+      <div class="pmeta">${style}${item.category ? `<span>${esc(item.category)}</span>` : ''}<span>上架 ${date(item.listing_time)}</span>${item.sale_quantity_text ? `<span>销量 ${esc(item.sale_quantity_text)}</span>` : ''}</div>
+      <div class="plinks">
+        ${link1688 ? `<a href="${esc(link1688)}" target="_blank" rel="noreferrer">1688 原链接 ↗</a>` : '<span class="off">1688 链接缺失</span>'}
+        ${item.wp_url ? `<a href="${esc(item.wp_url)}" target="_blank" rel="noreferrer">wearhongxiu 页面 ↗</a>` : '<span class="off">未发布到 WP</span>'}
+      </div>
+    </div>
+  </article>`;
+}
+
+function renderProducts() {
+  $('productgrid').innerHTML = state.items.map(productCard).join('')
+    || '<div class="empty">该条件下暂无产品</div>';
+  $('listHint').textContent = `共 ${n(state.total)} 条 · 已显示 ${n(state.items.length)} 条`;
+  $('moreWrap').style.display = state.items.length < state.total ? 'flex' : 'none';
+}
+
+async function loadProducts(append = false) {
+  if (!state.scope) return;
+  showError('');
+  const params = new URLSearchParams({
+    status: state.status,
+    search: state.search,
+    limit: String(PAGE),
+    offset: String(state.offset),
+  });
+  if (state.scope.unassigned) params.set('unassigned', 'true');
+  else params.set('shopId', String(state.scope.shopId));
+  try {
+    const res = await fetch(`/api/shops-overview/products?${params}`, { credentials: 'same-origin', cache: 'no-store' });
+    if (!res.ok) throw new Error(`产品请求失败：HTTP ${res.status}`);
+    const data = await res.json();
+    state.total = Number(data.total || 0);
+    state.items = append ? state.items.concat(data.items || []) : (data.items || []);
+    renderProducts();
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+async function loadOverview() {
+  showError('');
+  try {
+    const res = await fetch('/api/shops-overview', { credentials: 'same-origin', cache: 'no-store' });
+    if (!res.ok) throw new Error(`概览请求失败：HTTP ${res.status}`);
+    const data = await res.json();
+    state.shops = data.shops || [];
+    state.unassigned = data.unassigned || {};
+    $('generated').textContent = new Date(data.generatedAt).toLocaleString('zh-CN');
+    summaryCards();
+    renderShops();
+    if (!state.scope && state.shops.length) {
+      state.scope = { shopId: Number(state.shops[0].id), unassigned: false };
+      renderShops();
+    }
+    const scopeName = state.scope
+      ? (state.scope.unassigned ? '未关联店铺的产品'
+        : (state.shops.find(s => Number(s.id) === Number(state.scope.shopId))?.shop_name || '当前店铺'))
+      : '产品列表';
+    $('listTitle').textContent = `${scopeName} · 产品列表`;
+    await loadProducts();
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+$('filters').addEventListener('click', (event) => {
+  const btn = event.target.closest('.filter');
+  if (!btn) return;
+  for (const el of $('filters').querySelectorAll('.filter')) el.classList.toggle('active', el === btn);
+  state.status = btn.dataset.status;
+  state.offset = 0;
+  loadProducts();
+});
+
+let searchTimer = null;
+$('search').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    state.search = $('search').value.trim();
+    state.offset = 0;
+    loadProducts();
+  }, 300);
+});
+
+$('more').addEventListener('click', () => {
+  state.offset = state.items.length;
+  loadProducts(true);
+});
+
+$('refresh').addEventListener('click', loadOverview);
+loadOverview();
+</script>
+</body>
+</html>
