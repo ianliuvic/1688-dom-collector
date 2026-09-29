@@ -91,12 +91,10 @@ function locateScript(selectors) {
 export async function fetchDescriptionPayloadUrls(page, options = {}) {
   const detailUrl = await page.evaluate(() => {
     const html = document.documentElement.innerHTML;
-    const marker = html.indexOf('od_product_description');
-    if (marker < 0) return null;
-    const windowText = html.slice(Math.max(0, marker - 1500), marker + 4000);
-    const match = windowText.match(/"detailUrl"\s*:\s*"(https?:(?:\\\/|\/)[^"]+)"/);
-    if (!match) return null;
-    return match[1].replace(/\\\//g, '/').replace(/\\u002F/gi, '/');
+    const matches = [...html.matchAll(/"detailUrl"\s*:\s*"(https?:[^"]*)"/g)]
+      .map((match) => match[1].replace(/\\\//g, '/').replace(/\\u002F/gi, '/'));
+    const unique = [...new Set(matches)];
+    return unique.find((url) => /itemcdn|tmall|\/1688offer\//i.test(url)) ?? unique[0] ?? null;
   }).catch(() => null);
   if (!detailUrl) return { detailUrl: null, urls: [], status: null };
 
