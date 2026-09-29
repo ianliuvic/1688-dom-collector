@@ -577,7 +577,7 @@ export function createCollector({
   // On-demand description (detail) image capture for one product URL. Scrolls the
   // lazily loaded description block until its images stop growing, then downloads
   // them into the product image directory. Gallery/SKU images are left untouched.
-  async function captureDetailImages(url) {
+  async function captureDetailImages(url, options = {}) {
     if (!isAllowed1688Url(url)) throw new Error('Only HTTPS 1688 detail URLs are supported.');
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(Number(process.env.DETAIL_IMAGE_INITIAL_WAIT_MS) || 6000);
@@ -588,6 +588,19 @@ export function createCollector({
     if (sessionState === 'requires_auth') throw new Error('Login or human verification is required.');
     const extracted = await extractDetailImageUrls(page);
     const offerId = (finalUrl.match(/offer\/(\d+)/) ?? [])[1] ?? null;
+    let debugArtifacts = null;
+    if (options.debug) {
+      try {
+        const debugDir = path.join(storagePath, 'debug');
+        await fs.mkdir(debugDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const htmlPath = path.join(debugDir, `detail-${offerId ?? 'unknown'}-${stamp}.html`);
+        const shotPath = path.join(debugDir, `detail-${offerId ?? 'unknown'}-${stamp}.png`);
+        await fs.writeFile(htmlPath, await page.content(), 'utf8');
+        await page.screenshot({ path: shotPath, fullPage: true }).catch(() => {});
+        debugArtifacts = { htmlPath, screenshotPath: shotPath };
+      } catch { debugArtifacts = null; }
+    }
     const files = extracted.urls.length
       ? await downloadProductImages({ offerId, images: [] }, storagePath,
         `detail-images-${offerId ?? crypto.randomUUID()}`, context, {
@@ -598,7 +611,7 @@ export function createCollector({
       : [];
     const images = files.filter((file) => file.type === 'description');
     return { offerId, finalUrl, container: extracted.container, containerFrame: extracted.containerFrame,
-      frameSummaries: extracted.frameSummaries, tabLabel: extracted.tabLabel,
+      frameSummaries: extracted.frameSummaries, tabLabel: extracted.tabLabel, debugArtifacts,
       imageCount: images.length, images };
   }
 

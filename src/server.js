@@ -1498,13 +1498,14 @@ app.post('/api/product-details/:id/detail-images', { preHandler: [requireApiKey,
     job.status = 'running';
     job.startedAt = new Date().toISOString();
     try {
-      const result = await collector.captureDetailImages(targetUrl);
+      const result = await collector.captureDetailImages(targetUrl, { debug: Boolean(request.body?.debug) });
       await db.saveDetailImages(detailId, result.images ?? []);
       job.container = result.container ?? null;
       job.containerFrame = result.containerFrame ?? null;
       job.frameSummaries = result.frameSummaries ?? null;
       job.tabLabel = result.tabLabel ?? null;
       job.imageCount = result.imageCount ?? 0;
+      job.debugArtifacts = result.debugArtifacts ?? null;
       job.images = (result.images ?? []).map((image) => ({ sourceUrl: image.sourceUrl,
         mimeType: image.mimeType ?? null, byteSize: image.byteSize ?? null,
         storagePath: image.storagePath ?? null, sortOrder: image.sortOrder ?? 0 }));
