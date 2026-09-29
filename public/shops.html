@@ -198,8 +198,16 @@ function renderProducts() {
   $('moreWrap').style.display = state.items.length < state.total ? 'flex' : 'none';
 }
 
+function updateListTitle() {
+  const scopeName = !state.scope ? '全部'
+    : state.scope.unassigned ? '未关联店铺的产品'
+    : (state.shops.find(s => Number(s.id) === Number(state.scope.shopId))?.shop_name || '当前店铺');
+  $('listTitle').textContent = `${scopeName} · 产品列表`;
+}
+
 async function loadProducts(append = false) {
   if (!state.scope) return;
+  updateListTitle();
   showError('');
   const params = new URLSearchParams({
     status: state.status,
@@ -236,11 +244,6 @@ async function loadOverview() {
       state.scope = { shopId: Number(state.shops[0].id), unassigned: false };
       renderShops();
     }
-    const scopeName = state.scope
-      ? (state.scope.unassigned ? '未关联店铺的产品'
-        : (state.shops.find(s => Number(s.id) === Number(state.scope.shopId))?.shop_name || '当前店铺'))
-      : '产品列表';
-    $('listTitle').textContent = `${scopeName} · 产品列表`;
     await loadProducts();
   } catch (e) {
     showError(e.message);
