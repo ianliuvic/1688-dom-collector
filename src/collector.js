@@ -5,6 +5,7 @@ import { chromium } from 'playwright';
 import { startProxyAdapter } from './proxy.js';
 import { parse1688Product } from './parsers/1688-product.js';
 import { parse1688Shop } from './parsers/1688-shop.js';
+import { extractDetailImageUrls } from './detail-images.js';
 import {
   fetchAllShopOffers,
   fetchPluginLogin,
@@ -86,13 +87,16 @@ async function captureShopContactUrl(page, context) {
   };
 }
 
-async function downloadProductImages(data, storagePath, jobId, requestContext = null) {
+async function downloadProductImages(data, storagePath, jobId, requestContext = null, options = {}) {
   const downloadDeadlineAt = Date.now() + 6 * 60 * 1000;
   const sources = [];
   if (data.mainImage) sources.push({ url: data.mainImage, type: 'main' });
   for (const [index, url] of (data.images ?? []).entries()) sources.push({ url, type: 'gallery', sortOrder: index });
   for (const [index, item] of (data.skuOptions ?? []).entries()) {
     if (item.image) sources.push({ url: item.image, type: 'sku', sortOrder: index });
+  }
+  for (const source of options.extraSources ?? []) {
+    if (source?.url) sources.push({ url: source.url, type: source.type ?? 'description', sortOrder: source.sortOrder ?? 0 });
   }
   const seen = new Set();
   const imageDir = path.join(storagePath, 'product-images', String(data.offerId || jobId));
@@ -570,9 +574,34 @@ export function createCollector({
     return { offerId: extractedData.offerId, images: ordered };
   }
 
-  // Ephemeral DOM-only product inspection; intentionally does not create jobs, files, or database rows.
-  async function inspectProduct(url) {
+  // On-demand description (detail) image capture for one product URL. Scrolls the
+  // lazily loaded description block until its images stop growing, then downloads
+  // them into the product image directory. Gallery/SKU images are left untouched.
+  async function captureDetailImages(url) {
+    if (!isAllowed1688Url(url)) throw new Error('Only HTTPS 1688 detail URLs are supported.');
     await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(Number(process.env.DETAIL_IMAGE_INITIAL_WAIT_MS) || 6000);
+    const finalUrl = page.url();
+    const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    sessionState = classifySession(finalUrl, bodyText);
+    lastCheckedAt = new Date().toISOString();
+    if (sessionState === 'requires_auth') throw new Error('Login or human verification is required.');
+    const extracted = await extractDetailImageUrls(page);
+    const offerId = (finalUrl.match(/offer\/(\d+)/) ?? [])[1] ?? null;
+    const files = extracted.urls.length
+      ? await downloadProductImages({ offerId, images: [] }, storagePath,
+        `detail-images-${offerId ?? crypto.randomUUID()}`, context, {
+          extraSources: extracted.urls.map((imageUrl, index) => ({
+            url: imageUrl, type: 'description', sortOrder: index,
+          })),
+        })
+      : [];
+    const images = files.filter((file) => file.type === 'description');
+    return { offerId, finalUrl, container: extracted.container, imageCount: images.length, images };
+  }
+
+  // Ephemeral DOM-only product inspection; intentionally does not create jobs, files, or database rows.
+  async function inspectProduct(url) {    await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(5000);
     const finalUrl = page.url();
     const title = await page.title();
@@ -689,6 +718,7 @@ export function createCollector({
     extractProductImages: (...args) => withOperation(() => extractProductImages(...args)),
     extractProductImagesInMemory: (...args) => withOperation(() => extractProductImagesInMemory(...args)),
     extractProductSkuAuditInput: (...args) => withOperation(() => extractProductSkuAuditInput(...args)),
+    captureDetailImages: (...args) => withOperation(() => captureDetailImages(...args)),
     inspectProduct: (...args) => withOperation(() => inspectProduct(...args)),
     inspectProductImageDom: (...args) => withOperation(() => inspectProductImageDom(...args)),
     getSessionStatus,

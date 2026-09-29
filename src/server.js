@@ -79,6 +79,7 @@ let browserTransition = null;
 let modeSwitchQueue = Promise.resolve();
 const skuAuditJobs = new Map();
 const imageAuditJobs = new Map();
+const detailImageJobs = new Map();
 const translationJobs = new Map();
 const wordpressJobs = new Map();
 const wordpressPublicationDateJobs = new Map();
@@ -1475,8 +1476,53 @@ app.post('/api/product-details/:id/sku-audit', { preHandler: requireApiKey }, as
   }
 });
 
-app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, async (request, reply) => {
-  const detail = await db.getProductDetail(request.params.id);
+// Captures the description (detail) images of a saved product on demand. The
+// images are stored with the collector (files + product_detail_images rows) and
+// are intentionally not pushed to WordPress.
+app.post('/api/product-details/:id/detail-images', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
+  const detailId = Number(request.params.id);
+  if (!Number.isInteger(detailId) || detailId <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(detailId).catch(() => null);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const targetUrl = detail.canonical_url || detail.source_url
+    || (detail.offer_id ? `https://detail.1688.com/offer/${detail.offer_id}.html` : null);
+  if (!targetUrl) return reply.code(400).send({ error: 'detail_has_no_source_url' });
+
+  const id = crypto.randomUUID();
+  const job = { id, status: 'queued', detailId, offerId: detail.offer_id ?? null, url: targetUrl,
+    createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
+    container: null, imageCount: null, images: null, error: null };
+  detailImageJobs.set(id, job);
+  trimTerminalJobs(detailImageJobs);
+  multimodalAuditQueue = multimodalAuditQueue.catch(() => {}).then(async () => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    try {
+      const result = await collector.captureDetailImages(targetUrl);
+      await db.saveDetailImages(detailId, result.images ?? []);
+      job.container = result.container ?? null;
+      job.imageCount = result.imageCount ?? 0;
+      job.images = (result.images ?? []).map((image) => ({ sourceUrl: image.sourceUrl,
+        mimeType: image.mimeType ?? null, byteSize: image.byteSize ?? null,
+        storagePath: image.storagePath ?? null, sortOrder: image.sortOrder ?? 0 }));
+      job.status = 'completed';
+      job.error = job.imageCount ? null : 'No description images were found on the page.';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = error.message;
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  });
+  return reply.code(202).send(job);
+});
+
+app.get('/api/product-detail-image-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = detailImageJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, async (request, reply) => {  const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   return db.listProductAudits('sku', detail.id, request.query?.limit);
 });

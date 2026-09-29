@@ -915,8 +915,32 @@ export function createDatabase(databaseUrl) {
       latestImageAudit: imageAudit.rows[0] ?? null, latestSkuAudit: skuAudit.rows[0] ?? null };
   }
 
-  async function listProductDetails({ offerId = null, limit = 100 } = {}) {
-    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 1000);
+  /** Replace the stored detail (description) images for one product detail. */
+  async function saveDetailImages(detailId, imageFiles) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`DELETE FROM product_detail_images
+        WHERE product_detail_id=$1 AND image_type='description'`, [detailId]);
+      for (const image of imageFiles ?? []) {
+        await client.query(`INSERT INTO product_detail_images
+          (product_detail_id, image_type, sort_order, source_url, storage_path, mime_type,
+           downloaded_at, content_sha256, byte_size)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [detailId, 'description',
+          image.sortOrder ?? 0, image.sourceUrl, image.storagePath ?? null, image.mimeType ?? null,
+          image.storagePath ? new Date() : null, image.contentSha256 ?? null, image.byteSize ?? null]);
+      }
+      await client.query('COMMIT');
+      return { saved: (imageFiles ?? []).length };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function listProductDetails({ offerId = null, limit = 100 } = {}) {    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 1000);
     if (offerId) {
       const result = await pool.query(`SELECT * FROM product_details
         WHERE offer_id=$1 ORDER BY last_crawled_at DESC LIMIT $2`, [String(offerId), safeLimit]);
@@ -1929,7 +1953,7 @@ export function createDatabase(databaseUrl) {
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
     saveShopScan, listShopProfiles, listShopProducts, listShopProductSources,
     listBestSellerCandidates,
-    saveProductDetail, getProductDetail, listProductDetails, listWeeklyMarketingProducts,
+    saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
