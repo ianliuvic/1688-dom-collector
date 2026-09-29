@@ -511,11 +511,17 @@ app.get('/api/shops-overview/products', { preHandler: requireDashboardAuth }, as
   }
   const status = ['all', 'published', 'draft', 'captured', 'not_captured'].includes(query.status)
     ? query.status : 'all';
+  const stylePrefixRaw = String(query.stylePrefix ?? '').trim().toUpperCase();
   const options = {
     shopId: unassigned ? null : shopId,
     unassigned,
     status,
     search: String(query.search ?? '').trim().slice(0, 120),
+    availability: ['all', 'active', 'delisted'].includes(query.availability) ? query.availability : 'all',
+    eligible: ['all', 'true', 'false'].includes(query.eligible) ? query.eligible : 'all',
+    gallery: ['all', 'complete', 'incomplete'].includes(query.gallery) ? query.gallery : 'all',
+    stylePrefix: /^[A-Z]{2,6}$/.test(stylePrefixRaw) ? stylePrefixRaw : '',
+    sort: String(query.sort ?? '').trim().slice(0, 32) || 'listing_desc',
     limit: Math.min(Math.max(Number(query.limit) || 50, 1), 200),
     offset: Math.max(Number(query.offset) || 0, 0),
   };

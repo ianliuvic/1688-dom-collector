@@ -39,6 +39,8 @@
     .filter{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:6px 12px;font-size:12px;cursor:pointer;color:var(--ink)}
     .filter.active{background:var(--ink);color:#fff;border-color:var(--ink)}
     .search{flex:1;min-width:200px;max-width:340px;border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:var(--surface);color:var(--ink)}
+    .select{border:1px solid var(--line);border-radius:9px;padding:8px 10px;background:var(--surface);color:var(--ink);font-size:12.5px;cursor:pointer}
+    .shopbar{display:flex;align-items:center;gap:8px;margin:0 0 12px;flex-wrap:wrap}
     .productgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
     .product{display:flex;gap:12px;border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--surface)}
     .thumb{width:96px;height:96px;flex:0 0 96px;border-radius:9px;overflow:hidden;background:var(--grey2);display:grid;place-items:center}
@@ -71,6 +73,16 @@
   </header>
   <div id="error" class="error"></div>
   <section id="cards" class="cards"></section>
+  <div class="shopbar">
+    <span class="hint">店铺排序</span>
+    <select class="select" id="shopSort">
+      <option value="name">名称</option>
+      <option value="product_count">商品数</option>
+      <option value="published_count">已发布数</option>
+      <option value="captured_count">已采集数</option>
+      <option value="not_captured_count">未采集数</option>
+    </select>
+  </div>
   <section id="shopgrid" class="shopgrid"></section>
   <section class="panel">
     <div class="panelhead"><h2 id="listTitle">产品列表</h2><span class="hint" id="listHint"></span></div>
@@ -82,6 +94,48 @@
         <button class="filter" data-status="captured">已采集</button>
         <button class="filter" data-status="not_captured">未采集</button>
       </div>
+      <select class="select" id="sort" title="排序方式">
+        <option value="listing_desc">上架时间：新 → 旧</option>
+        <option value="listing_asc">上架时间：旧 → 新</option>
+        <option value="sales_desc">销量：高 → 低</option>
+        <option value="style_asc">款号：升序</option>
+        <option value="title_asc">标题：A → Z</option>
+        <option value="crawled_desc">最近采集优先</option>
+      </select>
+      <select class="select" id="availability" title="1688 商品状态">
+        <option value="all">1688 状态：全部</option>
+        <option value="active">在售</option>
+        <option value="delisted">已下架</option>
+      </select>
+      <select class="select" id="eligible" title="是否符合采集范围">
+        <option value="all">采集范围：全部</option>
+        <option value="true">符合采集</option>
+        <option value="false">不符合采集</option>
+      </select>
+      <select class="select" id="gallery" title="Gallery 图片完整性">
+        <option value="all">Gallery：全部</option>
+        <option value="complete">完整</option>
+        <option value="incomplete">不完整</option>
+      </select>
+      <select class="select" id="stylePrefix" title="款号前缀">
+        <option value="">款号：全部</option>
+        <option value="SWBK">SWBK 比基尼套装</option>
+        <option value="SWBKT">SWBKT 比基尼上装</option>
+        <option value="SWBKB">SWBKB 比基尼下装</option>
+        <option value="SWT">SWT 坦克尼套装</option>
+        <option value="SWTT">SWTT 坦克尼上装</option>
+        <option value="SWOP">SWOP 连体泳衣</option>
+        <option value="SWPL">SWPL 大码泳衣</option>
+        <option value="SWMT">SWMT 孕妇泳衣</option>
+        <option value="SWPER">SWPER 经期泳衣</option>
+        <option value="SRG">SRG 防晒衣</option>
+        <option value="SKG">SKG 女童泳衣</option>
+        <option value="SKB">SKB 男童泳衣</option>
+        <option value="SM">SM 沙滩裤</option>
+        <option value="CW">CW 沙滩罩衫</option>
+        <option value="YW">YW 瑜伽服</option>
+        <option value="ST">ST 三件套</option>
+      </select>
       <input class="search" id="search" type="search" placeholder="搜索标题 / 款号 / Offer ID">
     </div>
     <div id="productgrid" class="productgrid"></div>
@@ -95,7 +149,8 @@ const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const n = v => Number(v || 0).toLocaleString('zh-CN');
 const date = v => v ? new Intl.DateTimeFormat('zh-CN', {year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '—';
 const PAGE = 60;
-const state = { shops: [], unassigned: null, scope: null, status: 'all', search: '', offset: 0, total: 0, items: [] };
+const state = { shops: [], unassigned: null, scope: null, status: 'all', search: '', offset: 0, total: 0, items: [],
+  sort: 'listing_desc', availability: 'all', eligible: 'all', gallery: 'all', stylePrefix: '', shopSort: 'name' };
 
 function showError(message) {
   $('error').textContent = message;
@@ -141,8 +196,21 @@ function shopCard({ id, shop_name, domain, product_count, published_count, draft
   </div>`;
 }
 
+function sortedShops() {
+  const arr = state.shops.slice();
+  const num = v => Number(v || 0);
+  const by = key => (a, b) => num(b[key]) - num(a[key]);
+  if (state.shopSort === 'product_count') arr.sort(by('product_count'));
+  else if (state.shopSort === 'published_count') arr.sort(by('published_count'));
+  else if (state.shopSort === 'captured_count') arr.sort(by('captured_count'));
+  else if (state.shopSort === 'not_captured_count') arr.sort(by('not_captured_count'));
+  else arr.sort((a, b) => String(a.shop_name || a.domain || '')
+    .localeCompare(String(b.shop_name || b.domain || ''), 'zh-CN'));
+  return arr;
+}
+
 function renderShops() {
-  const cards = state.shops.map(s => shopCard(s));
+  const cards = sortedShops().map(s => shopCard(s));
   const un = state.unassigned || {};
   if (Number(un.captured_count || 0) > 0) {
     cards.push(shopCard({ unassigned: true, product_count: 0, captured_count: un.captured_count, published_count: un.published_count, draft_count: un.draft_count, not_captured_count: 0 }));
@@ -212,6 +280,11 @@ async function loadProducts(append = false) {
   const params = new URLSearchParams({
     status: state.status,
     search: state.search,
+    sort: state.sort,
+    availability: state.availability,
+    eligible: state.eligible,
+    gallery: state.gallery,
+    stylePrefix: state.stylePrefix,
     limit: String(PAGE),
     offset: String(state.offset),
   });
@@ -257,6 +330,20 @@ $('filters').addEventListener('click', (event) => {
   state.status = btn.dataset.status;
   state.offset = 0;
   loadProducts();
+});
+
+for (const id of ['sort', 'availability', 'eligible', 'gallery', 'stylePrefix']) {
+  $(id).addEventListener('change', () => {
+    state[id] = $(id).value;
+    state.offset = 0;
+    state.items = [];
+    loadProducts();
+  });
+}
+
+$('shopSort').addEventListener('change', () => {
+  state.shopSort = $('shopSort').value;
+  renderShops();
 });
 
 let searchTimer = null;

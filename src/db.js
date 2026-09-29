@@ -1763,7 +1763,8 @@ export function createDatabase(databaseUrl) {
       ORDER BY (images.image_type='main') DESC, images.sort_order LIMIT 1) AS detail_image_url
   `;
 
-  function buildOverviewProductFilter({ shopId, unassigned, status, search }, values) {
+  function buildOverviewProductFilter({ shopId, unassigned, status, search, availability = 'all',
+    eligible = 'all', gallery = 'all', stylePrefix = '' }, values) {
     const predicates = [];
     if (unassigned) {
       predicates.push('NOT EXISTS (SELECT 1 FROM shop_products scoped WHERE scoped.offer_id=details.offer_id)');
@@ -1775,6 +1776,18 @@ export function createDatabase(databaseUrl) {
     else if (status === 'draft') predicates.push("publications.id IS NOT NULL AND publications.wp_status<>'publish'");
     else if (status === 'captured') predicates.push('details.id IS NOT NULL');
     else if (status === 'not_captured') predicates.push('details.id IS NULL');
+    if (availability === 'active') predicates.push("products.availability_status='active'");
+    else if (availability === 'delisted') predicates.push("products.availability_status='delisted'");
+    if (eligible === 'true') predicates.push('products.ingestion_eligible=true');
+    else if (eligible === 'false') predicates.push('products.ingestion_eligible=false');
+    if (gallery === 'complete') predicates.push('details.gallery_verified_complete=true');
+    else if (gallery === 'incomplete') {
+      predicates.push('details.id IS NOT NULL AND details.gallery_verified_complete=false');
+    }
+    if (stylePrefix) {
+      values.push(`^${stylePrefix}[0-9]`);
+      predicates.push(`publications.style_no ~ $${values.length}`);
+    }
     if (search) {
       values.push(`%${search}%`);
       const token = `$${values.length}`;
@@ -1784,10 +1797,27 @@ export function createDatabase(databaseUrl) {
     return predicates.length ? `WHERE ${predicates.join(' AND ')}` : '';
   }
 
+  const overviewSorts = {
+    listing_desc: `COALESCE(products.listing_time, details.first_seen_at) DESC NULLS LAST,
+      products.id DESC NULLS LAST, details.id DESC`,
+    listing_asc: `COALESCE(products.listing_time, details.first_seen_at) ASC NULLS LAST,
+      products.id ASC NULLS LAST, details.id ASC`,
+    sales_desc: `products.sale_quantity DESC NULLS LAST,
+      COALESCE(products.listing_time, details.first_seen_at) DESC NULLS LAST, products.id DESC`,
+    style_asc: `publications.style_no ASC NULLS LAST,
+      COALESCE(products.listing_time, details.first_seen_at) DESC NULLS LAST`,
+    title_asc: `COALESCE(products.title, details.title) ASC NULLS LAST,
+      COALESCE(products.listing_time, details.first_seen_at) DESC NULLS LAST`,
+    crawled_desc: `COALESCE(details.last_crawled_at, products.last_crawled_at) DESC NULLS LAST,
+      products.id DESC, details.id DESC`,
+  };
+
   async function listShopOverviewProducts({ shopId = null, unassigned = false, status = 'all',
-    search = '', limit = 50, offset = 0 } = {}) {
+    search = '', availability = 'all', eligible = 'all', gallery = 'all', stylePrefix = '',
+    sort = 'listing_desc', limit = 50, offset = 0 } = {}) {
     const values = [];
-    const where = buildOverviewProductFilter({ shopId, unassigned, status, search }, values);
+    const where = buildOverviewProductFilter(
+      { shopId, unassigned, status, search, availability, eligible, gallery, stylePrefix }, values);
     const from = unassigned
       ? `FROM product_details details
          LEFT JOIN shop_products products ON products.offer_id=details.offer_id
@@ -1797,9 +1827,7 @@ export function createDatabase(databaseUrl) {
          LEFT JOIN product_details details ON details.offer_id=products.offer_id
          LEFT JOIN product_wordpress_publications publications
            ON publications.product_detail_id=details.id`;
-    const order = unassigned
-      ? 'ORDER BY details.last_crawled_at DESC NULLS LAST, details.id DESC'
-      : 'ORDER BY products.listing_time DESC NULLS LAST, products.id DESC';
+    const order = `ORDER BY ${overviewSorts[sort] ?? overviewSorts.listing_desc}`;
     values.push(Math.min(Math.max(Number(limit) || 50, 1), 200));
     values.push(Math.max(Number(offset) || 0, 0));
     const result = await pool.query(`
