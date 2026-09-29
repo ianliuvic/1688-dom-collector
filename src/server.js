@@ -1526,6 +1526,35 @@ app.get('/api/product-detail-image-jobs/:id', { preHandler: requireApiKey }, asy
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
+// Public read-only access to locally stored Alibaba images.  Product photography
+// is public content, but the 1688 CDN rejects foreign Referer headers (hotlink
+// protection), so browsers must load the stored copy from this host instead.
+const IMAGE_CONTENT_TYPES = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+  '.webp': 'image/webp', '.gif': 'image/gif' };
+
+app.get('/api/product-images/:folder/:fileName', async (request, reply) => {
+  const folder = String(request.params.folder ?? '');
+  const fileName = String(request.params.fileName ?? '');
+  const extension = path.extname(fileName).toLowerCase();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(folder) || !/^[A-Za-z0-9._-]{1,180}$/.test(fileName)
+      || !IMAGE_CONTENT_TYPES[extension] || fileName.includes('..')) {
+    return reply.code(400).send({ error: 'invalid_image_path' });
+  }
+  const root = path.resolve(config.storagePath, 'product-images');
+  const filePath = path.resolve(root, folder, fileName);
+  if (!filePath.startsWith(`${root}${path.sep}`)) {
+    return reply.code(400).send({ error: 'invalid_image_path' });
+  }
+  let bytes;
+  try {
+    bytes = await fs.readFile(filePath);
+  } catch {
+    return reply.code(404).send({ error: 'not_found' });
+  }
+  reply.header('cache-control', 'public, max-age=31536000, immutable');
+  return reply.type(IMAGE_CONTENT_TYPES[extension]).send(bytes);
+});
+
 app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, async (request, reply) => {  const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   return db.listProductAudits('sku', detail.id, request.query?.limit);
