@@ -83,6 +83,49 @@ function locateScript(selectors) {
   };
 }
 
+/**
+ * The description content is usually fetched by the page from a CDN payload
+ * (`detailUrl` in the `od_product_description` module state). Reading that
+ * payload directly is far more reliable than waiting for the lazy DOM render.
+ */
+export async function fetchDescriptionPayloadUrls(page, options = {}) {
+  const detailUrl = await page.evaluate(() => {
+    const html = document.documentElement.innerHTML;
+    const marker = html.indexOf('od_product_description');
+    if (marker < 0) return null;
+    const windowText = html.slice(Math.max(0, marker - 1500), marker + 4000);
+    const match = windowText.match(/"detailUrl"\s*:\s*"(https?:(?:\\\/|\/)[^"]+)"/);
+    if (!match) return null;
+    return match[1].replace(/\\\//g, '/').replace(/\\u002F/gi, '/');
+  }).catch(() => null);
+  if (!detailUrl) return { detailUrl: null, urls: [], status: null };
+
+  const headers = { 'user-agent': 'Mozilla/5.0', referer: 'https://detail.1688.com/' };
+  let text = null;
+  let status = null;
+  try {
+    if (options.requestContext?.request) {
+      const response = await options.requestContext.request.get(detailUrl, { headers, timeout: 20000 });
+      status = response.status();
+      text = response.ok() ? await response.text() : null;
+    } else {
+      const response = await fetch(detailUrl, { headers, signal: AbortSignal.timeout(20000) });
+      status = response.status;
+      text = response.ok ? await response.text() : null;
+    }
+  } catch (error) {
+    return { detailUrl, urls: [], status, error: String(error?.message ?? error) };
+  }
+  if (!text) return { detailUrl, urls: [], status };
+
+  const urls = [];
+  for (const raw of text.matchAll(/https?:(?:\\\/|\/)[^"'\s<>\\]*(?:cbu01|img\.alicdn|alicdn)[^"'\s<>\\]*/gi)) {
+    const url = normalizeImageUrl(raw[0].replace(/\\\//g, '/').replace(/\\u002F/gi, '/'), detailUrl);
+    if (url && !urls.includes(url)) urls.push(url);
+  }
+  return { detailUrl, urls, status, bytes: text.length };
+}
+
 function normalizeImageUrl(value, baseUrl) {
   if (!value || typeof value !== 'string') return null;
   let candidate = value.trim();
@@ -205,11 +248,18 @@ export async function extractDetailImageUrls(page, options = {}) {
     await page.waitForTimeout(waitMs);
   }
 
+  const payload = await fetchDescriptionPayloadUrls(page, { requestContext: options.requestContext });
+  const merged = [...new Set([...(payload.urls ?? []), ...urls])];
+
   return {
     container: located.located?.container ?? null,
     containerFrame: located.frame ? located.frame.url().slice(0, 160) : null,
     frameSummaries: located.summaries,
     tabLabel,
     urls: [...urls],
+    detailUrl: payload.detailUrl ?? null,
+    detailUrlStatus: payload.status ?? null,
+    payloadUrls: payload.urls ?? [],
+    urlsTotal: merged.length,
   };
 }

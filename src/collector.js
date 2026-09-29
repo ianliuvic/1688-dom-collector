@@ -586,7 +586,8 @@ export function createCollector({
     sessionState = classifySession(finalUrl, bodyText);
     lastCheckedAt = new Date().toISOString();
     if (sessionState === 'requires_auth') throw new Error('Login or human verification is required.');
-    const extracted = await extractDetailImageUrls(page);
+    const extracted = await extractDetailImageUrls(page, { requestContext: context });
+    const allUrls = [...new Set([...(extracted.payloadUrls ?? []), ...(extracted.urls ?? [])])];
     const offerId = (finalUrl.match(/offer\/(\d+)/) ?? [])[1] ?? null;
     let debugArtifacts = null;
     if (options.debug) {
@@ -601,18 +602,19 @@ export function createCollector({
         debugArtifacts = { htmlPath, screenshotPath: shotPath };
       } catch { debugArtifacts = null; }
     }
-    const files = extracted.urls.length
+    const files = allUrls.length
       ? await downloadProductImages({ offerId, images: [] }, storagePath,
         `detail-images-${offerId ?? crypto.randomUUID()}`, context, {
-          extraSources: extracted.urls.map((imageUrl, index) => ({
+          extraSources: allUrls.map((imageUrl, index) => ({
             url: imageUrl, type: 'description', sortOrder: index,
           })),
         })
       : [];
     const images = files.filter((file) => file.type === 'description');
     return { offerId, finalUrl, container: extracted.container, containerFrame: extracted.containerFrame,
-      frameSummaries: extracted.frameSummaries, tabLabel: extracted.tabLabel, debugArtifacts,
-      imageCount: images.length, images };
+      frameSummaries: extracted.frameSummaries, tabLabel: extracted.tabLabel,
+      detailUrl: extracted.detailUrl ?? null, detailUrlStatus: extracted.detailUrlStatus ?? null,
+      debugArtifacts, imageCount: images.length, images };
   }
 
   // Ephemeral DOM-only product inspection; intentionally does not create jobs, files, or database rows.
