@@ -16,11 +16,23 @@ const captureMaxConcurrency = Math.min(Math.max(Number(process.env.SYNC_CAPTURE_
 const captureDelayMinMs = Math.max(Number(process.env.SYNC_CAPTURE_DELAY_MIN_MS) || 0, 0);
 const captureDelayMaxMs = Math.max(Number(process.env.SYNC_CAPTURE_DELAY_MAX_MS) || captureDelayMinMs,
   captureDelayMinMs);
+const publishCategoryMode = process.env.SYNC_CATEGORY_MODE || 'auto';
+const publishCategoryIds = String(process.env.SYNC_CATEGORY_IDS || '')
+  .split(',').map((value) => Number(value.trim())).filter(Boolean);
+const publishPrimaryCategoryId = Number(process.env.SYNC_PRIMARY_CATEGORY_ID) || null;
+const allowUniformGirlsCategory = ['1', 'true', 'yes'].includes(
+  String(process.env.SYNC_ALLOW_UNIFORM_GIRLS_CATEGORY || '').toLowerCase(),
+);
 
 if (!apiKey) throw new Error('COLLECTOR_API_KEY is required.');
 if (!shopId) throw new Error('SYNC_SHOP_ID is required.');
 if (!progressPath) throw new Error('SYNC_PROGRESS_PATH is required.');
 if (minListingDate && Number.isNaN(minListingDate.getTime())) throw new Error('SYNC_MIN_LISTING_DATE is invalid.');
+if (publishCategoryMode === 'manual' && publishPrimaryCategoryId === 40
+    && publishCategoryIds.includes(23) && !allowUniformGirlsCategory) {
+  throw new Error('Refusing to classify an entire kids shop as Girl\'s Swim. Use auto categorization, '
+    + 'route each product by gender, or explicitly set SYNC_ALLOW_UNIFORM_GIRLS_CATEGORY=true.');
+}
 
 let progress;
 let stopping = false;
@@ -298,7 +310,9 @@ async function queuePublish(item) {
     method: 'POST',
     body: JSON.stringify({
       status: publishStatus,
-      categoryMode: 'auto',
+      categoryMode: publishCategoryMode,
+      ...(publishCategoryIds.length ? { categoryIds: publishCategoryIds } : {}),
+      ...(publishPrimaryCategoryId ? { primaryCategoryId: publishPrimaryCategoryId } : {}),
       tagMode: 'auto',
     }),
   });

@@ -597,7 +597,9 @@ export function createCollector({
         })
       : [];
     const images = files.filter((file) => file.type === 'description');
-    return { offerId, finalUrl, container: extracted.container, imageCount: images.length, images };
+    return { offerId, finalUrl, container: extracted.container, diagnostics: extracted.diagnostics,
+      totalImages: extracted.totalImages, tabLabel: extracted.tabLabel,
+      imageCount: images.length, images };
   }
 
   // Ephemeral DOM-only product inspection; intentionally does not create jobs, files, or database rows.

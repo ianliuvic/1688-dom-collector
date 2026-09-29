@@ -1501,6 +1501,9 @@ app.post('/api/product-details/:id/detail-images', { preHandler: [requireApiKey,
       const result = await collector.captureDetailImages(targetUrl);
       await db.saveDetailImages(detailId, result.images ?? []);
       job.container = result.container ?? null;
+      job.diagnostics = result.diagnostics ?? null;
+      job.totalImages = result.totalImages ?? null;
+      job.tabLabel = result.tabLabel ?? null;
       job.imageCount = result.imageCount ?? 0;
       job.images = (result.images ?? []).map((image) => ({ sourceUrl: image.sourceUrl,
         mimeType: image.mimeType ?? null, byteSize: image.byteSize ?? null,
