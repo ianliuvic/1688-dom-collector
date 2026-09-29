@@ -55,6 +55,11 @@
     .badge.blue{background:var(--blue2);color:var(--blue)}.badge.red{background:var(--red2);color:var(--red)}
     .plinks{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;margin-top:2px}
     .plinks a{text-decoration:none}.plinks a:hover{text-decoration:underline}.plinks .off{color:#a9b2ab}
+    .pactions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:3px}
+    .mini-btn{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:5px 11px;font-size:11.5px;cursor:pointer;color:var(--ink)}
+    .mini-btn:hover{border-color:#aebbb2}.mini-btn:disabled{opacity:.55;cursor:not-allowed}
+    .mini-btn.ok{background:var(--green2);color:var(--green);border-color:#bfe3cf}
+    .portal-link{font-size:11.5px;color:var(--green);text-decoration:none}.portal-link:hover{text-decoration:underline}
     .more{display:flex;justify-content:center;margin-top:16px}
     .empty{padding:34px 10px;text-align:center;color:var(--muted);font-size:13px}
     .footer{margin:22px 0 6px;font-size:11px;color:var(--muted);text-align:center}
@@ -245,6 +250,21 @@ function productCard(item) {
     : '<div class="ph">无首图</div>';
   const link1688 = item.product_url || item.detail_source_url || item.canonical_url || '';
   const style = item.style_no ? `<span>款号 <b>${esc(item.style_no)}</b></span>` : '';
+  const inPortal = Boolean(item.portal_product_id);
+  const canPublish = Boolean(item.wp_post_id);
+  let actions = '';
+  if (item.product_detail_id) {
+    if (canPublish) {
+      actions = `<button class="mini-btn ${inPortal ? 'ok' : ''}" data-portal="${esc(item.product_detail_id)}">${inPortal ? '重新同步到 Portal' : '发布到 Portal'}</button>`;
+    } else {
+      actions = '<button class="mini-btn" disabled title="需先发布到 wearhongxiu 才能发布到 Portal">发布到 Portal</button>';
+    }
+    if (inPortal) {
+      actions += `<a class="portal-link" href="https://portal.wearhongxiu.com/admin/catalog" target="_blank" rel="noreferrer">已在 Portal ✓${item.portal_status ? `（${esc(item.portal_status)}）` : ''}</a>`;
+    }
+    if (item.portal_synced_at) actions += `<span class="off">同步于 ${date(item.portal_synced_at)}</span>`;
+    actions = `<div class="pactions">${actions}</div>`;
+  }
   return `<article class="product">
     <div class="thumb">${thumb}</div>
     <div class="pinfo">
@@ -255,6 +275,7 @@ function productCard(item) {
         ${link1688 ? `<a href="${esc(link1688)}" target="_blank" rel="noreferrer">1688 原链接 ↗</a>` : '<span class="off">1688 链接缺失</span>'}
         ${item.wp_url ? `<a href="${esc(item.wp_url)}" target="_blank" rel="noreferrer">wearhongxiu 页面 ↗</a>` : '<span class="off">未发布到 WP</span>'}
       </div>
+      ${actions}
     </div>
   </article>`;
 }
@@ -344,6 +365,31 @@ for (const id of ['sort', 'availability', 'eligible', 'gallery', 'stylePrefix'])
 $('shopSort').addEventListener('change', () => {
   state.shopSort = $('shopSort').value;
   renderShops();
+});
+
+$('productgrid').addEventListener('click', async (event) => {
+  const btn = event.target.closest('button[data-portal]');
+  if (!btn) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '发布中…';
+  showError('');
+  try {
+    const res = await fetch('/api/portal/publish', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productDetailId: Number(btn.dataset.portal) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    btn.textContent = '已同步 ✓';
+    await loadProducts();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = label;
+    showError(`发布到 Portal 失败：${e.message}`);
+  }
 });
 
 let searchTimer = null;

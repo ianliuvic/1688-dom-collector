@@ -59,6 +59,8 @@ const config = {
   productsRagAdminToken: process.env.PRODUCTS_RAG_ADMIN_TOKEN || '',
   productsRagSyncConcurrency: Math.min(Math.max(Number(process.env.PRODUCTS_RAG_SYNC_CONCURRENCY) || 2, 1), 5),
   detailCaptureConcurrency: Math.min(Math.max(Number(process.env.DETAIL_CAPTURE_CONCURRENCY) || 1, 1), 5),
+  portalApiUrl: process.env.PORTAL_API_URL?.trim() || '',
+  portalAdminSecret: process.env.PORTAL_ADMIN_SECRET || '',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -529,6 +531,63 @@ app.get('/api/shops-overview/products', { preHandler: requireDashboardAuth }, as
     db.listShopOverviewProducts(options), db.countShopOverviewProducts(options),
   ]);
   return { total, limit: options.limit, offset: options.offset, items };
+});
+
+app.post('/api/portal/publish', { preHandler: requireDashboardAuth }, async (request, reply) => {
+  const productDetailId = Number(request.body?.productDetailId);
+  if (!Number.isInteger(productDetailId) || productDetailId <= 0) {
+    return reply.code(400).send({ error: 'product_detail_id_required' });
+  }
+  if (!config.portalApiUrl || !config.portalAdminSecret) {
+    return reply.code(503).send({ error: 'portal_not_configured' });
+  }
+  const detail = await db.getProductDetail(productDetailId);
+  if (!detail) return reply.code(404).send({ error: 'product_not_found' });
+  const publication = await db.getWordPressPublication(productDetailId);
+  if (!publication?.wp_post_id && !publication?.style_no) {
+    return reply.code(409).send({ error: 'wordpress_publication_required' });
+  }
+  const identifier = String(publication.wp_post_id ?? publication.style_no);
+  try {
+    const response = await fetch(new URL('/api/v1/admin/catalog/import/wordpress', config.portalApiUrl), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.portalAdminSecret}`,
+      },
+      body: JSON.stringify({ identifiers: [identifier] }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = body?.error?.message ?? body?.message ?? body?.error ?? `Portal returned HTTP ${response.status}`;
+      throw new Error(String(message));
+    }
+    const product = Array.isArray(body?.products) ? body.products[0] ?? null : null;
+    const portalBase = config.portalApiUrl.replace(/\/$/, '');
+    const saved = await db.savePortalPublication(productDetailId, {
+      wpPostId: publication.wp_post_id ?? null,
+      styleNo: publication.style_no ?? product?.styleNumber ?? null,
+      portalProductId: product?.id ?? null,
+      portalStatus: product?.status ?? null,
+      sourceKey: publication.wp_post_id ? `wordpress:${publication.wp_post_id}` : null,
+      portalUrl: product?.id ? `${portalBase}/admin/catalog` : null,
+      result: product ? {
+        id: product.id, status: product.status, title: product.title,
+        styleNumber: product.styleNumber, variantCount: (product.variants ?? []).length,
+        mediaCount: (product.media ?? []).length,
+      } : {},
+      lastError: null,
+    });
+    return { status: 'synced', productDetailId, portalProduct: product, publication: saved };
+  } catch (error) {
+    const message = String(error?.message || error);
+    await db.failPortalPublication(productDetailId, message, {
+      wpPostId: publication.wp_post_id ?? null,
+      styleNo: publication.style_no ?? null,
+    }).catch(() => {});
+    return reply.code(502).send({ error: 'portal_publish_failed', message });
+  }
 });
 
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({

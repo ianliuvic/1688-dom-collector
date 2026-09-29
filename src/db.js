@@ -402,6 +402,27 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS product_detail_option_overrides_product_idx
         ON product_detail_option_overrides(product_detail_id, dimension_name);
+      -- Portal (portal.wearhongxiu.com client fulfilment portal) catalog
+      -- publication tracking. A row records the last WordPress-to-portal catalog
+      -- import result for a collector-managed product.
+      CREATE TABLE IF NOT EXISTS product_portal_publications (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint NOT NULL UNIQUE REFERENCES product_details(id) ON DELETE CASCADE,
+        wp_post_id bigint,
+        style_no text,
+        portal_product_id text,
+        portal_status text,
+        source_key text,
+        portal_url text,
+        result jsonb NOT NULL DEFAULT '{}'::jsonb,
+        last_error text,
+        first_published_at timestamptz,
+        last_synced_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS product_portal_publications_post_idx
+        ON product_portal_publications(wp_post_id);
     `);
 
     // A shop can be reached through several equivalent 1688 URLs (homepage,
@@ -1758,6 +1779,8 @@ export function createDatabase(databaseUrl) {
     details.canonical_url, details.gallery_verified_complete, details.duplicate_status,
     details.last_crawled_at AS detail_last_crawled_at,
     publications.style_no, publications.wp_post_id, publications.wp_url, publications.wp_status,
+    portal.portal_product_id, portal.portal_status, portal.portal_url,
+    portal.last_synced_at AS portal_synced_at,
     (SELECT images.source_url FROM product_detail_images images
       WHERE images.product_detail_id=details.id AND images.image_type IN ('main','gallery')
       ORDER BY (images.image_type='main') DESC, images.sort_order LIMIT 1) AS detail_image_url
@@ -1822,11 +1845,15 @@ export function createDatabase(databaseUrl) {
       ? `FROM product_details details
          LEFT JOIN shop_products products ON products.offer_id=details.offer_id
          LEFT JOIN product_wordpress_publications publications
-           ON publications.product_detail_id=details.id`
+           ON publications.product_detail_id=details.id
+         LEFT JOIN product_portal_publications portal
+           ON portal.product_detail_id=details.id`
       : `FROM shop_products products
          LEFT JOIN product_details details ON details.offer_id=products.offer_id
          LEFT JOIN product_wordpress_publications publications
-           ON publications.product_detail_id=details.id`;
+           ON publications.product_detail_id=details.id
+         LEFT JOIN product_portal_publications portal
+           ON portal.product_detail_id=details.id`;
     const order = `ORDER BY ${overviewSorts[sort] ?? overviewSorts.listing_desc}`;
     values.push(Math.min(Math.max(Number(limit) || 50, 1), 200));
     values.push(Math.max(Number(offset) || 0, 0));
@@ -1853,6 +1880,48 @@ export function createDatabase(databaseUrl) {
     return Number(result.rows[0]?.total || 0);
   }
 
+  async function getPortalPublication(productDetailId) {
+    const result = await pool.query(
+      'SELECT * FROM product_portal_publications WHERE product_detail_id=$1',
+      [productDetailId],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async function savePortalPublication(productDetailId, values) {
+    const saved = await pool.query(`
+      INSERT INTO product_portal_publications (
+        product_detail_id, wp_post_id, style_no, portal_product_id, portal_status,
+        source_key, portal_url, result, last_error, first_published_at, last_synced_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
+      ON CONFLICT (product_detail_id) DO UPDATE SET
+        wp_post_id=EXCLUDED.wp_post_id, style_no=EXCLUDED.style_no,
+        portal_product_id=EXCLUDED.portal_product_id, portal_status=EXCLUDED.portal_status,
+        source_key=EXCLUDED.source_key, portal_url=EXCLUDED.portal_url,
+        result=EXCLUDED.result, last_error=EXCLUDED.last_error,
+        first_published_at=COALESCE(product_portal_publications.first_published_at, now()),
+        last_synced_at=now(), updated_at=now()
+      RETURNING *
+    `, [productDetailId, values.wpPostId ?? null, values.styleNo ?? null,
+      values.portalProductId ?? null, values.portalStatus ?? null, values.sourceKey ?? null,
+      values.portalUrl ?? null, JSON.stringify(values.result ?? {}),
+      values.lastError ?? null]);
+    return saved.rows[0];
+  }
+
+  async function failPortalPublication(productDetailId, error, values = {}) {
+    const saved = await pool.query(`
+      INSERT INTO product_portal_publications (product_detail_id, wp_post_id, style_no, last_error)
+      VALUES ($1,$2,$3,$4)
+      ON CONFLICT (product_detail_id) DO UPDATE SET
+        wp_post_id=COALESCE(EXCLUDED.wp_post_id, product_portal_publications.wp_post_id),
+        style_no=COALESCE(EXCLUDED.style_no, product_portal_publications.style_no),
+        last_error=EXCLUDED.last_error, updated_at=now()
+      RETURNING *
+    `, [productDetailId, values.wpPostId ?? null, values.styleNo ?? null, String(error)]);
+    return saved.rows[0];
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -1873,7 +1942,8 @@ export function createDatabase(databaseUrl) {
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
-    listShopOverviewProducts, countShopOverviewProducts, ping };
+    listShopOverviewProducts, countShopOverviewProducts,
+    getPortalPublication, savePortalPublication, failPortalPublication, ping };
 }
 
 function parseScore(value) {
