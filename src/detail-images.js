@@ -27,10 +27,11 @@ const CONTAINER_SELECTORS = [
 
 const TAB_LABELS = ['商品详情', '图文详情', '产品详情', '宝贝详情', '详情'];
 
-const LOCATE_SCRIPT = `(selectors) => {
+/** Runs inside the page: locate (and mark) the description container, with diagnostics. */
+function locateScript(selectors) {
   const describe = (node) => node.tagName.toLowerCase()
     + (node.id ? '#' + node.id : '')
-    + (typeof node.className === 'string' && node.className ? '.' + node.className.split(/\\s+/).slice(0, 3).join('.') : '');
+    + (typeof node.className === 'string' && node.className ? '.' + node.className.split(/\s+/).slice(0, 3).join('.') : '');
   const excluded = (node) => Boolean(node.closest('header, footer, nav, [class*="gallery" i], [class*="sku" i], [class*="recommend" i], [class*="header" i], [class*="footer" i], [class*="nav" i]'));
   for (const marker of document.querySelectorAll('[data-collector-detail-container]')) marker.removeAttribute('data-collector-detail-container');
 
@@ -80,7 +81,7 @@ const LOCATE_SCRIPT = `(selectors) => {
     diagnostics: diagnostics.slice(0, 6),
     totalImages: document.querySelectorAll('img').length,
   };
-}`;
+}
 
 function normalizeImageUrl(value, baseUrl) {
   if (!value || typeof value !== 'string') return null;
@@ -129,7 +130,7 @@ async function locateAcrossFrames(page) {
   let chosen = null;
   for (const frame of page.frames()) {
     try {
-      const located = await frame.evaluate(LOCATE_SCRIPT, CONTAINER_SELECTORS);
+      const located = await frame.evaluate(locateScript, CONTAINER_SELECTORS);
       summaries.push({ frame: frame.url().slice(0, 120), container: located?.container ?? null,
         totalImages: located?.totalImages ?? null, diagnostics: located?.diagnostics ?? [] });
       const imageCount = located?.container?.imageCount ?? 0;
@@ -137,7 +138,9 @@ async function locateAcrossFrames(page) {
         chosenFrame = frame;
         chosen = located;
       }
-    } catch { /* frame not accessible */ }
+    } catch (error) {
+      summaries.push({ frame: frame.url().slice(0, 120), error: String(error?.message ?? error).slice(0, 200) });
+    }
   }
   return { frame: chosenFrame, located: chosen, summaries };
 }
