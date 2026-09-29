@@ -614,11 +614,13 @@ export function createCollector({
     return { offerId, finalUrl, container: extracted.container, containerFrame: extracted.containerFrame,
       frameSummaries: extracted.frameSummaries, tabLabel: extracted.tabLabel,
       detailUrl: extracted.detailUrl ?? null, detailUrlStatus: extracted.detailUrlStatus ?? null,
+      sourceUrlCount: allUrls.length, sourceUrls: allUrls.slice(0, 6),
       debugArtifacts, imageCount: images.length, images };
   }
 
   // Ephemeral DOM-only product inspection; intentionally does not create jobs, files, or database rows.
-  async function inspectProduct(url) {    await page.goto(url, { waitUntil: 'domcontentloaded' });
+  async function inspectProduct(url) {
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(5000);
     const finalUrl = page.url();
     const title = await page.title();
