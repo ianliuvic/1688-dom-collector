@@ -16,11 +16,29 @@ const captureMaxConcurrency = Math.min(Math.max(Number(process.env.SYNC_CAPTURE_
 const captureDelayMinMs = Math.max(Number(process.env.SYNC_CAPTURE_DELAY_MIN_MS) || 0, 0);
 const captureDelayMaxMs = Math.max(Number(process.env.SYNC_CAPTURE_DELAY_MAX_MS) || captureDelayMinMs,
   captureDelayMinMs);
+const publishCategoryMode = process.env.SYNC_CATEGORY_MODE || 'auto';
+const publishCategoryIds = String(process.env.SYNC_CATEGORY_IDS || '')
+  .split(',').map((value) => Number(value.trim())).filter(Boolean);
+const publishPrimaryCategoryId = Number(process.env.SYNC_PRIMARY_CATEGORY_ID) || null;
+const allowUniformGirlsCategory = ['1', 'true', 'yes'].includes(
+  String(process.env.SYNC_ALLOW_UNIFORM_GIRLS_CATEGORY || '').toLowerCase(),
+);
+// Daily runs pre-check each candidate's listing image against the collector's
+// main-image perceptual-hash store; an exact match skips the detail capture
+// entirely (the capture worker repeats the check as a safety net).
+const imageDuplicateCheckEnabled = !['0', 'false', 'no'].includes(
+  String(process.env.SYNC_IMAGE_DUPLICATE_CHECK || 'true').toLowerCase(),
+);
 
 if (!apiKey) throw new Error('COLLECTOR_API_KEY is required.');
 if (!shopId) throw new Error('SYNC_SHOP_ID is required.');
 if (!progressPath) throw new Error('SYNC_PROGRESS_PATH is required.');
 if (minListingDate && Number.isNaN(minListingDate.getTime())) throw new Error('SYNC_MIN_LISTING_DATE is invalid.');
+if (publishCategoryMode === 'manual' && publishPrimaryCategoryId === 40
+    && publishCategoryIds.includes(23) && !allowUniformGirlsCategory) {
+  throw new Error('Refusing to classify an entire kids shop as Girl\'s Swim. Use auto categorization, '
+    + 'route each product by gender, or explicitly set SYNC_ALLOW_UNIFORM_GIRLS_CATEGORY=true.');
+}
 
 let progress;
 let stopping = false;
@@ -62,6 +80,7 @@ async function saveProgress() {
     translated: items.filter((item) => item.translationCompleted).length,
     published: items.filter((item) => item.stage === 'published').length,
     duplicateRejected: items.filter((item) => item.stage === 'duplicate_rejected').length,
+    imageDuplicateSkipped: items.filter((item) => item.duplicatePrecheck === true).length,
     failed: items.filter((item) => item.stage === 'failed').length,
     inFlight: items.filter((item) => !['published', 'duplicate_rejected', 'failed'].includes(item.stage)).length,
   };
@@ -212,6 +231,31 @@ function recoverExistingItem(item) {
 }
 
 async function queueCapture(item) {
+  if (imageDuplicateCheckEnabled && item.imageUrl) {
+    try {
+      const check = await api('/api/image-hashes/check', {
+        method: 'POST',
+        body: JSON.stringify({ offerId: item.offerId, imageUrl: item.imageUrl }),
+      });
+      if (check?.match) {
+        item.stage = 'duplicate_rejected';
+        item.duplicatePrecheck = true;
+        item.duplicateAnalysis = {
+          status: 'exact_duplicate',
+          decision: 'reject',
+          confidence: 'certain',
+          reason: 'The listing image is exactly the same image as an existing product main image.',
+          matches: Array.isArray(check.matches) ? check.matches.slice(0, 5) : [],
+        };
+        item.completedAt = now();
+        item.error = null;
+        return;
+      }
+    } catch (error) {
+      // Fail open: the capture-time perceptual check on the collector still applies.
+      item.imageDuplicateCheckError = error?.message || String(error);
+    }
+  }
   const waitMs = Math.max(0, nextCaptureAllowedAt - Date.now());
   if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
   const job = await api('/api/product-details', {
@@ -298,7 +342,9 @@ async function queuePublish(item) {
     method: 'POST',
     body: JSON.stringify({
       status: publishStatus,
-      categoryMode: 'auto',
+      categoryMode: publishCategoryMode,
+      ...(publishCategoryIds.length ? { categoryIds: publishCategoryIds } : {}),
+      ...(publishPrimaryCategoryId ? { primaryCategoryId: publishPrimaryCategoryId } : {}),
       tagMode: 'auto',
     }),
   });
@@ -471,6 +517,7 @@ async function initialize() {
     items: Object.fromEntries(usable.map((product) => [String(product.offer_id), {
       offerId: String(product.offer_id),
       sourceUrl: product.product_url || `https://detail.1688.com/offer/${product.offer_id}.html`,
+      imageUrl: product.image_url || null,
       stage: 'new',
       captureJobId: null,
       detailId: null,
