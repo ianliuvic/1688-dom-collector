@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+
+import { computeImageHashes } from './image-hash.js';
 
 function clean(value) {
   return String(value ?? '').trim();
@@ -82,6 +85,25 @@ function exactCandidate(candidate) {
   };
 }
 
+function mainImageCandidate(candidate) {
+  return {
+    productDetailId: Number(candidate.product_detail_id) || null,
+    offerId: clean(candidate.offer_id),
+    wpPostId: candidate.wp_post_id ? Number(candidate.wp_post_id) : null,
+    sku: clean(candidate.sku),
+    sourceUrl: clean(candidate.canonical_url || candidate.detail_source_url || candidate.source_url),
+    title: clean(candidate.title),
+    decision: 'same_product',
+    confidence: 1,
+    evidence: {
+      mainImageExactMatch: true,
+      dhashHex: clean(candidate.dhash_hex),
+      phashHex: clean(candidate.phash_hex),
+      origin: clean(candidate.origin),
+    },
+  };
+}
+
 function hashCandidate(candidate) {
   const overlap = Number(candidate.matched_image_count || 0);
   const currentCount = Number(candidate.current_image_count || 0);
@@ -145,6 +167,24 @@ function mergeCandidates(candidates) {
 export async function analyzeProductDuplicates({ data, imageFiles, database, ragClient }) {
   const checkedAt = new Date().toISOString();
   const galleryProfile = buildGalleryFingerprint(data, imageFiles);
+
+  const mainImageFile = (imageFiles ?? []).find((image) => image?.type === 'main' && image.storagePath);
+  let mainImageHash = null;
+  let mainImageHashError = null;
+  if (mainImageFile) {
+    try {
+      const bytes = await fs.readFile(mainImageFile.storagePath);
+      const computed = await computeImageHashes(bytes);
+      mainImageHash = {
+        dhashHex: computed.dhashHex,
+        phashHex: computed.phashHex,
+        sourceUrl: clean(mainImageFile.sourceUrl),
+      };
+    } catch (error) {
+      mainImageHashError = String(error?.message ?? error).slice(0, 200);
+    }
+  }
+
   const exactMatches = galleryProfile.fingerprint && galleryProfile.verifiedComplete
     && galleryProfile.sourceImageCount >= 2
     ? await database.findExactGalleryDuplicates({
@@ -163,9 +203,43 @@ export async function analyzeProductDuplicates({ data, imageFiles, database, rag
       confidence: 'certain',
       reason: 'A different 1688 offer has the same verified complete Gallery image bytes.',
       galleryProfile,
+      mainImageHash,
+      mainImageHashError,
       candidates: exactMatches.map(exactCandidate),
-      checks: { exactContentHash: 'completed', multimodalEmbedding: 'skipped_exact_match' },
+      checks: {
+        exactContentHash: 'completed',
+        mainImagePerceptualHash: mainImageHash ? 'skipped_gallery_exact_match' : 'unavailable',
+        multimodalEmbedding: 'skipped_exact_match',
+      },
     };
+  }
+
+  if (mainImageHash && typeof database.findMainImagePerceptualExactMatches === 'function') {
+    const mainImageMatches = await database.findMainImagePerceptualExactMatches({
+      offerId: data.offerId,
+      dhashHex: mainImageHash.dhashHex,
+      phashHex: mainImageHash.phashHex,
+    });
+    if (mainImageMatches.length) {
+      return {
+        schemaVersion: 1,
+        checkedAt,
+        status: 'exact_duplicate',
+        isSimilarProduct: true,
+        decision: 'reject',
+        confidence: 'certain',
+        reason: 'The main image is exactly the same image as an existing product main image.',
+        galleryProfile,
+        mainImageHash: { ...mainImageHash, matchCount: mainImageMatches.length },
+        mainImageHashError,
+        candidates: mainImageMatches.map(mainImageCandidate),
+        checks: {
+          exactContentHash: 'completed',
+          mainImagePerceptualHash: 'completed',
+          multimodalEmbedding: 'skipped_exact_match',
+        },
+      };
+    }
   }
 
   const hashMatches = galleryProfile.contentHashes.length
@@ -209,7 +283,14 @@ export async function analyzeProductDuplicates({ data, imageFiles, database, rag
       ? 'One or more non-conclusive visual or exact-image-overlap candidates require human review.'
       : 'No existing product met the configured exact-image or embedding similarity thresholds.',
     galleryProfile,
+    mainImageHash,
+    mainImageHashError,
     candidates,
-    checks: { exactContentHash: 'completed', multimodalEmbedding: ragStatus },
+    checks: {
+      exactContentHash: 'completed',
+      mainImagePerceptualHash: mainImageHash ? 'completed'
+        : (mainImageHashError ? 'failed' : 'unavailable'),
+      multimodalEmbedding: ragStatus,
+    },
   };
 }

@@ -423,6 +423,31 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS product_portal_publications_post_idx
         ON product_portal_publications(wp_post_id);
+      -- Main-image perceptual hashes (dHash + pHash) used to skip capturing a
+      -- new offer whose first image is exactly the same image as an existing
+      -- product.  Rows are imported from the Wearhongxiu published catalog and
+      -- maintained by every successful product capture.
+      CREATE TABLE IF NOT EXISTS product_image_perceptual_hashes (
+        id bigserial PRIMARY KEY,
+        offer_id text,
+        product_detail_id bigint,
+        wp_post_id bigint,
+        sku text,
+        title text,
+        source_url text,
+        dhash_hex char(16) NOT NULL,
+        phash_hex char(16) NOT NULL,
+        origin text NOT NULL DEFAULT 'capture',
+        note text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS product_image_perceptual_hashes_offer_idx
+        ON product_image_perceptual_hashes(offer_id) WHERE offer_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS product_image_perceptual_hashes_wp_idx
+        ON product_image_perceptual_hashes(wp_post_id) WHERE wp_post_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS product_image_perceptual_hashes_hash_idx
+        ON product_image_perceptual_hashes(dhash_hex, phash_hex);
     `);
 
     // A shop can be reached through several equivalent 1688 URLs (homepage,
@@ -1023,6 +1048,115 @@ export function createDatabase(databaseUrl) {
       ORDER BY matched_image_count DESC, details.last_crawled_at DESC
       LIMIT $4`, [hashes, Number(currentImageCount) || 0, offerId ? String(offerId) : null, safeLimit]);
     return result.rows;
+  }
+
+  async function findMainImagePerceptualExactMatches({ offerId, dhashHex, phashHex }) {
+    const dhash = String(dhashHex || '').trim().toLowerCase();
+    const phash = String(phashHex || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{16}$/.test(dhash) || !/^[0-9a-f]{16}$/.test(phash)) return [];
+    const result = await pool.query(`SELECT hashes.offer_id, hashes.product_detail_id,
+      hashes.wp_post_id, hashes.sku, hashes.title, hashes.source_url, hashes.origin,
+      hashes.dhash_hex, hashes.phash_hex,
+      details.canonical_url, details.source_url AS detail_source_url
+      FROM product_image_perceptual_hashes hashes
+      LEFT JOIN product_details details ON details.id = hashes.product_detail_id
+      WHERE hashes.dhash_hex=$1 AND hashes.phash_hex=$2
+        AND ($3::text IS NULL OR hashes.offer_id IS DISTINCT FROM $3::text)
+      ORDER BY hashes.updated_at DESC LIMIT 10`, [dhash, phash, offerId ? String(offerId) : null]);
+    return result.rows;
+  }
+
+  async function upsertProductMainImageHash({ offerId, productDetailId = null, wpPostId = null,
+    sku = null, title = null, sourceUrl = null, dhashHex, phashHex, origin = 'capture' }) {
+    const dhash = String(dhashHex || '').trim().toLowerCase();
+    const phash = String(phashHex || '').trim().toLowerCase();
+    if (!offerId || !/^[0-9a-f]{16}$/.test(dhash) || !/^[0-9a-f]{16}$/.test(phash)) return false;
+    await pool.query(`INSERT INTO product_image_perceptual_hashes AS hashes
+      (offer_id, product_detail_id, wp_post_id, sku, title, source_url, dhash_hex, phash_hex, origin)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      ON CONFLICT (offer_id) WHERE offer_id IS NOT NULL DO UPDATE SET
+        product_detail_id=COALESCE(EXCLUDED.product_detail_id, hashes.product_detail_id),
+        wp_post_id=COALESCE(EXCLUDED.wp_post_id, hashes.wp_post_id),
+        sku=COALESCE(EXCLUDED.sku, hashes.sku),
+        title=COALESCE(EXCLUDED.title, hashes.title),
+        source_url=COALESCE(EXCLUDED.source_url, hashes.source_url),
+        dhash_hex=EXCLUDED.dhash_hex,
+        phash_hex=EXCLUDED.phash_hex,
+        origin=EXCLUDED.origin,
+        updated_at=now()`,
+    [String(offerId), productDetailId, wpPostId, sku, title, sourceUrl, dhash, phash, origin]);
+    return true;
+  }
+
+  async function backfillPerceptualHashOffers() {
+    const result = await pool.query(`UPDATE product_image_perceptual_hashes hashes
+      SET offer_id = candidate.offer_id,
+          product_detail_id = COALESCE(hashes.product_detail_id, candidate.product_detail_id),
+          sku = COALESCE(hashes.sku, candidate.style_no),
+          updated_at = now()
+      FROM (
+        SELECT publications.wp_post_id,
+               COALESCE(NULLIF(regexp_replace(publications.external_id, '^1688:', ''), ''),
+                 details.offer_id) AS offer_id,
+               publications.product_detail_id,
+               publications.style_no
+        FROM product_wordpress_publications publications
+        LEFT JOIN product_details details ON details.id = publications.product_detail_id
+      ) candidate
+      WHERE hashes.wp_post_id = candidate.wp_post_id
+        AND hashes.offer_id IS NULL
+        AND candidate.offer_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM product_image_perceptual_hashes existing
+          WHERE existing.offer_id = candidate.offer_id
+        )`);
+    return result.rowCount;
+  }
+
+  async function importPerceptualHashes(items) {
+    const rows = (Array.isArray(items) ? items : [])
+      .map((item) => ({
+        wpPostId: Number(item?.wpPostId) || null,
+        sku: item?.sku ? String(item.sku).slice(0, 120) : null,
+        title: item?.title ? String(item.title).slice(0, 400) : null,
+        sourceUrl: item?.sourceUrl ? String(item.sourceUrl).slice(0, 800) : null,
+        dhashHex: String(item?.dhashHex || '').trim().toLowerCase(),
+        phashHex: String(item?.phashHex || '').trim().toLowerCase(),
+      }))
+      .filter((item) => /^[0-9a-f]{16}$/.test(item.dhashHex)
+        && /^[0-9a-f]{16}$/.test(item.phashHex));
+    let imported = 0;
+    for (let offset = 0; offset < rows.length; offset += 500) {
+      const chunk = rows.slice(offset, offset + 500);
+      await pool.query(`INSERT INTO product_image_perceptual_hashes AS hashes
+        (wp_post_id, sku, title, source_url, dhash_hex, phash_hex, origin)
+        SELECT * FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[],
+          $5::char(16)[], $6::char(16)[], $7::text[])
+        ON CONFLICT (wp_post_id) WHERE wp_post_id IS NOT NULL DO UPDATE SET
+          sku=COALESCE(EXCLUDED.sku, hashes.sku),
+          title=COALESCE(EXCLUDED.title, hashes.title),
+          source_url=COALESCE(EXCLUDED.source_url, hashes.source_url),
+          dhash_hex=EXCLUDED.dhash_hex,
+          phash_hex=EXCLUDED.phash_hex,
+          origin=EXCLUDED.origin,
+          updated_at=now()`,
+      [chunk.map((row) => row.wpPostId), chunk.map((row) => row.sku), chunk.map((row) => row.title),
+        chunk.map((row) => row.sourceUrl), chunk.map((row) => row.dhashHex),
+        chunk.map((row) => row.phashHex), chunk.map(() => 'import')]);
+      imported += chunk.length;
+    }
+    const backfilled = await backfillPerceptualHashOffers();
+    return { imported, backfilled, total: rows.length };
+  }
+
+  async function getPerceptualHashSummary() {
+    const result = await pool.query(`SELECT count(*)::int AS total,
+      count(*) FILTER (WHERE offer_id IS NOT NULL)::int AS with_offer,
+      count(*) FILTER (WHERE wp_post_id IS NOT NULL)::int AS with_wp,
+      count(*) FILTER (WHERE origin='import')::int AS imported,
+      count(*) FILTER (WHERE origin='capture')::int AS captured
+      FROM product_image_perceptual_hashes`);
+    return result.rows[0];
   }
 
   async function backfillProductImageHashes() {
@@ -1955,6 +2089,8 @@ export function createDatabase(databaseUrl) {
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
+    findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
+    getPerceptualHashSummary, backfillPerceptualHashOffers,
     saveProductVision, listProductVision, saveProductImageCleanup, listProductImageCleanups,
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
     recoverPendingProductAudits,

@@ -19,6 +19,7 @@ import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
 import { buildRagProduct, createRagClient } from './rag-client.js';
 import { analyzeProductDuplicates } from './duplicate-analyzer.js';
+import { computeImageHashes } from './image-hash.js';
 import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
@@ -1560,6 +1561,52 @@ app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, as
   return db.listProductAudits('sku', detail.id, request.query?.limit);
 });
 
+const PERCEPTUAL_HASH_IMAGE_HOSTS = ['alicdn.com', '1688.com', 'taobao.com', 'tmall.com', 'yiswim.cloud'];
+
+function isAllowedPerceptualHashImageUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'https:') return false;
+    const host = url.hostname.toLowerCase();
+    return PERCEPTUAL_HASH_IMAGE_HOSTS.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+  } catch {
+    return false;
+  }
+}
+
+app.post('/api/image-hashes/import', { preHandler: requireApiKey }, async (request, reply) => {
+  const items = Array.isArray(request.body?.items) ? request.body.items : [];
+  if (!items.length) return reply.code(400).send({ error: 'items[] is required.' });
+  const result = await db.importPerceptualHashes(items);
+  return { ok: true, ...result };
+});
+
+app.get('/api/image-hashes/summary', { preHandler: requireApiKey }, async () => db.getPerceptualHashSummary());
+
+app.post('/api/image-hashes/check', { preHandler: requireApiKey }, async (request, reply) => {
+  const offerId = request.body?.offerId ? String(request.body.offerId) : null;
+  const imageUrl = String(request.body?.imageUrl || '');
+  if (!isAllowedPerceptualHashImageUrl(imageUrl)) {
+    return reply.code(400).send({ error: 'imageUrl must be an https image URL on a supported CDN host.' });
+  }
+  let bytes = null;
+  try {
+    const response = await fetch(imageUrl, {
+      headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://detail.1688.com/' },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!response.ok) return reply.code(502).send({ error: `image_fetch_failed_${response.status}` });
+    const contentType = response.headers.get('content-type')?.split(';')[0] || '';
+    if (!contentType.startsWith('image/')) return reply.code(502).send({ error: 'not_an_image' });
+    bytes = Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    return reply.code(502).send({ error: `image_fetch_failed: ${String(error?.message ?? error).slice(0, 200)}` });
+  }
+  const hashes = await computeImageHashes(bytes);
+  const matches = await db.findMainImagePerceptualExactMatches({ offerId, ...hashes });
+  return { match: matches.length > 0, hashes, matches };
+});
+
 app.post('/api/image-audit/test', { preHandler: requireApiKey }, async (request, reply) => {
   if (!Array.isArray(request.body?.images) || request.body.images.length < 1 || request.body.images.length > 30) {
     return reply.code(400).send({ error: 'images must contain 1 to 30 ordered persistent-storage image paths.' });
@@ -1829,6 +1876,21 @@ async function workerLoop(queue, workerIndex = 0) {
           const saved = await db.saveProductDetail(
             result.extractedData, job.url, result.extractedData.localImages ?? [], duplicateAnalysis,
           );
+          if (duplicateAnalysis.mainImageHash?.dhashHex) {
+            try {
+              await db.upsertProductMainImageHash({
+                offerId: result.extractedData?.offerId,
+                productDetailId: saved.productDetailId,
+                title: result.extractedData?.title ?? null,
+                sourceUrl: result.extractedData?.mainImage ?? null,
+                dhashHex: duplicateAnalysis.mainImageHash.dhashHex,
+                phashHex: duplicateAnalysis.mainImageHash.phashHex,
+                origin: 'capture',
+              });
+            } catch (error) {
+              app.log.error({ err: error }, 'failed to register main image perceptual hash');
+            }
+          }
           try {
             await scheduleSavedProductAudits(saved.productDetailId, { trigger: 'capture' });
           } catch (error) {
