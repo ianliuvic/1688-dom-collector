@@ -574,7 +574,7 @@ function sizeCountFromSkuDimensions(skuDimensions) {
     .filter((value) => value && !/(均码|one\s*size|free\s*size)/i.test(value)))].length;
 }
 
-app.post('/api/portal/publish', { preHandler: requireDashboardAuth }, async (request, reply) => {
+app.post('/api/portal/publish', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const productDetailId = Number(request.body?.productDetailId);
   if (!Number.isInteger(productDetailId) || productDetailId <= 0) {
     return reply.code(400).send({ error: 'product_detail_id_required' });

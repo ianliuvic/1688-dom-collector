@@ -597,23 +597,56 @@ export async function parse1688Product(page) {
   const inferredSkuRows = [...new Map(inferredSkuRowsRaw.map((row) => [
     `${row.skuText}\0${row.price}\0${row.stock}`, row,
   ])).values()];
+  // The embedded SKU table (every option x size with its own price/stock) is
+  // authoritative when present: the rendered expand rows only cover the
+  // currently selected option, which is how colour data used to get lost.
+  const normalizeDimensionName = (value) => {
+    const name = cleanText(value);
+    if (/^(?:颜色|color)$/i.test(name)) return 'Color';
+    if (/^(?:尺码|尺寸|码数|size)$/i.test(name)) return 'Size';
+    return name;
+  };
+  const matrixSkuRows = [];
+  for (const row of (raw.skuModel?.rows ?? []).slice(0, MAX_SKU_ROWS)) {
+    const options = {};
+    for (const [name, value] of Object.entries(row?.options ?? {})) {
+      const cleanName = normalizeDimensionName(name);
+      const cleanValue = cleanText(value);
+      if (cleanName && cleanValue) options[cleanName] = cleanValue;
+    }
+    const entries = Object.entries(options);
+    if (!entries.length) continue;
+    const sizeEntry = entries.find(([name]) => name === 'Size');
+    const colorEntry = entries.find(([name]) => name === 'Color');
+    const skuText = sizeEntry ? sizeEntry[1] : (colorEntry ? colorEntry[1] : entries.map(([, value]) => value).join(' '));
+    matrixSkuRows.push({
+      skuKey: entries.map(([name, value]) => `${name}:${value}`).join('|'),
+      skuText,
+      options,
+      price: row?.price != null && row.price !== '' && Number.isFinite(Number(row.price)) ? Number(row.price) : null,
+      stock: row?.stock != null && row.stock !== '' && Number.isFinite(Number(row.stock)) ? Number(row.stock) : null,
+    });
+  }
+  const effectiveSkuRows = matrixSkuRows.length ? matrixSkuRows : inferredSkuRows;
   const verifiedPrice = deriveVerifiedProductPrice({
-    skuPrices: inferredSkuRows.map((row) => row.price),
+    skuPrices: effectiveSkuRows.map((row) => row.price),
     jsonLdPrices: ldPrices,
     scopedPriceTexts: raw.scopedPriceTexts ?? [],
   });
-  const sizeValues = unique(inferredSkuRows.map((row) => row.skuText), 100);
+  const sizeValues = unique(effectiveSkuRows.map((row) => row.skuText), 100);
   const colorOptions = raw.skuOptions.filter((item) => /^(?:颜色|color)$/i.test(cleanText(item.dimensionName)));
   const colorValues = unique(colorOptions.map((item) => cleanText(item.text)), 100);
   const inferredDimensions = [
     ...(colorValues.length ? [{ name: 'Color', values: colorValues }] : []),
     ...(sizeValues.length ? [{ name: 'Size', values: sizeValues }] : []),
   ];
-  for (const row of inferredSkuRows) {
-    row.options = {
-      ...(colorValues.length === 1 ? { Color: colorValues[0] } : {}),
-      Size: row.skuText,
-    };
+  if (!matrixSkuRows.length) {
+    for (const row of inferredSkuRows) {
+      row.options = {
+        ...(colorValues.length === 1 ? { Color: colorValues[0] } : {}),
+        Size: row.skuText,
+      };
+    }
   }
   const normalized = {
     schemaVersion: 1,
@@ -648,9 +681,11 @@ export async function parse1688Product(page) {
       reason: raw.gallerySnapshot?.reason || hydration.reason || null,
     },
     videos: [],
-    skuDimensions: ((raw.domSkuDimensions ?? []).length ? raw.domSkuDimensions
+    skuDimensions: (((raw.skuModel?.dimensions ?? []).length)
+      ? raw.skuModel.dimensions
+      : (raw.domSkuDimensions ?? []).length ? raw.domSkuDimensions
       : candidates.dimensions.length ? candidates.dimensions : inferredDimensions).slice(0, 50),
-    skuRows: (inferredSkuRows.length ? inferredSkuRows : candidates.skuRows).slice(0, MAX_SKU_ROWS),
+    skuRows: (effectiveSkuRows.length ? effectiveSkuRows : candidates.skuRows).slice(0, MAX_SKU_ROWS),
     skuOptions: raw.skuOptions.slice(0, 200).map((item) => ({
       dimensionName: cleanText(item.dimensionName),
       text: cleanText(item.text),
