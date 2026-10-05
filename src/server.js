@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import Fastify from 'fastify';
 import fastifyHttpProxy from '@fastify/http-proxy';
+import sharp from 'sharp';
 import { createDatabase } from './db.js';
 import { createCollector, is1688ShopUrl, isAllowed1688Url } from './collector.js';
 import { analyzeProductImage } from './vision.js';
@@ -1561,8 +1562,22 @@ app.get('/api/product-images/:folder/:fileName', async (request, reply) => {
   } catch {
     return reply.code(404).send({ error: 'not_found' });
   }
+  // Optional on-the-fly thumbnail (`?w=`): stored captures are full-size
+  // originals, so review pages request a small width instead of the original.
+  const requestedWidth = Number(request.query?.w);
+  let contentType = IMAGE_CONTENT_TYPES[extension];
+  if (Number.isFinite(requestedWidth) && requestedWidth > 0) {
+    const width = Math.min(Math.max(Math.round(requestedWidth), 16), 640);
+    try {
+      bytes = await sharp(bytes, { failOn: 'none' })
+        .resize({ width, withoutEnlargement: true })
+        .webp({ quality: 72 })
+        .toBuffer();
+      contentType = 'image/webp';
+    } catch { /* fall back to the original bytes */ }
+  }
   reply.header('cache-control', 'public, max-age=31536000, immutable');
-  return reply.type(IMAGE_CONTENT_TYPES[extension]).send(bytes);
+  return reply.type(contentType).send(bytes);
 });
 
 app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, async (request, reply) => {  const detail = await db.getProductDetail(request.params.id);
