@@ -251,6 +251,78 @@ export async function parse1688Product(page) {
       } catch { /* inaccessible globals are ignored */ }
     }
 
+    // Embedded SKU model: every option x size combination with price and stock.
+    const skuModelSnapshot = (() => {
+      const decode = (value) => String(value == null ? '' : value)
+        .replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\u00a0/g, ' ').trim();
+      const findSkuModel = (node, depth) => {
+        if (!node || typeof node !== 'object' || depth > 10) return null;
+        if (node.skuModel && node.skuModel.skuProps && node.skuModel.skuInfoMap) return node.skuModel;
+        for (const key of Object.keys(node)) {
+          const child = node[key];
+          if (child && typeof child === 'object') {
+            const hit = findSkuModel(child, depth + 1);
+            if (hit) return hit;
+          }
+        }
+        return null;
+      };
+      const extractJsonAfter = (textValue, marker) => {
+        const at = textValue.indexOf(marker);
+        if (at === -1) return null;
+        const start = textValue.indexOf('{', at + marker.length - 1);
+        if (start === -1) return null;
+        let depth = 0; let inString = false; let escape = false;
+        for (let i = start; i < textValue.length; i += 1) {
+          const ch = textValue[i];
+          if (escape) { escape = false; continue; }
+          if (ch === '\\') { escape = true; continue; }
+          if (inString) { if (ch === '"') inString = false; continue; }
+          if (ch === '"') { inString = true; continue; }
+          if (ch === '{') depth += 1;
+          else if (ch === '}') {
+            depth -= 1;
+            if (!depth) {
+              try { return findSkuModel(JSON.parse(textValue.slice(start, i + 1)), 0); } catch { return null; }
+            }
+          }
+        }
+        return null;
+      };
+      let model = null;
+      try { model = findSkuModel(window.context, 0); } catch { model = null; }
+      if (!model) {
+        for (const script of all('script')) {
+          const scriptText = script.textContent || '';
+          if (!scriptText.includes('"skuInfoMap"')) continue;
+          model = extractJsonAfter(scriptText, 'window.contextPath,');
+          if (model) break;
+        }
+      }
+      if (!model) return null;
+      const dimensionList = (model.skuProps || []).map((prop) => ({
+        name: decode(prop.prop),
+        values: (prop.value || []).map((value) => decode(value.name)).filter(Boolean),
+      })).filter((dimension) => dimension.name && dimension.values.length);
+      const rows = [];
+      for (const [key, info] of Object.entries(model.skuInfoMap || {})) {
+        const spec = decode(info && info.specAttrs ? info.specAttrs : key);
+        const parts = spec.split('>').map((value) => value.trim()).filter(Boolean);
+        const options = {};
+        dimensionList.forEach((dimension, index) => {
+          if (parts[index] !== undefined) options[dimension.name] = parts[index];
+        });
+        rows.push({
+          options,
+          price: info && info.price != null && info.price !== '' ? Number(info.price) : null,
+          stock: info && info.canBookCount != null ? Number(info.canBookCount) : null,
+          skuId: info && info.skuId != null ? String(info.skuId) : null,
+        });
+      }
+      return { dimensions: dimensionList, rows, priceScale: decode(model.skuPriceScale || '') };
+    })();
+
     const compact = (value, depth = 0) => {
       if (value == null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
         return typeof value === 'string' ? value.slice(0, 2000) : value;
@@ -392,6 +464,7 @@ export async function parse1688Product(page) {
       skuOptions,
       domSkuDimensions,
       domSkuRows,
+      skuModel: skuModelSnapshot,
       priceTexts,
       scopedPriceTexts,
       bodyText: (document.body?.innerText || '').slice(0, 200000),
@@ -583,6 +656,28 @@ export async function parse1688Product(page) {
       text: cleanText(item.text),
       image: normalizeImageUrl(item.image, raw.url),
     })),
+    skuMatrix: raw.skuModel && Array.isArray(raw.skuModel.dimensions) && raw.skuModel.dimensions.length
+      ? {
+        dimensions: raw.skuModel.dimensions.map((dimension) => ({
+          name: cleanText(dimension?.name),
+          values: (Array.isArray(dimension?.values) ? dimension.values : []).map(cleanText).filter(Boolean).slice(0, 100),
+        })).filter((dimension) => dimension.name && dimension.values.length),
+        rows: (Array.isArray(raw.skuModel.rows) ? raw.skuModel.rows : []).slice(0, MAX_SKU_ROWS).map((row) => {
+          const options = {};
+          for (const [key, value] of Object.entries(row?.options ?? {})) {
+            const name = cleanText(key);
+            if (name) options[name] = cleanText(value);
+          }
+          return {
+            options,
+            price: Number.isFinite(Number(row?.price)) && row?.price !== null ? Number(row.price) : null,
+            stock: Number.isFinite(Number(row?.stock)) && row?.stock !== null ? Number(row.stock) : null,
+            skuId: row?.skuId != null ? String(row.skuId) : null,
+          };
+        }),
+        priceScale: cleanText(raw.skuModel.priceScale) || null,
+      }
+      : null,
     attributes: dedupedAttributes,
     seller: { name: cleanText(seller.name) || null, url: seller.url || null },
     parsedAt: new Date().toISOString(),

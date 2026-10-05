@@ -162,6 +162,11 @@ export function createDatabase(databaseUrl) {
       ALTER TABLE product_details ADD COLUMN IF NOT EXISTS duplicate_status text NOT NULL DEFAULT 'not_checked';
       ALTER TABLE product_details ADD COLUMN IF NOT EXISTS duplicate_analysis jsonb NOT NULL DEFAULT '{}'::jsonb;
       ALTER TABLE product_details ADD COLUMN IF NOT EXISTS duplicate_checked_at timestamptz;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_status text;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_analysis jsonb;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_checked_at timestamptz;
+      CREATE INDEX IF NOT EXISTS product_details_bundle_status_idx
+        ON product_details (bundle_status);
       CREATE INDEX IF NOT EXISTS product_details_gallery_fingerprint_idx
         ON product_details (gallery_content_fingerprint)
         WHERE gallery_content_fingerprint IS NOT NULL;
@@ -832,7 +837,7 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
-  async function saveProductDetail(data, sourceUrl, imageFiles = [], duplicateAnalysis = null) {
+  async function saveProductDetail(data, sourceUrl, imageFiles = [], duplicateAnalysis = null, bundleDetection = null) {
     if (!data || data.pageType !== 'product' || !sourceUrl) return null;
     const client = await pool.connect();
     try {
@@ -850,14 +855,19 @@ export function createDatabase(databaseUrl) {
           seller_name=$10, seller_url=$11, raw_data=$12,
           gallery_content_fingerprint=$13, gallery_image_count=$14,
           gallery_verified_complete=$15, duplicate_status=$16, duplicate_analysis=$17,
-          duplicate_checked_at=$18, last_crawled_at=now() WHERE id=$19`, [
+          duplicate_checked_at=$18, bundle_status=$19, bundle_analysis=$20, bundle_checked_at=$21,
+          last_crawled_at=now() WHERE id=$22`, [
           data.offerId ? String(data.offerId) : null, sourceUrl, data.canonicalUrl ?? null,
           data.title ?? null, data.description ?? null, data.currency ?? null,
           price.min ?? null, price.max ?? null, data.moq ?? null,
           data.seller?.name ?? null, data.seller?.url ?? null, JSON.stringify(data),
           galleryProfile.fingerprint ?? null, galleryProfile.sourceImageCount ?? 0,
           Boolean(galleryProfile.verifiedComplete), duplicateAnalysis?.status ?? 'not_checked',
-          JSON.stringify(duplicateAnalysis ?? {}), duplicateAnalysis?.checkedAt ?? null, detailId,
+          JSON.stringify(duplicateAnalysis ?? {}), duplicateAnalysis?.checkedAt ?? null,
+          bundleDetection?.status ?? null,
+          bundleDetection ? JSON.stringify(bundleDetection.analysis ?? {}) : null,
+          bundleDetection ? new Date().toISOString() : null,
+          detailId,
         ]);
         await client.query('DELETE FROM product_detail_images WHERE product_detail_id=$1', [detailId]);
         await client.query('DELETE FROM product_detail_skus WHERE product_detail_id=$1', [detailId]);
@@ -868,8 +878,8 @@ export function createDatabase(databaseUrl) {
           (offer_id, source_url, canonical_url, title, description, currency, price_min, price_max,
            moq, seller_name, seller_url, raw_data, gallery_content_fingerprint,
            gallery_image_count, gallery_verified_complete, duplicate_status,
-           duplicate_analysis, duplicate_checked_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`, [
+           duplicate_analysis, duplicate_checked_at, bundle_status, bundle_analysis, bundle_checked_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING id`, [
           data.offerId ? String(data.offerId) : null, sourceUrl, data.canonicalUrl ?? null,
           data.title ?? null, data.description ?? null, data.currency ?? null,
           price.min ?? null, price.max ?? null, data.moq ?? null,
@@ -877,6 +887,9 @@ export function createDatabase(databaseUrl) {
           galleryProfile.fingerprint ?? null, galleryProfile.sourceImageCount ?? 0,
           Boolean(galleryProfile.verifiedComplete), duplicateAnalysis?.status ?? 'not_checked',
           JSON.stringify(duplicateAnalysis ?? {}), duplicateAnalysis?.checkedAt ?? null,
+          bundleDetection?.status ?? null,
+          bundleDetection ? JSON.stringify(bundleDetection.analysis ?? {}) : null,
+          bundleDetection ? new Date().toISOString() : null,
         ]);
         detailId = inserted.rows[0].id;
       }
@@ -980,6 +993,50 @@ export function createDatabase(databaseUrl) {
     const result = await pool.query(`SELECT * FROM product_details
       ORDER BY last_crawled_at DESC LIMIT $1`, [safeLimit]);
     return result.rows;
+  }
+
+  async function listBundleInbox(limit = 200) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500);
+    const result = await pool.query(`SELECT details.id, details.offer_id, details.title,
+      details.last_crawled_at, details.bundle_status, details.bundle_analysis,
+      details.raw_data->'skuOptions' AS sku_options,
+      details.raw_data->'skuDimensions' AS sku_dimensions,
+      details.raw_data->'skuMatrix' AS sku_matrix,
+      (
+        SELECT jsonb_agg(jsonb_build_object('id', images.id, 'type', images.image_type,
+          'source', images.source_url, 'path', images.storage_path)
+          ORDER BY (images.image_type='main') DESC, images.sort_order)
+        FROM product_detail_images images
+        WHERE images.product_detail_id=details.id AND images.image_type IN ('main','gallery')
+      ) AS images,
+      plans.plan AS split_plan, plans.updated_at AS plan_updated_at
+      FROM product_details details
+      LEFT JOIN product_split_plans plans ON plans.product_detail_id=details.id
+      WHERE details.bundle_status='bundle'
+      ORDER BY details.last_crawled_at DESC
+      LIMIT $1`, [safeLimit]);
+    return result.rows;
+  }
+
+  async function listDetailsMissingBundleAudit(limit = 500) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 2000);
+    const result = await pool.query(`SELECT id,
+      raw_data->'skuOptions' AS sku_options,
+      raw_data->'skuDimensions' AS sku_dimensions,
+      raw_data->'skuMatrix' AS sku_matrix
+      FROM product_details
+      WHERE bundle_checked_at IS NULL
+      ORDER BY last_crawled_at DESC LIMIT $1`, [safeLimit]);
+    return result.rows;
+  }
+
+  async function saveProductBundleStatus(productDetailId, detection) {
+    const result = await pool.query(`UPDATE product_details
+      SET bundle_status=$2, bundle_analysis=$3, bundle_checked_at=now()
+      WHERE id=$1 RETURNING id, bundle_status, bundle_checked_at`,
+      [productDetailId, detection?.status ?? null,
+        detection ? JSON.stringify(detection.analysis ?? {}) : null]);
+    return result.rows[0] ?? null;
   }
 
   async function listWeeklyMarketingProducts({ from, to, limit = 24 } = {}) {
@@ -2121,6 +2178,7 @@ export function createDatabase(databaseUrl) {
     saveShopScan, listShopProfiles, listShopProducts, listShopProductSources,
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
+    listBundleInbox, listDetailsMissingBundleAudit, saveProductBundleStatus,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
     getPerceptualHashSummary, backfillPerceptualHashOffers,

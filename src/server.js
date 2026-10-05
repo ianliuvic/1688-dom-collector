@@ -24,6 +24,7 @@ import { computeImageHashes } from './image-hash.js';
 import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
+import { detectBundle } from './bundle-detector.js';
 import { MAX_OPTION_LABEL_LENGTH } from './option-overrides.js';
 
 const config = {
@@ -494,6 +495,7 @@ app.get('/', async () => ({
   dashboard: '/dashboard',
   review: '/review',
   bundleCheck: '/bundle-check',
+  bundleInbox: '/bundle-inbox',
   shops: '/shops',
   browserMode: getBrowserModeStatus(),
   session: collector.getSessionStatus(),
@@ -628,6 +630,12 @@ app.get('/review', { preHandler: requireDashboardAuth }, async (_request, reply)
 // Same HTTP Basic gate as /review.
 app.get('/bundle-check', { preHandler: requireDashboardAuth }, async (_request, reply) => {
   const html = await fs.readFile(new URL('../public/bundle-check.html', import.meta.url), 'utf8');
+  return reply.type('text/html; charset=utf-8').send(html);
+});
+
+// Bundle inbox: captures flagged as multi-product bundles during collection.
+app.get('/bundle-inbox', { preHandler: requireDashboardAuth }, async (_request, reply) => {
+  const html = await fs.readFile(new URL('../public/bundle-inbox.html', import.meta.url), 'utf8');
   return reply.type('text/html; charset=utf-8').send(html);
 });
 
@@ -1150,6 +1158,13 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
   if (!policy.allowed) {
     return reply.code(422).send({
       error: 'shop_product_policy_rejected', policy: policy.policy, reason: policy.reason,
+    });
+  }
+  if (detail.bundle_status === 'bundle' && request.body?.allowBundle !== true) {
+    return reply.code(422).send({
+      error: 'bundle_review_required',
+      message: 'This capture mixes multiple products in one option dimension. Split it on /bundle-inbox first, or pass allowBundle=true to override.',
+      bundle: detail.bundle_analysis?.rules ?? null,
     });
   }
   const translation = await db.getLatestProductTranslation(detail.id, 'en');
@@ -1712,6 +1727,94 @@ app.post('/api/product-details/:id/dom-sku-matrix', { preHandler: [requireDashbo
   }
 });
 
+// Bundle inbox rows: stored options, gallery/sku images, captured SKU matrix and
+// any saved split plan, ready for the manual split editor.
+function imagePublicPath(storagePath) {
+  if (!storagePath) return null;
+  const normalized = String(storagePath).replace(/\\/g, '/');
+  const file = normalized.split('/').pop();
+  const folder = normalized.split('/').slice(-2)[0];
+  if (!file || !folder) return null;
+  return '/api/product-images/' + encodeURIComponent(folder) + '/' + encodeURIComponent(file);
+}
+
+function toBundleInboxItem(row) {
+  const images = Array.isArray(row.images) ? row.images : [];
+  const bySource = new Map();
+  for (const image of images) {
+    if (image?.source) bySource.set(String(image.source).trim(), image);
+  }
+  const skuOptions = Array.isArray(row.sku_options) ? row.sku_options : [];
+  const skuDimensions = Array.isArray(row.sku_dimensions) ? row.sku_dimensions : [];
+  const dimOrder = [];
+  const dimMap = new Map();
+  for (const option of skuOptions) {
+    const dim = String(option?.dimensionName || '未命名维度');
+    if (!dimMap.has(dim)) { dimMap.set(dim, []); dimOrder.push(dim); }
+    const source = option?.image ? String(option.image).trim() : null;
+    const hit = source ? bySource.get(source) : null;
+    const base = hit ? imagePublicPath(hit.path) : null;
+    dimMap.get(dim).push({ text: String(option?.text || ''), local: base ? base + '?w=64' : null, source });
+  }
+  for (const dimension of skuDimensions) {
+    const name = String(dimension?.name || '');
+    if (!name || dimMap.has(name)) continue;
+    const values = Array.isArray(dimension?.values) ? dimension.values.filter((value) => value !== null && value !== '') : [];
+    if (!values.length) continue;
+    dimOrder.push(name);
+    dimMap.set(name, values.map((value) => ({ text: String(value), local: null, source: null })));
+  }
+  const gallery = [
+    ...images.filter((image) => image?.type === 'main'),
+    ...images.filter((image) => image?.type === 'gallery'),
+  ].map((image) => ({
+    id: String(image.id),
+    type: image.type,
+    thumb: imagePublicPath(image.path) ? imagePublicPath(image.path) + '?w=160' : (image.source || null),
+  }));
+  return {
+    id: row.id,
+    offerId: row.offer_id,
+    title: row.title,
+    date: row.last_crawled_at ? String(row.last_crawled_at).slice(0, 10) : '',
+    status: row.bundle_status,
+    analysis: row.bundle_analysis ?? null,
+    dims: dimOrder.map((name) => ({ name, options: dimMap.get(name) })),
+    gallery,
+    skuMatrix: row.sku_matrix ?? null,
+    plan: row.split_plan ?? null,
+    planUpdatedAt: row.plan_updated_at ?? null,
+  };
+}
+
+app.get('/api/bundle-inbox', { preHandler: requireDashboardOrApiKey }, async (request) => {
+  const rows = await db.listBundleInbox(request.query?.limit ?? 200);
+  return { count: rows.length, items: rows.map(toBundleInboxItem) };
+});
+
+// Recompute bundle detection for captures that predate the flag (name/size
+// rules only; the split page can refresh live sizes/prices on demand).
+app.post('/api/bundle-audit/backfill', { preHandler: requireApiKey }, async (request) => {
+  const limit = Number(request.body?.limit) > 0 ? Math.min(Number(request.body.limit), 2000) : 500;
+  const rows = await db.listDetailsMissingBundleAudit(limit);
+  let bundles = 0; let clear = 0; let failed = 0;
+  for (const row of rows) {
+    try {
+      const detection = detectBundle({
+        skuOptions: row.sku_options ?? [],
+        skuDimensions: row.sku_dimensions ?? [],
+        skuMatrix: row.sku_matrix ?? null,
+      });
+      await db.saveProductBundleStatus(row.id, detection);
+      if (detection.status === 'bundle') bundles += 1; else clear += 1;
+    } catch (error) {
+      failed += 1;
+      request.log.error({ err: error, productDetailId: row.id }, 'bundle audit backfill failed');
+    }
+  }
+  return { scanned: rows.length, bundles, clear, failed, more: rows.length >= limit };
+});
+
 const PERCEPTUAL_HASH_IMAGE_HOSTS = ['alicdn.com', '1688.com', 'taobao.com', 'tmall.com', 'yiswim.cloud'];
 
 function isAllowedPerceptualHashImageUrl(value) {
@@ -2024,9 +2127,12 @@ async function workerLoop(queue, workerIndex = 0) {
           result.status = 'rejected_duplicate';
           result.error = null;
         } else {
+          const bundleDetection = detectBundle(result.extractedData);
           const saved = await db.saveProductDetail(
             result.extractedData, job.url, result.extractedData.localImages ?? [], duplicateAnalysis,
+            bundleDetection,
           );
+          result.extractedData.bundleDetection = bundleDetection;
           if (duplicateAnalysis.mainImageHash?.dhashHex) {
             try {
               await db.upsertProductMainImageHash({
