@@ -2170,6 +2170,28 @@ export function createDatabase(databaseUrl) {
     return { deleted: result.rowCount > 0 };
   }
 
+  async function listPortalPublishCandidates({ shopId, since, until, limit = 500 } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 500);
+    const result = await pool.query(`SELECT details.id AS product_detail_id, details.offer_id,
+      details.title, details.bundle_status,
+      details.raw_data->'skuDimensions' AS sku_dimensions,
+      details.raw_data->'skuMatrix' AS sku_matrix,
+      products.availability_status, products.listing_time,
+      publications.wp_post_id, publications.style_no, publications.wp_status,
+      portal.portal_product_id, portal.portal_status, portal.last_synced_at AS portal_synced_at
+      FROM product_details details
+      JOIN shop_products products ON products.offer_id = details.offer_id
+      LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id = details.id
+      LEFT JOIN product_portal_publications portal ON portal.product_detail_id = details.id
+      WHERE products.shop_id = $1
+        AND products.listing_time >= $2::timestamptz
+        AND products.listing_time < $3::timestamptz
+        AND details.bundle_status = 'clear'
+      ORDER BY products.listing_time DESC, details.id DESC
+      LIMIT $4`, [shopId, since, until, safeLimit]);
+    return result.rows;
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -2179,6 +2201,7 @@ export function createDatabase(databaseUrl) {
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     listBundleInbox, listDetailsMissingBundleAudit, saveProductBundleStatus,
+    listPortalPublishCandidates,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
     getPerceptualHashSummary, backfillPerceptualHashOffers,

@@ -547,6 +547,33 @@ app.get('/api/shops-overview/products', { preHandler: requireDashboardAuth }, as
   return { total, limit: options.limit, offset: options.offset, items };
 });
 
+async function importWordPressProductToPortal(identifier) {
+  const response = await fetch(new URL('/api/v1/admin/catalog/import/wordpress', config.portalApiUrl), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.portalAdminSecret}`,
+    },
+    body: JSON.stringify({ identifiers: [identifier] }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = body?.error?.message ?? body?.message ?? body?.error ?? `Portal returned HTTP ${response.status}`;
+    throw new Error(String(message));
+  }
+  return Array.isArray(body?.products) ? body.products[0] ?? null : null;
+}
+
+function sizeCountFromSkuDimensions(skuDimensions) {
+  const dims = Array.isArray(skuDimensions) ? skuDimensions : [];
+  const dim = dims.find((entry) => /(尺码|尺寸|码数|size)/i.test(String(entry?.name || '')));
+  if (!dim) return 0;
+  return [...new Set((Array.isArray(dim.values) ? dim.values : [])
+    .map((value) => String(value).trim())
+    .filter((value) => value && !/(均码|one\s*size|free\s*size)/i.test(value)))].length;
+}
+
 app.post('/api/portal/publish', { preHandler: requireDashboardAuth }, async (request, reply) => {
   const productDetailId = Number(request.body?.productDetailId);
   if (!Number.isInteger(productDetailId) || productDetailId <= 0) {
@@ -563,21 +590,7 @@ app.post('/api/portal/publish', { preHandler: requireDashboardAuth }, async (req
   }
   const identifier = String(publication.wp_post_id ?? publication.style_no);
   try {
-    const response = await fetch(new URL('/api/v1/admin/catalog/import/wordpress', config.portalApiUrl), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.portalAdminSecret}`,
-      },
-      body: JSON.stringify({ identifiers: [identifier] }),
-      signal: AbortSignal.timeout(120_000),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = body?.error?.message ?? body?.message ?? body?.error ?? `Portal returned HTTP ${response.status}`;
-      throw new Error(String(message));
-    }
-    const product = Array.isArray(body?.products) ? body.products[0] ?? null : null;
+    const product = await importWordPressProductToPortal(identifier);
     const portalBase = config.portalApiUrl.replace(/\/$/, '');
     const saved = await db.savePortalPublication(productDetailId, {
       wpPostId: publication.wp_post_id ?? null,
@@ -602,6 +615,92 @@ app.post('/api/portal/publish', { preHandler: requireDashboardAuth }, async (req
     }).catch(() => {});
     return reply.code(502).send({ error: 'portal_publish_failed', message });
   }
+});
+
+// Batch portal catalog sync: eligible = products of one shop listed in the
+// given year, not flagged as bundles, with at least `minSizes` real sizes
+// (均码 excluded) and a live wearhongxiu publication. Already-synced items are
+// skipped unless `refresh:true`. `dryRun:true` only reports counts.
+app.post('/api/portal/publish-batch', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  if (!config.portalApiUrl || !config.portalAdminSecret) {
+    return reply.code(503).send({ error: 'portal_not_configured' });
+  }
+  const shopId = Number(request.body?.shopId);
+  if (!Number.isInteger(shopId) || shopId <= 0) return reply.code(400).send({ error: 'shop_id_required' });
+  const year = Number(request.body?.year) || new Date().getUTCFullYear();
+  const minSizes = Number(request.body?.minSizes) > 0 ? Number(request.body.minSizes) : 3;
+  const limit = Math.min(Math.max(Number(request.body?.limit) || 50, 1), 200);
+  const refresh = request.body?.refresh === true;
+  const dryRun = request.body?.dryRun === true;
+  const rows = await db.listPortalPublishCandidates({
+    shopId, since: `${year}-01-01T00:00:00.000Z`, until: `${year + 1}-01-01T00:00:00.000Z`, limit: 500,
+  });
+  const evaluated = rows.map((row) => ({ row, sizeCount: sizeCountFromSkuDimensions(row.sku_dimensions) }));
+  const eligible = evaluated.filter(({ row, sizeCount }) =>
+    sizeCount >= minSizes && row.wp_status === 'publish' && row.wp_post_id != null);
+  const pending = eligible.filter(({ row }) => refresh || !row.portal_product_id);
+  const notEligible = rows.length - eligible.length;
+  const alreadyPublished = eligible.length - pending.length;
+  if (dryRun) {
+    return {
+      dryRun: true, shopId, year, minSizes,
+      candidates: rows.length, eligible: eligible.length, alreadyPublished,
+      notEligible, pending: pending.length,
+      sample: pending.slice(0, 25).map(({ row, sizeCount }) => ({
+        detailId: row.product_detail_id, styleNo: row.style_no, sizeCount,
+        availability: row.availability_status, wpStatus: row.wp_status, portalStatus: row.portal_status,
+      })),
+    };
+  }
+  const batch = pending.slice(0, limit);
+  const results = [];
+  let published = 0; let failed = 0; let skippedDelisted = 0;
+  const queue = [...batch];
+  async function worker() {
+    while (queue.length) {
+      const { row } = queue.shift();
+      const base = { detailId: row.product_detail_id, styleNo: row.style_no, offerId: row.offer_id };
+      if (row.availability_status && row.availability_status !== 'active') {
+        skippedDelisted += 1;
+        results.push({ ...base, status: 'skipped_delisted' });
+        continue;
+      }
+      try {
+        const product = await importWordPressProductToPortal(String(row.wp_post_id ?? row.style_no));
+        const portalBase = config.portalApiUrl.replace(/\/$/, '');
+        const saved = await db.savePortalPublication(row.product_detail_id, {
+          wpPostId: row.wp_post_id ?? null,
+          styleNo: row.style_no ?? product?.styleNumber ?? null,
+          portalProductId: product?.id ?? null,
+          portalStatus: product?.status ?? null,
+          sourceKey: row.wp_post_id ? `wordpress:${row.wp_post_id}` : null,
+          portalUrl: product?.id ? `${portalBase}/admin/catalog` : null,
+          result: product ? {
+            id: product.id, status: product.status, title: product.title,
+            styleNumber: product.styleNumber, variantCount: (product.variants ?? []).length,
+            mediaCount: (product.media ?? []).length,
+          } : {},
+          lastError: null,
+        });
+        published += 1;
+        results.push({ ...base, status: 'published', portalProductId: saved.portal_product_id, portalStatus: saved.portal_status });
+      } catch (error) {
+        const message = String(error?.message || error);
+        failed += 1;
+        await db.failPortalPublication(row.product_detail_id, message, {
+          wpPostId: row.wp_post_id ?? null, styleNo: row.style_no ?? null,
+        }).catch(() => {});
+        results.push({ ...base, status: 'failed', error: message });
+      }
+    }
+  }
+  await Promise.all([worker(), worker(), worker()]);
+  return {
+    processed: batch.length, published, failed, skippedDelisted,
+    remaining: pending.length - batch.length,
+    eligible: eligible.length, alreadyPublished,
+    results,
+  };
 });
 
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({
