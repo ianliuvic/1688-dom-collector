@@ -2192,6 +2192,51 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function listPortalRepairCandidates() {
+    const result = await pool.query(`SELECT details.id, details.offer_id, details.title,
+      details.bundle_status, details.canonical_url, details.source_url,
+      details.raw_data->'skuDimensions' AS sku_dimensions,
+      details.raw_data->'skuMatrix' AS sku_matrix,
+      publications.wp_post_id, publications.style_no, publications.wp_status, publications.wp_url,
+      portal.portal_product_id, portal.portal_status
+      FROM product_portal_publications portal
+      JOIN product_details details ON details.id=portal.product_detail_id
+      LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
+      WHERE portal.portal_product_id IS NOT NULL
+      ORDER BY details.last_crawled_at DESC`);
+    return result.rows;
+  }
+
+  async function updateProductSkusFromMatrix(productDetailId, { rows, dimensions, skuMatrix, priceMin, priceMax }) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM product_detail_skus WHERE product_detail_id=$1', [productDetailId]);
+      for (const [index, sku] of rows.entries()) {
+        await client.query(`INSERT INTO product_detail_skus
+          (product_detail_id, sku_key, sku_text, price, stock, option_data, raw_data)
+          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [productDetailId,
+          String(sku.skuKey ?? sku.skuText ?? index), sku.skuText ?? null,
+          sku.price ?? null, sku.stock ?? null,
+          JSON.stringify(sku.options ?? {}), JSON.stringify(sku)]);
+      }
+      const updated = await client.query(`UPDATE product_details SET
+        raw_data = jsonb_set(jsonb_set(coalesce(raw_data,'{}'::jsonb), '{skuDimensions}', $2::jsonb, true), '{skuMatrix}', $3::jsonb, true),
+        price_min = COALESCE($4, price_min), price_max = COALESCE($5, price_max)
+        WHERE id=$1 RETURNING id`, [productDetailId,
+        JSON.stringify(dimensions ?? []), JSON.stringify(skuMatrix ?? {}),
+        Number.isFinite(Number(priceMin)) ? Number(priceMin) : null,
+        Number.isFinite(Number(priceMax)) ? Number(priceMax) : null]);
+      await client.query('COMMIT');
+      return { updated: updated.rowCount > 0, skuCount: rows.length };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -2201,7 +2246,7 @@ export function createDatabase(databaseUrl) {
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     listBundleInbox, listDetailsMissingBundleAudit, saveProductBundleStatus,
-    listPortalPublishCandidates,
+    listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
     getPerceptualHashSummary, backfillPerceptualHashOffers,

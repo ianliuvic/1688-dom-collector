@@ -25,6 +25,7 @@ import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { detectBundle } from './bundle-detector.js';
+import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
 import { MAX_OPTION_LABEL_LENGTH } from './option-overrides.js';
 
 const config = {
@@ -1825,6 +1826,73 @@ app.post('/api/product-details/:id/dom-sku-matrix', { preHandler: [requireDashbo
     request.log.error({ err: error, productDetailId: id }, 'live SKU matrix fetch failed');
     return reply.code(502).send({ error: 'sku_matrix_fetch_failed', message: error.message });
   }
+});
+
+// Repair one product's variant rows from the live embedded matrix: rewrites
+// product_detail_skus (colour x size), refreshes the stored matrix/dimensions/
+// prices and re-runs the bundle detector. Used by the portal repair pass.
+app.post('/api/product-details/:id/repair-skus-from-matrix', { preHandler: [requireDashboardOrApiKey, requireCollectorMode] }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id).catch(() => null);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (detail.bundle_status === 'bundle') return reply.code(409).send({ error: 'bundle_product' });
+  const targetUrl = detail.canonical_url || detail.source_url
+    || (detail.offer_id ? `https://detail.1688.com/offer/${detail.offer_id}.html` : null);
+  if (!targetUrl) return reply.code(400).send({ error: 'detail_has_no_source_url' });
+  let live;
+  try {
+    live = await collector.extractLiveSkuMatrix(targetUrl);
+  } catch (error) {
+    return reply.code(502).send({ error: 'sku_matrix_fetch_failed', message: error.message });
+  }
+  if (live.status === 'requires_auth') return reply.code(409).send({ error: 'requires_auth' });
+  if (!live.matrix) return reply.code(502).send({ error: 'sku_matrix_unavailable', finalUrl: live.finalUrl });
+  const rows = buildSkuRowsFromSkuModel(live.matrix);
+  if (!rows.length) return reply.code(422).send({ error: 'no_sku_rows_from_matrix' });
+  const dimensions = (Array.isArray(live.matrix.dimensions) ? live.matrix.dimensions : []).map((dimension) => ({
+    name: String(dimension?.name ?? '').trim(),
+    values: (Array.isArray(dimension?.values) ? dimension.values : []).map((value) => String(value).trim()).filter(Boolean),
+  })).filter((dimension) => dimension.name && dimension.values.length);
+  const prices = rows.map((row) => Number(row.price)).filter((value) => Number.isFinite(value) && value >= 0);
+  const priceMin = prices.length ? Math.min(...prices) : null;
+  const priceMax = prices.length ? Math.max(...prices) : null;
+  const skuMatrix = {
+    dimensions, rows: live.matrix.rows, priceScale: live.matrix.priceScale ?? null,
+    fetchedAt: new Date().toISOString(),
+  };
+  await db.updateProductSkusFromMatrix(id, { rows, dimensions, skuMatrix, priceMin, priceMax });
+  const detection = detectBundle({
+    skuOptions: detail.raw_data?.skuOptions ?? [], skuDimensions: dimensions, skuMatrix,
+  });
+  await db.saveProductBundleStatus(id, detection);
+  return {
+    productDetailId: id, rows: rows.length, dimensions: dimensions.map((dimension) => dimension.name),
+    priceMin, priceMax, bundle: detection.status,
+  };
+});
+
+// Every collector-tracked portal publication, with a repair flag for
+// multi-colour products whose stored rows still lack the colour dimension.
+app.get('/api/portal/repair-candidates', { preHandler: requireDashboardOrApiKey }, async () => {
+  const rows = await db.listPortalRepairCandidates();
+  const items = rows.map((row) => {
+    const dimensions = Array.isArray(row.sku_dimensions) ? row.sku_dimensions : [];
+    const nonSize = dimensions.filter((dimension) => !/(尺码|尺寸|码数|size)/i.test(String(dimension?.name || '')));
+    const multiValue = nonSize.some((dimension) => (Array.isArray(dimension?.values) ? dimension.values.length : 0) >= 2);
+    const matrixRows = Array.isArray(row.sku_matrix?.rows) ? row.sku_matrix.rows : [];
+    const matrixHasNonSize = matrixRows.some((matrixRow) =>
+      Object.keys(matrixRow?.options ?? {}).some((name) => !/(尺码|尺寸|码数|size)/i.test(name)));
+    const needsRepair = row.bundle_status !== 'bundle' && multiValue && !matrixHasNonSize;
+    return {
+      detailId: row.id, offerId: row.offer_id, styleNo: row.style_no, title: row.title,
+      bundleStatus: row.bundle_status, wpStatus: row.wp_status, wpPostId: row.wp_post_id, wpUrl: row.wp_url,
+      portalProductId: row.portal_product_id,
+      optionValues: nonSize.flatMap((dimension) => Array.isArray(dimension?.values) ? dimension.values : []).slice(0, 8),
+      matrixHasNonSize, needsRepair,
+    };
+  });
+  return { count: items.length, needsRepair: items.filter((item) => item.needsRepair).length, items };
 });
 
 // Bundle inbox rows: stored options, gallery/sku images, captured SKU matrix and

@@ -1,3 +1,5 @@
+import { buildSkuRowsFromSkuModel } from '../sku-matrix.js';
+
 const MAX_IMAGES = 100;
 const MAX_SKU_ROWS = 500;
 const MAX_ATTRIBUTES = 100;
@@ -600,33 +602,7 @@ export async function parse1688Product(page) {
   // The embedded SKU table (every option x size with its own price/stock) is
   // authoritative when present: the rendered expand rows only cover the
   // currently selected option, which is how colour data used to get lost.
-  const normalizeDimensionName = (value) => {
-    const name = cleanText(value);
-    if (/^(?:颜色|color)$/i.test(name)) return 'Color';
-    if (/^(?:尺码|尺寸|码数|size)$/i.test(name)) return 'Size';
-    return name;
-  };
-  const matrixSkuRows = [];
-  for (const row of (raw.skuModel?.rows ?? []).slice(0, MAX_SKU_ROWS)) {
-    const options = {};
-    for (const [name, value] of Object.entries(row?.options ?? {})) {
-      const cleanName = normalizeDimensionName(name);
-      const cleanValue = cleanText(value);
-      if (cleanName && cleanValue) options[cleanName] = cleanValue;
-    }
-    const entries = Object.entries(options);
-    if (!entries.length) continue;
-    const sizeEntry = entries.find(([name]) => name === 'Size');
-    const colorEntry = entries.find(([name]) => name === 'Color');
-    const skuText = sizeEntry ? sizeEntry[1] : (colorEntry ? colorEntry[1] : entries.map(([, value]) => value).join(' '));
-    matrixSkuRows.push({
-      skuKey: entries.map(([name, value]) => `${name}:${value}`).join('|'),
-      skuText,
-      options,
-      price: row?.price != null && row.price !== '' && Number.isFinite(Number(row.price)) ? Number(row.price) : null,
-      stock: row?.stock != null && row.stock !== '' && Number.isFinite(Number(row.stock)) ? Number(row.stock) : null,
-    });
-  }
+  const matrixSkuRows = buildSkuRowsFromSkuModel(raw.skuModel);
   const effectiveSkuRows = matrixSkuRows.length ? matrixSkuRows : inferredSkuRows;
   const verifiedPrice = deriveVerifiedProductPrice({
     skuPrices: effectiveSkuRows.map((row) => row.price),
