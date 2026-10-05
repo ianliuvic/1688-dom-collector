@@ -150,6 +150,14 @@ function requireCollectorMode(_request, reply, done) {
   done();
 }
 
+// Dashboard pages authenticate with HTTP Basic; maintenance scripts use the
+// collector Bearer key. Both are accepted for the manual split-plan endpoints.
+function requireDashboardOrApiKey(request, reply, done) {
+  const header = request.headers.authorization || '';
+  if (/^Bearer\s+/i.test(header)) return requireApiKey(request, reply, done);
+  return requireDashboardAuth(request, reply, done);
+}
+
 function requireNovncAuth(request, reply, done) {
   if (!config.novncUsername || !config.novncPassword) {
     reply.code(503).send({ error: 'novnc_credentials_not_configured' });
@@ -1583,6 +1591,72 @@ app.get('/api/product-images/:folder/:fileName', async (request, reply) => {
 app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, async (request, reply) => {  const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   return db.listProductAudits('sku', detail.id, request.query?.limit);
+});
+
+// Manual split plans for /bundle-check: variant swatches grouped per output
+// product plus gallery image assignment. Saved per product detail; the page
+// uses the dashboard Basic auth, scripts may use the Bearer key.
+function validateSplitPlan(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, message: 'plan must be an object' };
+  }
+  const rawGroups = Array.isArray(value.groups) ? value.groups : [];
+  if (!rawGroups.length) return { ok: false, message: 'at least one group is required' };
+  if (rawGroups.length > 8) return { ok: false, message: 'too many groups (max 8)' };
+  const groups = rawGroups.map((group, index) => ({
+    id: typeof group?.id === 'string' && /^[A-Za-z0-9_-]{1,16}$/.test(group.id) ? group.id : `g${index + 1}`,
+    name: String(group?.name ?? '').trim().slice(0, 60),
+  }));
+  const groupIds = new Set(groups.map((group) => group.id));
+  const options = {};
+  for (const [key, groupId] of Object.entries(value.options ?? {})) {
+    if (key && typeof groupId === 'string' && groupIds.has(groupId)) {
+      options[String(key).slice(0, 200)] = groupId;
+    }
+  }
+  const images = {};
+  for (const [key, assigned] of Object.entries(value.images ?? {})) {
+    if (!key || !Array.isArray(assigned)) continue;
+    const list = [...new Set(assigned.filter((id) => typeof id === 'string' && groupIds.has(id)))];
+    if (list.length) images[String(key).slice(0, 40)] = list;
+  }
+  const plan = {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    groups,
+    options,
+    images,
+    note: typeof value.note === 'string' ? value.note.trim().slice(0, 500) : '',
+  };
+  if (JSON.stringify(plan).length > 65536) return { ok: false, message: 'plan too large' };
+  return { ok: true, plan };
+}
+
+app.get('/api/split-plans', { preHandler: requireDashboardOrApiKey }, async () => db.listProductSplitPlans());
+
+app.get('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const record = await db.getProductSplitPlan(id);
+  return { productDetailId: id, plan: record?.plan ?? null, updatedAt: record?.updated_at ?? null };
+});
+
+app.put('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id).catch(() => null);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const validation = validateSplitPlan(request.body?.plan);
+  if (!validation.ok) return reply.code(400).send({ error: 'invalid_split_plan', message: validation.message });
+  const saved = await db.saveProductSplitPlan(id, validation.plan);
+  return { ok: true, productDetailId: id, updatedAt: saved.updated_at, plan: saved.plan };
+});
+
+app.delete('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const result = await db.deleteProductSplitPlan(id);
+  return { ok: true, productDetailId: id, deleted: result.deleted };
 });
 
 const PERCEPTUAL_HASH_IMAGE_HOSTS = ['alicdn.com', '1688.com', 'taobao.com', 'tmall.com', 'yiswim.cloud'];

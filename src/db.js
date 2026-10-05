@@ -277,6 +277,12 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS product_sku_audits_product_idx
         ON product_sku_audits(product_detail_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS product_split_plans (
+        product_detail_id bigint PRIMARY KEY REFERENCES product_details(id) ON DELETE CASCADE,
+        plan jsonb NOT NULL DEFAULT '{}'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE TABLE IF NOT EXISTS product_detail_translations (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -2080,6 +2086,33 @@ export function createDatabase(databaseUrl) {
     return saved.rows[0];
   }
 
+  async function listProductSplitPlans() {
+    const result = await pool.query(`SELECT product_detail_id,
+      updated_at, coalesce(jsonb_array_length(plan->'groups'), 0) AS group_count
+      FROM product_split_plans ORDER BY updated_at DESC`);
+    return result.rows;
+  }
+
+  async function getProductSplitPlan(productDetailId) {
+    const result = await pool.query(
+      'SELECT * FROM product_split_plans WHERE product_detail_id=$1', [productDetailId]);
+    return result.rows[0] ?? null;
+  }
+
+  async function saveProductSplitPlan(productDetailId, plan) {
+    const result = await pool.query(`INSERT INTO product_split_plans (product_detail_id, plan, updated_at)
+      VALUES ($1,$2,now())
+      ON CONFLICT (product_detail_id) DO UPDATE SET plan=EXCLUDED.plan, updated_at=now()
+      RETURNING *`, [productDetailId, JSON.stringify(plan)]);
+    return result.rows[0];
+  }
+
+  async function deleteProductSplitPlan(productDetailId) {
+    const result = await pool.query(
+      'DELETE FROM product_split_plans WHERE product_detail_id=$1', [productDetailId]);
+    return { deleted: result.rowCount > 0 };
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -2101,6 +2134,7 @@ export function createDatabase(databaseUrl) {
     saveWordPressPublication, createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
+    listProductSplitPlans, getProductSplitPlan, saveProductSplitPlan, deleteProductSplitPlan,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };
