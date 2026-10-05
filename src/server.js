@@ -630,6 +630,7 @@ app.post('/api/portal/publish-batch', { preHandler: requireDashboardOrApiKey }, 
   const year = Number(request.body?.year) || new Date().getUTCFullYear();
   const minSizes = Number(request.body?.minSizes) > 0 ? Number(request.body.minSizes) : 3;
   const limit = Math.min(Math.max(Number(request.body?.limit) || 50, 1), 200);
+  const offset = Math.max(Number(request.body?.offset) || 0, 0);
   const refresh = request.body?.refresh === true;
   const dryRun = request.body?.dryRun === true;
   const rows = await db.listPortalPublishCandidates({
@@ -652,7 +653,7 @@ app.post('/api/portal/publish-batch', { preHandler: requireDashboardOrApiKey }, 
       })),
     };
   }
-  const batch = pending.slice(0, limit);
+  const batch = pending.slice(offset, offset + limit);
   const results = [];
   let published = 0; let failed = 0; let skippedDelisted = 0;
   const queue = [...batch];
@@ -697,7 +698,7 @@ app.post('/api/portal/publish-batch', { preHandler: requireDashboardOrApiKey }, 
   await Promise.all([worker(), worker(), worker()]);
   return {
     processed: batch.length, published, failed, skippedDelisted,
-    remaining: pending.length - batch.length,
+    remaining: Math.max(pending.length - offset - batch.length, 0),
     eligible: eligible.length, alreadyPublished,
     results,
   };
