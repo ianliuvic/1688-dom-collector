@@ -80,7 +80,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 <body>
 <header>
   <h1>辽宁下西洋电子商务有限公司 · 2026 年已发布商品变体检查</h1>
-  <p class="sub">范围：1688 上架时间为 2026 年、已发布到 wearhongxiu 的商品，共 228 个。每行一个商品：原始变体名称与图片 + 捆绑销售判定；点「手动拆分」可把变体分组（每组一个产品）并为每组分配 gallery 图片，方案保存在采集器。生成时间：2026-10-05 17:53 UTC</p>
+  <p class="sub">范围：1688 上架时间为 2026 年、已发布到 wearhongxiu 的商品，共 228 个。每行一个商品：原始变体名称与图片 + 捆绑销售判定；点「手动拆分」可把变体分组（每组一个产品）并为每组分配 gallery 图片，方案保存在采集器。生成时间：2026-10-05 18:01 UTC</p>
   <div class="stats">
     <span class="b">捆绑嫌疑 <b>65</b></span>
     <span class="s">单一选项套装 <b>8</b></span>
@@ -212,31 +212,48 @@ function optionSizes(st, text) {
   }
   return [...sizes];
 }
+function itemKey(text) {
+  let s = String(text || '');
+  s = s.replace(/[A-Za-z]{1,6}[-_]?\d{2,}[A-Za-z0-9-]*/g, ' ');
+  s = s.replace(/\d+(?:\.\d+)?/g, ' ');
+  s = s.replace(/(白色|白底|米白|奶白|黑色|红色|黄色|绿色|蓝色|粉色|橘色|橙色|咖色|棕色|紫色|灰色|浅蓝|深蓝|浅绿|深绿|银色|金色|彩色|花色|纯色|拼色|条纹|格子|格纹|豹纹|波点|碎花|印花|蕾丝|渐变|牛仔|晕染|扎染|民族风|腰果花|腰果|烫钻|珍珠|亮片|流苏|网纱|雪纺|假两件|钻带|银|金|白|黑|红|黄|绿|蓝|粉|橘|橙|咖|棕|紫|灰)/g, ' ');
+  s = s.replace(/(均码|one\s*size|free\s*size)/ig, ' ');
+  s = s.replace(/[\s\-_/、,，+]+/g, '');
+  return s || String(text || '').trim();
+}
+function optionMaxPrice(st, text) {
+  let max = null;
+  if (st && st.skuMatrix) {
+    for (const row of st.skuMatrix.rows || []) {
+      if (!Object.values(row.options || {}).includes(text)) continue;
+      const price = Number(row.price);
+      if (Number.isFinite(price)) max = max == null ? price : Math.max(max, price);
+    }
+  }
+  return max;
+}
 function groupSummary(id, gid) {
   const it = ITEM.get(String(id));
   const st = SPLIT.get(String(id));
-  const sizes = new Set(); const prices = [];
+  const sizes = new Set();
+  const items = new Map();
   if (it && st) {
     for (const dim of it.dims) {
       if (SIZE_NAME_RE.test(dim.name)) continue;
       for (const option of dim.options) {
         if (st.options[optionKey(dim.name, option.text)] !== gid) continue;
         optionSizes(st, option.text).forEach((value) => sizes.add(value));
-        if (st.skuMatrix) {
-          for (const row of st.skuMatrix.rows || []) {
-            if (!Object.values(row.options || {}).includes(option.text)) continue;
-            if (Number.isFinite(Number(row.price))) prices.push(Number(row.price));
-          }
-        }
+        const key = itemKey(option.text) || option.text;
+        const price = optionMaxPrice(st, option.text);
+        const prev = items.get(key);
+        if (!prev) items.set(key, { label: key, price });
+        else if (price != null && (prev.price == null || price > prev.price)) prev.price = price;
       }
     }
   }
-  let price = '';
-  if (prices.length) {
-    const min = Math.min(...prices); const max = Math.max(...prices);
-    price = min === max ? '¥' + min : '¥' + min + '–' + max;
-  }
-  return { sizes: [...sizes], price };
+  const priced = [...items.values()].filter((item) => item.price != null);
+  const total = priced.reduce((sum, item) => sum + item.price, 0);
+  return { sizes: [...sizes], items: priced, total: priced.length ? total : null };
 }
 function renderEditorBody(id) {
   const it = ITEM.get(String(id));
@@ -249,9 +266,12 @@ function renderEditorBody(id) {
     summaryEl.innerHTML = st.groups.map((g, i) => {
       const summary = groupSummary(id, g.id);
       const color = groupColor(st, g.id);
+      const priceText = summary.total == null ? '' : (summary.items.length > 1
+        ? ' · 合计 ¥' + summary.total + '（' + summary.items.map((item) => esc(item.label) + ' ' + item.price).join(' + ') + '）'
+        : ' · 参考价 ¥' + summary.items[0].price);
       return '<div class="gsum-line"><span class="dot" style="background:' + color + '"></span><b>' + esc(g.name || ('组' + (i + 1))) + '</b>'
         + (summary.sizes.length ? ' · 尺码 ' + esc(summary.sizes.join(' / ')) : (st.skuMatrix ? ' · 无尺码' : ''))
-        + (summary.price ? ' · 参考价 ' + summary.price : '') + '</div>';
+        + priceText + '</div>';
     }).join('');
   }
   const optsEl = document.getElementById('opts-' + id);
@@ -294,7 +314,7 @@ async function attachEditor(id) {
     + '<button type="button" data-close="' + id + '">收起</button>'
     + '<span class="ed-status" id="mx-' + id + '"></span>'
     + '<span class="ed-status" id="st-' + id + '">加载中…</span></div>'
-    + '<div class="hint">同一组 = 合并成一个商品；不同组 = 拆分成多个商品；未分配 = 该件不发布。尺码与参考价自动取自 1688 页面，无需手动分组。</div>'
+    + '<div class="hint">同一组 = 合并成一个商品（价格按组内各件合计；同款多花色算一件取最高价）；不同组 = 拆分成多个商品；未分配 = 该件不发布。尺码与价格自动取自 1688 页面，无需手动分组。</div>'
     + '<div class="gsum" id="gsum-' + id + '"></div>'
     + '<div class="ed-cols">'
     + '<div><div class="ed-title">变体选项：每个选项归入一个组</div><div id="opts-' + id + '"></div></div>'
