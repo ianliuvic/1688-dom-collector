@@ -648,6 +648,10 @@ app.post('/api/portal/publish-batch', { preHandler: requireDashboardOrApiKey }, 
       dryRun: true, shopId, year, minSizes,
       candidates: rows.length, eligible: eligible.length, alreadyPublished,
       notEligible, pending: pending.length,
+      pendingItems: pending.map(({ row, sizeCount }) => ({
+        detailId: row.product_detail_id, styleNo: row.style_no, offerId: row.offer_id, sizeCount,
+        availability: row.availability_status, wpStatus: row.wp_status, wpUrl: row.wp_url,
+      })),
       sample: pending.slice(0, 25).map(({ row, sizeCount }) => ({
         detailId: row.product_detail_id, styleNo: row.style_no, sizeCount,
         availability: row.availability_status, wpStatus: row.wp_status, portalStatus: row.portal_status,

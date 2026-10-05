@@ -2177,7 +2177,7 @@ export function createDatabase(databaseUrl) {
       details.raw_data->'skuDimensions' AS sku_dimensions,
       details.raw_data->'skuMatrix' AS sku_matrix,
       products.availability_status, products.listing_time,
-      publications.wp_post_id, publications.style_no, publications.wp_status,
+      publications.wp_post_id, publications.style_no, publications.wp_status, publications.wp_url,
       portal.portal_product_id, portal.portal_status, portal.last_synced_at AS portal_synced_at
       FROM product_details details
       JOIN shop_products products ON products.offer_id = details.offer_id
