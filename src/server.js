@@ -705,6 +705,28 @@ app.post('/api/portal/publish-batch', { preHandler: requireDashboardOrApiKey }, 
   };
 });
 
+// Re-run bundle detection for products currently flagged as bundles (e.g.
+// after a detector rule change). Only clears flags; never adds new ones.
+app.post('/api/bundle-audit/recheck', { preHandler: requireApiKey }, async (request) => {
+  const rows = await db.listBundleAuditRows();
+  let flipped = 0; let unchanged = 0; const details = [];
+  for (const row of rows) {
+    const detection = detectBundle({
+      skuOptions: row.sku_options ?? [],
+      skuDimensions: row.sku_dimensions ?? [],
+      skuMatrix: row.sku_matrix ?? null,
+    });
+    if (detection.status !== 'bundle') {
+      await db.saveProductBundleStatus(row.id, detection);
+      flipped += 1;
+      if (details.length < 50) details.push({ id: row.id, offerId: row.offer_id, title: row.title, status: detection.status });
+    } else {
+      unchanged += 1;
+    }
+  }
+  return { scanned: rows.length, flipped, unchanged, details };
+});
+
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({
   ...(await db.getDashboardStats()),
   runtime: {

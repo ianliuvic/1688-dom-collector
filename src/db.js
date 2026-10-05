@@ -2237,6 +2237,15 @@ export function createDatabase(databaseUrl) {
     }
   }
 
+  async function listBundleAuditRows() {
+    const result = await pool.query(`SELECT id, offer_id, title,
+      raw_data->'skuOptions' AS sku_options,
+      raw_data->'skuDimensions' AS sku_dimensions,
+      raw_data->'skuMatrix' AS sku_matrix
+      FROM product_details WHERE bundle_status='bundle' ORDER BY id`);
+    return result.rows;
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -2247,6 +2256,7 @@ export function createDatabase(databaseUrl) {
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     listBundleInbox, listDetailsMissingBundleAudit, saveProductBundleStatus,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
+    listBundleAuditRows,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
     getPerceptualHashSummary, backfillPerceptualHashOffers,

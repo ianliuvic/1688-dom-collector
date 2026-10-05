@@ -18,7 +18,7 @@ export function bundleItemKey(text) {
   value = value.replace(COLOR_WORDS, ' ');
   value = value.replace(ONE_SIZE_RE, ' ');
   value = value.replace(/[\s\-_/、,，+]+/g, '');
-  return value || String(text || '').trim();
+  return value;
 }
 
 export function detectBundle(data = {}) {
@@ -31,7 +31,10 @@ export function detectBundle(data = {}) {
     if (!dimension || SKU_SIZE_NAME_RE.test(dimension)) continue;
     const text = String(option?.text || '').trim();
     if (!text) continue;
-    const key = bundleItemKey(text) || text;
+    // Opaque labels (bare model codes with no garment noun) cannot prove that
+    // options are different products, so they all collapse into one bucket
+    // instead of counting as separate items.
+    const key = bundleItemKey(text) || '(code)';
     if (!items.has(key)) items.set(key, { key, options: [], images: [], sizes: new Set(), prices: [], stocks: [] });
     const item = items.get(key);
     item.options.push(text);
