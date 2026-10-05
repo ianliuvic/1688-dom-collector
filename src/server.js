@@ -484,6 +484,7 @@ app.get('/', async () => ({
   status: 'framework-ready',
   dashboard: '/dashboard',
   review: '/review',
+  bundleCheck: '/bundle-check',
   shops: '/shops',
   browserMode: getBrowserModeStatus(),
   session: collector.getSessionStatus(),
@@ -610,6 +611,14 @@ app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () =
 // by this app, so the browser replays the credentials on the same-origin fetch.
 app.get('/review', { preHandler: requireDashboardAuth }, async (_request, reply) => {
   const html = await fs.readFile(new URL('../public/review.html', import.meta.url), 'utf8');
+  return reply.type('text/html; charset=utf-8').send(html);
+});
+
+// Read-only variant/bundle check for a shop's 2026 published products. Shows
+// the captured original variant names and images plus the bundle verdict.
+// Same HTTP Basic gate as /review.
+app.get('/bundle-check', { preHandler: requireDashboardAuth }, async (_request, reply) => {
+  const html = await fs.readFile(new URL('../public/bundle-check.html', import.meta.url), 'utf8');
   return reply.type('text/html; charset=utf-8').send(html);
 });
 
