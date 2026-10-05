@@ -75,7 +75,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 <body>
 <header>
   <h1>辽宁下西洋电子商务有限公司 · 2026 年已发布商品变体检查</h1>
-  <p class="sub">范围：1688 上架时间为 2026 年、已发布到 wearhongxiu 的商品，共 228 个。每行一个商品：原始变体名称与图片 + 捆绑销售判定；点「手动拆分」可把变体分组（每组一个产品）并为每组分配 gallery 图片，方案保存在采集器。生成时间：2026-10-05 17:33 UTC</p>
+  <p class="sub">范围：1688 上架时间为 2026 年、已发布到 wearhongxiu 的商品，共 228 个。每行一个商品：原始变体名称与图片 + 捆绑销售判定；点「手动拆分」可把变体分组（每组一个产品）并为每组分配 gallery 图片，方案保存在采集器。生成时间：2026-10-05 17:38 UTC</p>
   <div class="stats">
     <span class="b">捆绑嫌疑 <b>65</b></span>
     <span class="s">单一选项套装 <b>8</b></span>
@@ -196,7 +196,7 @@ function renderEditorBody(id) {
     optsEl.innerHTML = it.dims.length ? it.dims.map((d) => d.options.map((o) => {
       const key = optionKey(d.name, o.text);
       const img = o.local || o.source;
-      return '<div class="ed-item">' + (img ? '<img src="' + img + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">' : '')
+      return '<div class="ed-item">' + (img ? '<img src="' + img + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'">' : '')
         + '<span class="nm">' + esc(d.name) + '｜' + esc(o.text) + '</span>'
         + '<span class="assign">' + assignButtons('opt', id, key, st, st.options[key] ? [st.options[key]] : []) + '</span></div>';
     }).join('')).join('') : '<div class="muted">（无变体）</div>';
