@@ -46,6 +46,11 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .img-cell img{width:122px;height:122px;object-fit:cover;border-radius:4px;display:block;background:#f2f4f7}
 .img-cell .assign{margin-top:5px;justify-content:center}
 .img-cell .cap{font-size:10.5px;color:var(--muted);text-align:center;margin-top:2px}
+.hint{font-size:12px;color:var(--muted);margin:0 0 8px}
+.gsum{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.gsum-line{display:inline-flex;align-items:center;gap:6px;font-size:12px;border:1px dashed var(--line);border-radius:6px;padding:3px 9px;background:#fff}
+.gsum-line .dot{width:9px;height:9px;border-radius:50%;flex:none}
+.ed-item .sz{color:var(--muted);font-style:normal;font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 5px;margin-left:4px}
 main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width:1500px;margin:0 auto}
 .row{display:grid;grid-template-columns:250px minmax(0,1fr) 220px;gap:16px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;align-items:start}
 .row.bundle{border-color:#f3b8b3}.row.set{border-color:#f3d4a8}
@@ -75,7 +80,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 <body>
 <header>
   <h1>辽宁下西洋电子商务有限公司 · 2026 年已发布商品变体检查</h1>
-  <p class="sub">范围：1688 上架时间为 2026 年、已发布到 wearhongxiu 的商品，共 228 个。每行一个商品：原始变体名称与图片 + 捆绑销售判定；点「手动拆分」可把变体分组（每组一个产品）并为每组分配 gallery 图片，方案保存在采集器。生成时间：2026-10-05 17:38 UTC</p>
+  <p class="sub">范围：1688 上架时间为 2026 年、已发布到 wearhongxiu 的商品，共 228 个。每行一个商品：原始变体名称与图片 + 捆绑销售判定；点「手动拆分」可把变体分组（每组一个产品）并为每组分配 gallery 图片，方案保存在采集器。生成时间：2026-10-05 17:53 UTC</p>
   <div class="stats">
     <span class="b">捆绑嫌疑 <b>65</b></span>
     <span class="s">单一选项套装 <b>8</b></span>
@@ -146,17 +151,27 @@ const OPEN = new Set();
 const SPLIT = new Map();
 const GROUP_COLORS = ['#b42318', '#175cd3', '#067647', '#b54708', '#6941c6', '#0e7090'];
 function groupColor(st, gid) { return GROUP_COLORS[Math.max(0, st.groups.findIndex((g) => g.id === gid)) % GROUP_COLORS.length]; }
-function defaultState() { return { groups: [{ id: 'g1', name: '组1' }, { id: 'g2', name: '组2' }], options: {}, images: {} }; }
+const SIZE_NAME_RE = /(尺码|尺寸|码数|size)/i;
+function defaultState() { return { groups: [{ id: 'g1', name: '组1' }, { id: 'g2', name: '组2' }], options: {}, images: {}, skuMatrix: null }; }
 function optionKey(dim, text) { return dim + '::' + text; }
+function defaultStateFor(it) {
+  const st = defaultState();
+  for (const dim of (it && it.dims) || []) {
+    if (SIZE_NAME_RE.test(dim.name)) continue;
+    for (const option of dim.options) st.options[optionKey(dim.name, option.text)] = 'g1';
+  }
+  for (const image of (it && it.gallery) || []) st.images[image.id] = ['g1'];
+  return st;
+}
 function normalizePlan(plan) {
   const groups = Array.isArray(plan.groups) && plan.groups.length
     ? plan.groups.map((g, i) => ({ id: String(g.id || ('g' + (i + 1))), name: String(g.name || '') }))
     : defaultState().groups;
-  return { groups, options: { ...(plan.options || {}) }, images: { ...(plan.images || {}) } };
+  return { groups, options: { ...(plan.options || {}) }, images: { ...(plan.images || {}) }, skuMatrix: plan.skuMatrix || null };
 }
 async function loadState(id) {
   if (SPLIT.has(id)) return SPLIT.get(id);
-  let st = defaultState();
+  let st = defaultStateFor(ITEM.get(String(id)));
   try {
     const res = await fetch('/api/product-details/' + id + '/split-plan', { headers: { accept: 'application/json' } });
     if (res.ok) { const data = await res.json(); if (data.plan) st = normalizePlan(data.plan); }
@@ -185,21 +200,71 @@ function assignButtons(kind, dataId, key, st, activeList) {
     return '<button type="button" data-kind="' + kind + '" data-id="' + dataId + '" data-key="' + esc(key) + '" data-gid="' + g.id + '"' + style + '>' + (i + 1) + '</button>';
   }).join('');
 }
+function optionSizes(st, text) {
+  const sizes = new Set();
+  if (st && st.skuMatrix) {
+    for (const row of st.skuMatrix.rows || []) {
+      const values = Object.values(row.options || {});
+      if (!values.includes(text)) continue;
+      const sizeValues = Object.entries(row.options || {}).filter(([name]) => SIZE_NAME_RE.test(name)).map(([, value]) => value);
+      (sizeValues.length ? sizeValues : values.filter((value) => value !== text)).forEach((value) => sizes.add(value));
+    }
+  }
+  return [...sizes];
+}
+function groupSummary(id, gid) {
+  const it = ITEM.get(String(id));
+  const st = SPLIT.get(String(id));
+  const sizes = new Set(); const prices = [];
+  if (it && st) {
+    for (const dim of it.dims) {
+      if (SIZE_NAME_RE.test(dim.name)) continue;
+      for (const option of dim.options) {
+        if (st.options[optionKey(dim.name, option.text)] !== gid) continue;
+        optionSizes(st, option.text).forEach((value) => sizes.add(value));
+        if (st.skuMatrix) {
+          for (const row of st.skuMatrix.rows || []) {
+            if (!Object.values(row.options || {}).includes(option.text)) continue;
+            if (Number.isFinite(Number(row.price))) prices.push(Number(row.price));
+          }
+        }
+      }
+    }
+  }
+  let price = '';
+  if (prices.length) {
+    const min = Math.min(...prices); const max = Math.max(...prices);
+    price = min === max ? '¥' + min : '¥' + min + '–' + max;
+  }
+  return { sizes: [...sizes], price };
+}
 function renderEditorBody(id) {
   const it = ITEM.get(String(id));
   const st = SPLIT.get(String(id));
   if (!it || !st) return;
   const groupsEl = document.getElementById('groups-' + id);
   if (groupsEl) groupsEl.innerHTML = groupChips(id, st);
+  const summaryEl = document.getElementById('gsum-' + id);
+  if (summaryEl) {
+    summaryEl.innerHTML = st.groups.map((g, i) => {
+      const summary = groupSummary(id, g.id);
+      const color = groupColor(st, g.id);
+      return '<div class="gsum-line"><span class="dot" style="background:' + color + '"></span><b>' + esc(g.name || ('组' + (i + 1))) + '</b>'
+        + (summary.sizes.length ? ' · 尺码 ' + esc(summary.sizes.join(' / ')) : (st.skuMatrix ? ' · 无尺码' : ''))
+        + (summary.price ? ' · 参考价 ' + summary.price : '') + '</div>';
+    }).join('');
+  }
   const optsEl = document.getElementById('opts-' + id);
   if (optsEl) {
-    optsEl.innerHTML = it.dims.length ? it.dims.map((d) => d.options.map((o) => {
-      const key = optionKey(d.name, o.text);
-      const img = o.local || o.source;
+    const dims = it.dims.filter((dim) => !SIZE_NAME_RE.test(dim.name));
+    optsEl.innerHTML = dims.length ? dims.map((dim) => dim.options.map((option) => {
+      const key = optionKey(dim.name, option.text);
+      const img = option.local || option.source;
+      const sizes = optionSizes(st, option.text);
       return '<div class="ed-item">' + (img ? '<img src="' + img + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'">' : '')
-        + '<span class="nm">' + esc(d.name) + '｜' + esc(o.text) + '</span>'
+        + '<span class="nm">' + esc(dim.name) + '｜' + esc(option.text) + (sizes.length ? ' <i class="sz">' + esc(sizes.join('/')) + '</i>' : '') + '</span>'
         + '<span class="assign">' + assignButtons('opt', id, key, st, st.options[key] ? [st.options[key]] : []) + '</span></div>';
-    }).join('')).join('') : '<div class="muted">（无变体）</div>';
+    }).join('')).join('') : '<div class="muted">（无可分组的变体选项）</div>';
   }
   const imgsEl = document.getElementById('imgs-' + id);
   if (imgsEl) {
@@ -223,10 +288,14 @@ async function attachEditor(id) {
     '<div class="ed-head"><b>' + esc(it.style || '') + ' · 手动拆分</b>'
     + '<span class="groups" id="groups-' + id + '"></span>'
     + '<button type="button" data-add-group="' + id + '">+ 添加组</button>'
+    + '<button type="button" data-fetch-matrix="' + id + '">刷新尺码/价格</button>'
     + '<button type="button" data-save="' + id + '">保存</button>'
     + '<button type="button" data-clear="' + id + '">清除已保存</button>'
     + '<button type="button" data-close="' + id + '">收起</button>'
+    + '<span class="ed-status" id="mx-' + id + '"></span>'
     + '<span class="ed-status" id="st-' + id + '">加载中…</span></div>'
+    + '<div class="hint">同一组 = 合并成一个商品；不同组 = 拆分成多个商品；未分配 = 该件不发布。尺码与参考价自动取自 1688 页面，无需手动分组。</div>'
+    + '<div class="gsum" id="gsum-' + id + '"></div>'
     + '<div class="ed-cols">'
     + '<div><div class="ed-title">变体选项：每个选项归入一个组</div><div id="opts-' + id + '"></div></div>'
     + '<div><div class="ed-title">Gallery 图片：可同时归入多个组（点数字切换）</div><div class="imgs-grid" id="imgs-' + id + '"></div></div>'
@@ -234,8 +303,40 @@ async function attachEditor(id) {
   rowEl.insertAdjacentElement('afterend', sec);
   const st = await loadState(String(id));
   const stEl = document.getElementById('st-' + id);
-  if (stEl) stEl.textContent = Object.keys(st.options).length || Object.keys(st.images).length ? '已加载已保存方案' : '未保存修改';
+  if (stEl) stEl.textContent = '未保存修改';
   renderEditorBody(String(id));
+  if (st.skuMatrix) {
+    const mxEl = document.getElementById('mx-' + id);
+    if (mxEl) mxEl.textContent = '尺码/价格来源：1688 页面（' + new Date(st.skuMatrix.fetchedAt).toLocaleString() + '）';
+  } else {
+    fetchMatrix(String(id));
+  }
+}
+async function fetchMatrix(id) {
+  const st = SPLIT.get(String(id));
+  if (!st) return;
+  const mxEl = document.getElementById('mx-' + id);
+  if (mxEl) mxEl.textContent = '正在从 1688 获取尺码/价格…（约 10 秒）';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/dom-sku-matrix', { method: 'POST' });
+    if (!res.ok) {
+      if (mxEl) mxEl.textContent = '获取失败 HTTP ' + res.status;
+      return;
+    }
+    const data = await res.json();
+    if (data && data.matrix) {
+      st.skuMatrix = {
+        fetchedAt: data.fetchedAt, dimensions: data.matrix.dimensions,
+        rows: data.matrix.rows, priceScale: data.matrix.priceScale || '',
+      };
+      if (mxEl) mxEl.textContent = '尺码/价格来源：1688 页面（' + new Date(data.fetchedAt).toLocaleString() + '）';
+      renderEditorBody(String(id));
+    } else if (mxEl) {
+      mxEl.textContent = '未获取到 SKU 数据';
+    }
+  } catch (e) {
+    if (mxEl) mxEl.textContent = '获取失败：' + String((e && e.message) || e);
+  }
 }
 function toggleEditor(id) {
   const existing = document.getElementById('editor-' + id);
@@ -324,6 +425,8 @@ document.addEventListener('click', (e) => {
     renderEditorBody(id);
     return;
   }
+  const fetchMx = e.target.closest('button[data-fetch-matrix]');
+  if (fetchMx) { fetchMatrix(String(fetchMx.dataset.fetchMatrix)); return; }
   const save = e.target.closest('button[data-save]');
   if (save) { savePlan(String(save.dataset.save)); return; }
   const clear = e.target.closest('button[data-clear]');

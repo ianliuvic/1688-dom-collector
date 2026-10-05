@@ -1596,6 +1596,33 @@ app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, as
 // Manual split plans for /bundle-check: variant swatches grouped per output
 // product plus gallery image assignment. Saved per product detail; the page
 // uses the dashboard Basic auth, scripts may use the Bearer key.
+function cleanSplitSkuMatrix(value) {
+  if (!value || typeof value !== 'object') return null;
+  const dimensions = Array.isArray(value.dimensions) ? value.dimensions.slice(0, 4).map((dim) => ({
+    name: String(dim?.name ?? '').trim().slice(0, 40),
+    values: Array.isArray(dim?.values)
+      ? dim.values.slice(0, 100).map((item) => String(item).slice(0, 120)).filter(Boolean) : [],
+  })).filter((dim) => dim.name && dim.values.length) : [];
+  const rows = Array.isArray(value.rows) ? value.rows.slice(0, 500).map((row) => {
+    const options = {};
+    for (const [key, option] of Object.entries(row?.options ?? {})) {
+      if (key) options[String(key).slice(0, 40)] = String(option).slice(0, 120);
+    }
+    return {
+      options,
+      price: Number.isFinite(Number(row?.price)) && row?.price !== null ? Number(row.price) : null,
+      stock: Number.isFinite(Number(row?.stock)) && row?.stock !== null ? Number(row.stock) : null,
+      skuId: row?.skuId != null ? String(row.skuId).slice(0, 32) : null,
+    };
+  }) : [];
+  if (!dimensions.length && !rows.length) return null;
+  return {
+    fetchedAt: typeof value.fetchedAt === 'string' ? value.fetchedAt.slice(0, 40) : new Date().toISOString(),
+    dimensions, rows,
+    priceScale: typeof value.priceScale === 'string' ? value.priceScale.slice(0, 40) : '',
+  };
+}
+
 function validateSplitPlan(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return { ok: false, message: 'plan must be an object' };
@@ -1626,9 +1653,10 @@ function validateSplitPlan(value) {
     groups,
     options,
     images,
+    skuMatrix: cleanSplitSkuMatrix(value.skuMatrix),
     note: typeof value.note === 'string' ? value.note.trim().slice(0, 500) : '',
   };
-  if (JSON.stringify(plan).length > 65536) return { ok: false, message: 'plan too large' };
+  if (JSON.stringify(plan).length > 262144) return { ok: false, message: 'plan too large' };
   return { ok: true, plan };
 }
 
@@ -1657,6 +1685,31 @@ app.delete('/api/product-details/:id/split-plan', { preHandler: requireDashboard
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const result = await db.deleteProductSplitPlan(id);
   return { ok: true, productDetailId: id, deleted: result.deleted };
+});
+
+// Read the live offer's embedded SKU model (option x size with price/stock)
+// straight from the 1688 page so the split editor does not need manual size
+// grouping. Read-only; runs in the shared collector browser.
+app.post('/api/product-details/:id/dom-sku-matrix', { preHandler: [requireDashboardOrApiKey, requireCollectorMode] }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id).catch(() => null);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const targetUrl = detail.canonical_url || detail.source_url
+    || (detail.offer_id ? `https://detail.1688.com/offer/${detail.offer_id}.html` : null);
+  if (!targetUrl) return reply.code(400).send({ error: 'detail_has_no_source_url' });
+  try {
+    const result = await collector.extractLiveSkuMatrix(targetUrl);
+    if (result.status === 'requires_auth') return reply.code(409).send({ error: 'requires_auth' });
+    if (!result.matrix) return reply.code(502).send({ error: 'sku_matrix_unavailable', finalUrl: result.finalUrl });
+    return {
+      productDetailId: id, offerId: detail.offer_id, url: targetUrl,
+      fetchedAt: new Date().toISOString(), matrix: result.matrix,
+    };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: id }, 'live SKU matrix fetch failed');
+    return reply.code(502).send({ error: 'sku_matrix_fetch_failed', message: error.message });
+  }
 });
 
 const PERCEPTUAL_HASH_IMAGE_HOSTS = ['alicdn.com', '1688.com', 'taobao.com', 'tmall.com', 'yiswim.cloud'];

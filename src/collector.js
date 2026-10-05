@@ -670,6 +670,91 @@ export function createCollector({
     return { status: 'completed', finalUrl, images };
   }
 
+  // Read the live offer's embedded SKU model: every option x size combination
+  // with price and stock (window.context.skuModel). Read-only: navigates and
+  // evaluates in the page; no clicks, files, or database writes.
+  async function extractLiveSkuMatrix(url) {
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(5000);
+    const finalUrl = page.url();
+    const title = await page.title();
+    const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    sessionState = classifySession(finalUrl, bodyText);
+    lastCheckedAt = new Date().toISOString();
+    if (sessionState === 'requires_auth') {
+      return { status: 'requires_auth', finalUrl, title, matrix: null };
+    }
+    const matrix = await page.evaluate(() => {
+      const decode = (value) => String(value == null ? '' : value)
+        .replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\u00a0/g, ' ').trim();
+      function findSkuModel(node, depth) {
+        if (!node || typeof node !== 'object' || depth > 10) return null;
+        if (node.skuModel && node.skuModel.skuProps && node.skuModel.skuInfoMap) return node.skuModel;
+        for (const key of Object.keys(node)) {
+          const child = node[key];
+          if (child && typeof child === 'object') {
+            const hit = findSkuModel(child, depth + 1);
+            if (hit) return hit;
+          }
+        }
+        return null;
+      }
+      function extractJsonAfter(text, marker) {
+        const at = text.indexOf(marker);
+        if (at === -1) return null;
+        const start = text.indexOf('{', at + marker.length - 1);
+        if (start === -1) return null;
+        let depth = 0; let inString = false; let escape = false;
+        for (let i = start; i < text.length; i += 1) {
+          const ch = text[i];
+          if (escape) { escape = false; continue; }
+          if (ch === '\\') { escape = true; continue; }
+          if (inString) { if (ch === '"') inString = false; continue; }
+          if (ch === '"') { inString = true; continue; }
+          if (ch === '{') depth += 1;
+          else if (ch === '}') {
+            depth -= 1;
+            if (!depth) {
+              try { return findSkuModel(JSON.parse(text.slice(start, i + 1)), 0); } catch { return null; }
+            }
+          }
+        }
+        return null;
+      }
+      let skuModel = null;
+      try { skuModel = findSkuModel(window.context, 0); } catch { skuModel = null; }
+      if (!skuModel) {
+        for (const script of Array.from(document.querySelectorAll('script'))) {
+          const text = script.textContent || '';
+          if (!text.includes('"skuInfoMap"')) continue;
+          skuModel = extractJsonAfter(text, 'window.contextPath,');
+          if (skuModel) break;
+        }
+      }
+      if (!skuModel) return null;
+      const dimensions = (skuModel.skuProps || []).map((prop) => ({
+        name: decode(prop.prop),
+        values: (prop.value || []).map((value) => decode(value.name)).filter(Boolean),
+      })).filter((dim) => dim.name && dim.values.length);
+      const rows = [];
+      for (const [key, info] of Object.entries(skuModel.skuInfoMap || {})) {
+        const spec = decode(info && info.specAttrs ? info.specAttrs : key);
+        const parts = spec.split('>').map((value) => value.trim()).filter(Boolean);
+        const options = {};
+        dimensions.forEach((dim, index) => { if (parts[index] !== undefined) options[dim.name] = parts[index]; });
+        rows.push({
+          options,
+          price: info && info.price != null && info.price !== '' ? Number(info.price) : null,
+          stock: info && info.canBookCount != null ? Number(info.canBookCount) : null,
+          skuId: info && info.skuId != null ? String(info.skuId) : null,
+        });
+      }
+      return { dimensions, rows, priceScale: decode(skuModel.skuPriceScale || '') };
+    });
+    return { status: matrix ? 'completed' : 'unavailable', finalUrl, title, matrix };
+  }
+
   // Read product images into memory through the logged-in browser context; no files or jobs are created.
   async function extractProductImagesInMemory(url) {
     const inspected = await inspectProduct(url);
@@ -740,6 +825,7 @@ export function createCollector({
     captureDetailImages: (...args) => withOperation(() => captureDetailImages(...args)),
     inspectProduct: (...args) => withOperation(() => inspectProduct(...args)),
     inspectProductImageDom: (...args) => withOperation(() => inspectProductImageDom(...args)),
+    extractLiveSkuMatrix: (...args) => withOperation(() => extractLiveSkuMatrix(...args)),
     getSessionStatus,
   };
 }
