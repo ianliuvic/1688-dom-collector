@@ -26,6 +26,8 @@ import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { detectBundle } from './bundle-detector.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
+import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
+  linkfoxExtrasForMerge } from './linkfox-1688.js';
 import { MAX_OPTION_LABEL_LENGTH } from './option-overrides.js';
 
 const config = {
@@ -65,6 +67,8 @@ const config = {
   detailCaptureConcurrency: Math.min(Math.max(Number(process.env.DETAIL_CAPTURE_CONCURRENCY) || 1, 1), 5),
   portalApiUrl: process.env.PORTAL_API_URL?.trim() || '',
   portalAdminSecret: process.env.PORTAL_ADMIN_SECRET || '',
+  linkfoxApiKey: process.env.LINKFOX_API_KEY?.trim() || process.env.LINKFOX_AGENT_API_KEY?.trim() || '',
+  linkfoxGateway: process.env.LINKFOX_TOOL_GATEWAY?.trim() || 'https://tool-gateway.linkfox.com',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -919,6 +923,128 @@ app.post('/api/product-details/test', { preHandler: [requireApiKey, requireColle
   }
 });
 
+// LinkFox source branch: no browser involved, so it stays available while the
+// collector runs in login mode (1688 risk control, captcha solves, etc.).
+//
+// captureAs=new    -> save an independent "lfx-{offerId}" capture with every
+//                     LinkFox media image (main/gallery/swatch/description) and
+//                     all LinkFox-only fields; the 1688 browser duplicate gates
+//                     are intentionally not applied.
+// captureAs=merge  -> merge only the LinkFox enrichment fields (raw linkfox
+//                     payload, package data, seller metrics) into the existing
+//                     browser capture of the same offer.
+app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (request, reply) => {
+  const body = request.body ?? {};
+  const offerId = String(body.offerId ?? '').trim()
+    || String(body.url ?? '').match(/\/offer\/(\d{10,13})\.html/i)?.[1] || '';
+  if (!/^\d{10,13}$/.test(offerId)) {
+    return reply.code(400).send({ error: 'valid_1688_offer_id_required' });
+  }
+  if (!config.linkfoxApiKey) {
+    return reply.code(503).send({ error: 'linkfox_not_configured' });
+  }
+  const captureAs = body.captureAs === 'merge' ? 'merge' : 'new';
+  let raw;
+  try {
+    raw = await fetchLinkFoxProductDetail({ offerId }, config);
+  } catch (error) {
+    request.log.error({ err: error, offerId }, 'LinkFox product detail fetch failed');
+    return reply.code(502).send({
+      error: error.providerAccess ? 'linkfox_access_blocked' : 'linkfox_fetch_failed',
+      message: error.message,
+    });
+  }
+
+  if (captureAs === 'merge') {
+    const existing = (await db.listProductDetails({ offerId, limit: 1 }))[0];
+    if (!existing) return reply.code(404).send({ error: 'existing_detail_required_for_merge' });
+    const extras = linkfoxExtrasForMerge(raw);
+    const updated = await db.updateProductLinkFoxData(existing.id, extras);
+    return { mode: 'merge', productDetailId: existing.id, fields: Object.keys(extras), updated };
+  }
+
+  const offerKey = `lfx-${offerId}`;
+  const capture = buildLinkFoxCapture(raw, { offerId, offerKey });
+  let imageFiles;
+  try {
+    imageFiles = await downloadLinkFoxImages(capture.imagePlan, {
+      storagePath: config.storagePath, offerKey,
+    });
+  } catch (error) {
+    request.log.error({ err: error, offerId }, 'LinkFox image download failed');
+    return reply.code(500).send({ error: 'linkfox_image_download_failed', message: error.message });
+  }
+  if (!imageFiles.length) return reply.code(502).send({ error: 'linkfox_images_unavailable' });
+  const imageTypes = {};
+  for (const image of imageFiles) imageTypes[image.type] = (imageTypes[image.type] ?? 0) + 1;
+
+  let mainImageHash = null;
+  const mainImage = imageFiles.find((image) => image.type === 'main');
+  if (mainImage?.storagePath) {
+    try {
+      mainImageHash = await computeImageHashes(await fs.readFile(mainImage.storagePath));
+    } catch (error) {
+      request.log.warn({ err: error }, 'failed to hash the LinkFox main image');
+    }
+  }
+  const duplicateAnalysis = {
+    status: 'linkfox_branch_capture',
+    decision: 'accept',
+    checkedAt: new Date().toISOString(),
+    reason: 'Explicit LinkFox capture; the 1688 browser duplicate gates were not applied.',
+    galleryProfile: {
+      fingerprint: null,
+      sourceImageCount: capture.data.gallery.imageCount,
+      verifiedComplete: false,
+    },
+    mainImageHash,
+  };
+  const data = { ...capture.data, localImages: imageFiles };
+  const bundleDetection = detectBundle(data);
+  // A synthetic source url keeps this capture independent from the browser
+  // capture of the same offer (which owns the plain offer URL).
+  const sourceUrl = `https://detail.1688.com/offer/${offerId}.html?capture=linkfox`;
+  const saved = await db.saveProductDetail(data, sourceUrl, imageFiles, duplicateAnalysis, bundleDetection);
+  if (mainImageHash?.dhashHex) {
+    try {
+      await db.upsertProductMainImageHash({
+        offerId: offerKey,
+        productDetailId: saved.productDetailId,
+        title: data.title ?? null,
+        sourceUrl: data.mainImage ?? null,
+        dhashHex: mainImageHash.dhashHex,
+        phashHex: mainImageHash.phashHex,
+        origin: 'linkfox_capture',
+      });
+    } catch (error) {
+      request.log.error({ err: error }, 'failed to register the LinkFox main image hash');
+    }
+  }
+  try {
+    await scheduleSavedProductAudits(saved.productDetailId, { trigger: 'linkfox_capture' });
+  } catch (error) {
+    request.log.error({ err: error }, 'failed to schedule LinkFox capture audits');
+  }
+  try {
+    await scheduleProductRagSync(saved.productDetailId, { trigger: 'linkfox_capture' });
+  } catch (error) {
+    request.log.error({ err: error }, 'failed to schedule the LinkFox capture RAG sync');
+  }
+  return {
+    mode: 'new',
+    productDetailId: saved.productDetailId,
+    offerKey,
+    linkfoxOfferId: offerId,
+    imageCount: imageFiles.length,
+    imageTypes,
+    skuRows: data.skuRows.length,
+    skuOptions: data.skuOptions.length,
+    attributes: data.attributes.length,
+    price: data.price,
+    bundleStatus: bundleDetection.status,
+  };
+});
+
 app.get('/api/product-details', { preHandler: requireApiKey }, async (request, reply) => {
   const offerId = request.query?.offerId || null;
   if (offerId && !/^\d{10,13}$/.test(String(offerId))) {
@@ -1025,6 +1151,7 @@ function wordpressPublishOptions(body = {}) {
     primaryCategoryId: Number(body.primaryCategoryId) || 0,
     material: typeof body.material === 'string' ? body.material : '',
     imageMode: body.imageMode === 'main_only' ? 'main_only' : 'translated',
+    allowUnverifiedGallery: body.allowUnverifiedGallery === true,
   };
 }
 

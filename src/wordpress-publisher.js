@@ -123,7 +123,7 @@ function optionValue(options, names) {
   return '';
 }
 
-function selectPublishingImages(detail, translation, imageMode = 'translated') {
+function selectPublishingImages(detail, translation, imageMode = 'translated', allowUnverifiedGallery = false) {
   const available = new Map((detail.images ?? []).map((image) => [String(image.id), image]));
   const translatedSources = translation?.image_sources ?? [];
   const selected = translatedSources
@@ -142,7 +142,7 @@ function selectPublishingImages(detail, translation, imageMode = 'translated') {
     return main ? [main] : [];
   }
 
-  if (detail?.raw_data?.gallery?.complete !== true) {
+  if (detail?.raw_data?.gallery?.complete !== true && allowUnverifiedGallery !== true) {
     throw new Error('A complete, verified 1688 product Gallery is required before full-image publishing.');
   }
 
@@ -258,7 +258,9 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   // Manual option-label overrides are applied to every payload this module
   // builds, so a re-capture or a swatch repair cannot revert a corrected name.
   const overrideIndex = buildOptionOverrideIndex(optionOverrides);
-  const publishingImages = selectPublishingImages(detail, translation, options.imageMode);
+  const publishingImages = selectPublishingImages(
+    detail, translation, options.imageMode, options.allowUnverifiedGallery === true,
+  );
   const sizeDimension = findDimension(translation, ['size', '尺码']);
   const sizes = unique(sizeDimension?.values ?? []);
   const colorOptions = buildColorOptions(detail, translation, overrideIndex);
@@ -360,6 +362,8 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
       collected_at: detail.last_crawled_at || '',
       publication_date: publicationDate,
       publication_date_source: clean(detail.publication_date_source) || 'first_seen_at',
+      gallery_source: clean(detail?.raw_data?.gallery?.source) || null,
+      gallery_verified_complete: detail?.raw_data?.gallery?.complete === true,
       merchandising: merchandising ? {
         model: merchandising.model || '', confidence: merchandising.confidence ?? null,
         category_mode: selection.categoryMode, tag_mode: selection.tagMode,

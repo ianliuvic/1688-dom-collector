@@ -985,6 +985,17 @@ export function createDatabase(databaseUrl) {
     }
   }
 
+  /** Merge LinkFox enrichment fields into an existing detail's raw_data.
+   * Only raw_data is touched; images, SKU rows and the publish gates keep the
+   * original browser capture values. */
+  async function updateProductLinkFoxData(productDetailId, extras) {
+    if (!productDetailId || !extras || typeof extras !== 'object') return false;
+    const result = await pool.query(`UPDATE product_details
+      SET raw_data = coalesce(raw_data, '{}'::jsonb) || $2::jsonb
+      WHERE id = $1`, [productDetailId, JSON.stringify(extras)]);
+    return result.rowCount > 0;
+  }
+
   async function listProductDetails({ offerId = null, limit = 100, offset = 0 } = {}) {
     const safeLimit = Math.max(Number(limit) || 100, 1);
     const safeOffset = Math.max(Number(offset) || 0, 0);
@@ -2331,6 +2342,7 @@ export function createDatabase(databaseUrl) {
     saveShopScan, listShopProfiles, listShopProducts, listShopProductSources,
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
+    updateProductLinkFoxData,
     listBundleInbox, listDetailsMissingBundleAudit, saveProductBundleStatus,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     listBundleAuditRows, summarizeWordPressPublications, listWordPressPublications,
