@@ -103,7 +103,7 @@ ${lines.join('\n')}
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
       temperature: 0,
-      max_tokens: 800,
+      max_tokens: 3000,
     }, config.reasoningEffort)),
     signal: AbortSignal.timeout(120000),
   });
@@ -112,6 +112,12 @@ ${lines.join('\n')}
   const raw = contentText(payload.choices?.[0]?.message?.content);
   let parsed = null;
   try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  if (!parsed) {
+    const match = String(raw || '').match(/\{[\s\S]*\}/);
+    if (match) {
+      try { parsed = JSON.parse(match[0]); } catch { parsed = null; }
+    }
+  }
   if (!parsed || typeof parsed.bundle !== 'boolean') {
     throw new Error('Bundle classification returned no verdict.');
   }

@@ -742,7 +742,7 @@ app.post('/api/bundle-audit/recheck', { preHandler: requireApiKey }, async (requ
 // overrides are preserved untouched. Poll with GET /api/bundle-audit/jobs/{id}.
 const bundleRecheckJobs = new Map();
 
-async function runBundleRecheckJob(job, { mode, limit, concurrency = 6 }) {
+async function runBundleRecheckJob(job, { mode, limit, concurrency = 6, ids = null }) {
   const batchSize = 200;
   let offset = 0;
   let remaining = limit;
@@ -750,12 +750,13 @@ async function runBundleRecheckJob(job, { mode, limit, concurrency = 6 }) {
     const take = Math.min(batchSize, remaining);
     const rows = await db.listBundleRecheckRows({ limit: take, offset });
     if (!rows.length) break;
+    const selected = ids ? rows.filter((row) => ids.includes(Number(row.id))) : rows;
     let next = 0;
-    const workers = Array.from({ length: Math.min(concurrency, rows.length) }, async () => {
+    const workers = Array.from({ length: Math.max(Math.min(concurrency, selected.length), 1) }, async () => {
       while (true) {
         const index = next++;
-        if (index >= rows.length) return;
-        const row = rows[index];
+        if (index >= selected.length) return;
+        const row = selected[index];
         job.scanned += 1;
         if (row.bundle_manual_status) { job.manualSkipped += 1; continue; }
         const data = {
@@ -819,6 +820,9 @@ app.post('/api/bundle-audit/recheck-all', { preHandler: requireApiKey }, async (
   }
   const mode = request.body?.mode === 'rules' ? 'rules' : 'llm';
   const limit = Number(request.body?.limit) > 0 ? Math.min(Number(request.body.limit), 5000) : 5000;
+  const ids = Array.isArray(request.body?.ids)
+    ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 500)
+    : null;
   const id = crypto.randomUUID();
   const job = {
     id, mode, status: 'running', scanned: 0, bundles: 0, clear: 0, changed: 0,
@@ -827,12 +831,12 @@ app.post('/api/bundle-audit/recheck-all', { preHandler: requireApiKey }, async (
   };
   bundleRecheckJobs.set(id, job);
   trimTerminalJobs(bundleRecheckJobs);
-  runBundleRecheckJob(job, { mode, limit }).catch((error) => {
+  runBundleRecheckJob(job, { mode, limit, ids }).catch((error) => {
     job.status = 'failed';
     job.error = String(error.message || error);
     app.log.error({ err: error, jobId: id }, 'bundle recheck job failed');
   });
-  return reply.code(202).send({ id, status: 'running', mode, limit });
+  return reply.code(202).send({ id, status: 'running', mode, limit, ids });
 });
 
 app.get('/api/bundle-audit/jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
