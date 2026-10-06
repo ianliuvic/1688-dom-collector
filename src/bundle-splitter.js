@@ -65,7 +65,10 @@ export function buildSplitInput(detail, { baseUrl } = {}) {
       return Number(left.sort_order) - Number(right.sort_order);
     })
     .map((image, index) => {
-      const url = publicImageUrl(image.storage_path, baseUrl) || cleanText(image.source_url) || null;
+      // Prefer the original CDN URL (the same source the translator uses, which
+      // the vision provider reliably accepts), fall back to our hosted copy.
+      const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? cleanText(image.source_url) : null;
+      const url = sourceUrl || publicImageUrl(image.storage_path, baseUrl) || null;
       return { id: String(image.id), type: image.image_type, sortOrder: Number(image.sort_order) || 0, url, index: index + 1 };
     })
     .filter((image) => image.url)
