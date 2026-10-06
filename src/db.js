@@ -2273,6 +2273,55 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  async function summarizeWordPressPublications() {
+    const statusRows = await pool.query(`SELECT coalesce(publications.wp_status,'none') AS status, count(*)::int AS products
+      FROM product_details details
+      LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
+      GROUP BY 1 ORDER BY products DESC`);
+    const shopRows = await pool.query(`SELECT coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop,
+      coalesce(publications.wp_status,'none') AS status, count(*)::int AS products
+      FROM product_details details
+      LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
+      LEFT JOIN LATERAL (
+        SELECT shop_products.shop_id FROM shop_products
+        WHERE shop_products.offer_id=details.offer_id
+        ORDER BY shop_products.last_crawled_at DESC LIMIT 1
+      ) source ON true
+      LEFT JOIN shop_profiles shops ON shops.id=source.shop_id
+      GROUP BY 1,2 ORDER BY products DESC`);
+    const total = statusRows.rows.reduce((sum, row) => sum + Number(row.products || 0), 0);
+    return { total, byStatus: statusRows.rows, byShop: shopRows.rows };
+  }
+
+  async function listWordPressPublications({ status = '', search = '', limit = 100, offset = 0 } = {}) {
+    const safeLimit = Math.max(Number(limit) || 100, 1);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const searchTerm = String(search || '').trim().slice(0, 120);
+    const params = [status ? String(status) : null, searchTerm ? `%${searchTerm}%` : null];
+    const where = `($1::text IS NULL OR coalesce(publications.wp_status,'none') = $1)
+      AND ($2::text IS NULL OR details.title ILIKE $2 OR publications.style_no ILIKE $2)`;
+    const counts = await pool.query(`SELECT count(*)::int AS total
+      FROM product_details details
+      LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
+      WHERE ${where}`, params);
+    const result = await pool.query(`SELECT details.id AS product_detail_id, details.title,
+      publications.style_no, publications.wp_post_id, publications.wp_status, publications.wp_url,
+      publications.first_published_at, publications.last_synced_at, publications.last_error,
+      coalesce(shops.shop_name, shops.domain) AS shop_name
+      FROM product_details details
+      LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
+      LEFT JOIN LATERAL (
+        SELECT shop_products.shop_id FROM shop_products
+        WHERE shop_products.offer_id=details.offer_id
+        ORDER BY shop_products.last_crawled_at DESC LIMIT 1
+      ) source ON true
+      LEFT JOIN shop_profiles shops ON shops.id=source.shop_id
+      WHERE ${where}
+      ORDER BY publications.last_synced_at DESC NULLS LAST, details.id DESC
+      LIMIT $3 OFFSET $4`, [...params, safeLimit, safeOffset]);
+    return { total: counts.rows[0]?.total ?? 0, limit: safeLimit, offset: safeOffset, items: result.rows };
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -2283,7 +2332,7 @@ export function createDatabase(databaseUrl) {
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     listBundleInbox, listDetailsMissingBundleAudit, saveProductBundleStatus,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
-    listBundleAuditRows,
+    listBundleAuditRows, summarizeWordPressPublications, listWordPressPublications,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
     getPerceptualHashSummary, backfillPerceptualHashOffers,

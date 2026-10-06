@@ -1047,6 +1047,17 @@ app.get('/api/product-details/:id/wordpress', { preHandler: requireApiKey }, asy
   return db.getWordPressPublication(detail.id);
 });
 
+// Publication overview across every captured product: status totals per shop,
+// plus a filterable listing. Bearer or dashboard Basic auth.
+app.get('/api/wordpress/publications/summary', { preHandler: requireDashboardOrApiKey }, async () => db.summarizeWordPressPublications());
+
+app.get('/api/wordpress/publications', { preHandler: requireDashboardOrApiKey }, async (request) => db.listWordPressPublications({
+  status: request.query?.status ?? '',
+  search: request.query?.search ?? '',
+  limit: request.query?.limit ?? 100,
+  offset: request.query?.offset ?? 0,
+}));
+
 app.get('/api/wordpress/products/resolve', { preHandler: requireApiKey }, async (request, reply) => {
   let identifier;
   try {
