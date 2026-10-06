@@ -2374,6 +2374,10 @@ function toProductCatalogItem(row) {
     skuRows: row.sku_rows ?? 0,
     colorCount: Number(row.color_count) || 0,
     bundleManual: row.bundle_manual_status || null,
+    shopId: row.shop_id === null || row.shop_id === undefined ? null : Number(row.shop_id),
+    shopName: row.shop_name || null,
+    listingStatus: row.availability_status || null,
+    delistedAt: row.delisted_at || null,
     styleNo: row.style_no || null,
     wpStatus: row.wp_status || null,
     wpUrl: row.wp_url || null,
@@ -2388,17 +2392,25 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
   const colors = /^[0-6]$/.test(colorsRaw) ? Number(colorsRaw) : 0;
   const wp = ['publish', 'unpublished'].includes(String(request.query?.wp ?? '').trim())
     ? String(request.query.wp).trim() : '';
+  const bundle = ['bundle', 'clear'].includes(String(request.query?.bundle ?? '').trim())
+    ? String(request.query.bundle).trim() : '';
+  const shop = String(request.query?.shop ?? '').trim().slice(0, 24);
   const result = await db.listProductCatalog({
     limit: request.query?.limit ?? 100,
     offset: request.query?.offset ?? 0,
     search: request.query?.search ?? '',
     colors,
     wp,
+    bundle,
+    shop,
   });
   return {
     count: result.filteredTotal, total: result.total,
     colorCounts: result.colorCounts,
     wpCounts: result.wpCounts,
+    bundleCounts: result.bundleCounts,
+    shopCounts: result.shopCounts,
+    manualBundleCount: result.manualBundleCount,
     limit: result.limit, offset: result.offset,
     items: result.items.map(toProductCatalogItem),
   };

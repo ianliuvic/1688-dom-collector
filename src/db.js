@@ -1050,18 +1050,19 @@ export function createDatabase(databaseUrl) {
 
   /** Light catalog listing for the all-products browser page: one row per
    * captured product with its option dimensions (and swatch sources), the
-   * main/gallery/sku image list, price range, WordPress publication state and
-   * the colour-variant count used by the colour filter. */
-  async function listProductCatalog({ limit = 100, offset = 0, search = '', colors = 0, wp = '' } = {}) {
+   * main/gallery/sku image list, price range, WordPress publication state,
+   * the source shop and 1688 listing status, and the colour-variant count. */
+  async function listProductCatalog({ limit = 100, offset = 0, search = '', colors = 0, wp = '',
+    bundle = '', shop = '' } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
     const safeOffset = Math.max(Number(offset) || 0, 0);
     const colorBucket = [1, 2, 3, 4, 5].includes(Number(colors)) ? Number(colors)
       : (Number(colors) === 6 ? 6 : 0);
     const wpValues = ['publish', 'unpublished'].includes(String(wp)) ? String(wp) : '';
+    const bundleValues = ['bundle', 'clear'].includes(String(bundle)) ? String(bundle) : '';
+    const shopValues = String(shop || '').trim().slice(0, 24);
     const searchTerm = String(search || '').trim().slice(0, 120);
-    const params = [searchTerm ? `%${searchTerm}%` : null];
-    const where = `($1::text IS NULL OR details.title ILIKE $1 OR details.offer_id ILIKE $1
-      OR publications.style_no ILIKE $1 OR publications.external_id ILIKE $1)`;
+    const searchParam = searchTerm ? `%${searchTerm}%` : null;
     const dimsJson = `(CASE WHEN jsonb_typeof(details.raw_data->'skuDimensions') = 'array'
       THEN details.raw_data->'skuDimensions' ELSE '[]'::jsonb END)`;
     const optsJson = `(CASE WHEN jsonb_typeof(details.raw_data->'skuOptions') = 'array'
@@ -1077,31 +1078,86 @@ export function createDatabase(databaseUrl) {
     const base = `WITH base AS (
       SELECT details.id, details.offer_id, details.title,
         details.price_min, details.price_max, details.currency, details.moq,
-        details.bundle_status, details.first_seen_at, details.last_crawled_at,
+        details.bundle_status, details.bundle_manual_status,
+        details.first_seen_at, details.last_crawled_at,
         details.raw_data->'skuOptions' AS sku_options,
         details.raw_data->'skuDimensions' AS sku_dimensions,
         publications.style_no, publications.wp_status, publications.wp_url,
+        source.shop_id, source.shop_name, source.availability_status, source.delisted_at,
         ${colorExpr} AS color_count
       FROM product_details details
       LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
-      WHERE ${where})`;
-    const colorFilter = `($2::int = 0
-      OR ($2::int = 6 AND color_count >= 6)
-      OR ($2::int BETWEEN 1 AND 5 AND color_count = $2))`;
-    const wpFilter = `($3::text = ''
-      OR ($3::text = 'publish' AND coalesce(wp_status, 'none') = 'publish')
-      OR ($3::text = 'unpublished' AND coalesce(wp_status, 'none') <> 'publish'))`;
-    const counts = await pool.query(
-      `${base} SELECT count(*)::int AS total FROM base WHERE ${colorFilter} AND ${wpFilter}`,
-      [...params, colorBucket, wpValues]);
-    const all = await pool.query(`${base} SELECT count(*)::int AS total FROM base`, params);
+      LEFT JOIN LATERAL (
+        SELECT products.shop_id,
+          coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name,
+          products.availability_status, products.delisted_at
+        FROM shop_products products
+        LEFT JOIN shop_profiles shops ON shops.id = products.shop_id
+        WHERE details.offer_id IS NOT NULL AND products.offer_id = details.offer_id
+        ORDER BY products.last_crawled_at DESC
+        LIMIT 1
+      ) source ON true
+      WHERE ($1::text IS NULL OR details.title ILIKE $1 OR details.offer_id ILIKE $1
+        OR publications.style_no ILIKE $1 OR publications.external_id ILIKE $1))`;
+    // Build a filter set with dynamically numbered placeholders. search ($1)
+    // is always part of the base CTE, so extra values start at $2.
+    const filtersFor = ({ color, wp: useWp, bundle: useBundle, shop: useShop }) => {
+      const values = [searchParam];
+      const parts = [];
+      if (color) {
+        values.push(colorBucket);
+        const p = `$${values.length}`;
+        parts.push(`(${p}::int = 0 OR (${p}::int = 6 AND color_count >= 6)
+          OR (${p}::int BETWEEN 1 AND 5 AND color_count = ${p}))`);
+      }
+      if (useWp) {
+        values.push(wpValues);
+        const p = `$${values.length}`;
+        parts.push(`(${p}::text = ''
+          OR (${p}::text = 'publish' AND coalesce(wp_status, 'none') = 'publish')
+          OR (${p}::text = 'unpublished' AND coalesce(wp_status, 'none') <> 'publish'))`);
+      }
+      if (useBundle) {
+        values.push(bundleValues);
+        const p = `$${values.length}`;
+        parts.push(`(${p}::text = ''
+          OR (${p}::text = 'bundle' AND bundle_status = 'bundle')
+          OR (${p}::text = 'clear' AND coalesce(bundle_status, 'clear') <> 'bundle'))`);
+      }
+      if (useShop) {
+        values.push(shopValues);
+        const p = `$${values.length}`;
+        parts.push(`(${p}::text = ''
+          OR (${p}::text = 'none' AND shop_id IS NULL)
+          OR (${p}::text ~ '^[0-9]+$' AND shop_id::text = ${p}::text))`);
+      }
+      return { values, where: parts.length ? parts.join(' AND ') : 'true' };
+    };
+
+    const main = filtersFor({ color: true, wp: true, bundle: true, shop: true });
+    const counts = await pool.query(`${base} SELECT count(*)::int AS total FROM base WHERE ${main.where}`,
+      main.values);
+    const all = await pool.query(`${base} SELECT count(*)::int AS total FROM base`, [searchParam]);
+    const col = filtersFor({ wp: true, bundle: true, shop: true });
     const distribution = await pool.query(
       `${base} SELECT LEAST(color_count, 6) AS bucket, count(*)::int AS products
-        FROM base WHERE ${wpFilter.replaceAll('$3::text', '$2::text')} GROUP BY 1 ORDER BY 1`,
-      [...params, wpValues]);
+        FROM base WHERE ${col.where} GROUP BY 1 ORDER BY 1`, col.values);
+    const wpq = filtersFor({ color: true, bundle: true, shop: true });
     const wpRows = await pool.query(
       `${base} SELECT CASE WHEN coalesce(wp_status,'none') = 'publish' THEN 'publish' ELSE 'unpublished' END AS bucket,
-        count(*)::int AS products FROM base WHERE ${colorFilter} GROUP BY 1`, [...params, colorBucket]);
+        count(*)::int AS products FROM base WHERE ${wpq.where} GROUP BY 1`, wpq.values);
+    const bq = filtersFor({ color: true, wp: true, shop: true });
+    const bundleRows = await pool.query(
+      `${base} SELECT CASE WHEN bundle_status = 'bundle' THEN 'bundle' ELSE 'clear' END AS bucket,
+        count(*)::int AS products FROM base WHERE ${bq.where} GROUP BY 1`, bq.values);
+    const sq = filtersFor({ color: true, wp: true, bundle: true });
+    const shopRows = await pool.query(
+      `${base} SELECT COALESCE(shop_id::text, 'none') AS bucket, max(shop_name) AS shop_name,
+        count(*)::int AS products FROM base WHERE ${sq.where} GROUP BY 1 ORDER BY products DESC`, sq.values);
+    const manual = await pool.query(
+      'SELECT count(*)::int AS total FROM product_details WHERE bundle_manual_status IS NOT NULL');
+
+    const itemsQ = filtersFor({ color: true, wp: true, bundle: true, shop: true });
     const result = await pool.query(`${base}
       SELECT base.*,
         (SELECT count(*) FROM product_detail_skus skus WHERE skus.product_detail_id=base.id)::int AS sku_rows,
@@ -1115,17 +1171,26 @@ export function createDatabase(databaseUrl) {
         FROM product_detail_images images
         WHERE images.product_detail_id=base.id AND images.image_type IN ('main','gallery','sku')
       ) media ON true
-      WHERE ${colorFilter} AND ${wpFilter}
+      WHERE ${itemsQ.where}
       ORDER BY base.id DESC
-      LIMIT $4 OFFSET $5`, [...params, colorBucket, wpValues, safeLimit, safeOffset]);
+      LIMIT $${itemsQ.values.length + 1} OFFSET $${itemsQ.values.length + 2}`,
+    [...itemsQ.values, safeLimit, safeOffset]);
+
     const colorCounts = {};
     for (const row of distribution.rows) colorCounts[String(row.bucket)] = Number(row.products);
     const wpCounts = {};
     for (const row of wpRows.rows) wpCounts[String(row.bucket)] = Number(row.products);
+    const bundleCounts = {};
+    for (const row of bundleRows.rows) bundleCounts[String(row.bucket)] = Number(row.products);
     return {
       total: all.rows[0]?.total ?? 0,
       filteredTotal: counts.rows[0]?.total ?? 0,
-      colorCounts, wpCounts, limit: safeLimit, offset: safeOffset, items: result.rows,
+      colorCounts, wpCounts, bundleCounts,
+      shopCounts: shopRows.rows.map((row) => ({
+        id: row.bucket, name: row.shop_name || '未关联店铺', products: Number(row.products),
+      })),
+      manualBundleCount: manual.rows[0]?.total ?? 0,
+      limit: safeLimit, offset: safeOffset, items: result.rows,
     };
   }
 

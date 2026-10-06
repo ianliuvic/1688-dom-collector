@@ -41,6 +41,10 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 .badge.wp{background:var(--normal);font-weight:600}
 .badge.wpdraft{background:#b54708;font-weight:600}
 .badge.wpnone{background:#98a2b3;font-weight:600}
+.badge.listing{background:var(--normal);font-weight:600}
+.badge.delisted{background:#667085;font-weight:600}
+.badge.unknown{background:#e4e7ec;color:#475467;font-weight:600}
+.filters select{border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:12.5px;background:#fff;color:var(--text);max-width:280px;outline:none}
 .meta .style{font-weight:700;font-size:13.5px}
 .meta .muted{font-size:12px;color:var(--muted);word-break:break-all}
 .body{display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -89,8 +93,13 @@ let totalFiltered = 0;
 let totalAll = 0;
 let colorCounts = {};
 let wpCounts = {};
+let bundleCounts = {};
+let shopCounts = [];
+let manualBundleCount = 0;
 let colors = 0;
 let wpFilter = '';
+let bundleFilter = '';
+let shopFilter = '';
 let keyword = '';
 let loading = false;
 
@@ -128,6 +137,11 @@ function wpBadge(it){
   const cls = it.wpStatus === 'publish' ? 'wp' : 'wpdraft';
   return '<span class="badge ' + cls + '">WP ' + esc(it.wpStatus) + '</span>';
 }
+function listingBadge(it){
+  if (it.listingStatus === 'active') return '<span class="badge listing">1688 在售</span>';
+  if (it.listingStatus === 'delisted') return '<span class="badge delisted">1688 已下架</span>';
+  return '<span class="badge unknown">1688 未知</span>';
+}
 function row(it){
   const isBundle = it.status === 'bundle';
   const manual = it.bundleManual || null;
@@ -145,7 +159,8 @@ function row(it){
     + '<span class="style">#' + it.id + (it.styleNo ? ' · ' + esc(it.styleNo) : '') + '</span>'
     + '<span class="muted">采集 ' + esc(it.date || '') + '</span>'
     + '<span class="muted">offer ' + esc(String(it.offerId || '')) + '</span>'
-    + wpBadge(it)
+    + (it.shopName ? '<span class="muted">店铺 ' + esc(it.shopName) + '</span>' : '')
+    + wpBadge(it) + listingBadge(it)
     + '</div>'
     + '<div class="body"><div class="title">' + esc(it.title || '') + '</div>'
     + '<div class="dims">' + (it.dims.length ? it.dims.map(dimRow).join('') : '<div class="muted" style="font-size:12px;color:var(--muted)">（无变体选项）</div>') + '</div></div>'
@@ -167,7 +182,8 @@ function renderStats(){
   el.innerHTML = '<span>筛选后 <b>' + totalFiltered + '</b> / 全部 <b>' + totalAll + '</b> 个产品</span>'
     + '<span>本页 <b>' + DATA.length + '</b></span>'
     + '<span class="b">本页捆绑 <b>' + bundles + '</b></span>'
-    + '<span class="n">本页已发布 <b>' + published + '</b></span>';
+    + '<span class="n">本页已发布 <b>' + published + '</b></span>'
+    + '<span>人工判定 <b>' + manualBundleCount + '</b></span>';
 }
 function colorLabel(value){
   return value === 6 ? '6+ 色' : value + ' 色';
@@ -192,6 +208,22 @@ function renderFilters(){
     + '>已发布 (' + wpPublish + ')</button>');
   parts.push('<button type="button" data-wp="unpublished"' + (wpFilter === 'unpublished' ? ' class="on"' : '')
     + '>未发布 (' + wpUnpublished + ')</button>');
+  const bundleTotal = Number(bundleCounts.bundle || 0) + Number(bundleCounts.clear || 0);
+  parts.push('<span class="sep"></span><span class="label">捆绑：</span>');
+  parts.push('<button type="button" data-bundle=""' + (bundleFilter === '' ? ' class="on"' : '')
+    + '>全部 (' + bundleTotal + ')</button>');
+  parts.push('<button type="button" data-bundle="bundle"' + (bundleFilter === 'bundle' ? ' class="on"' : '')
+    + '>捆绑 (' + Number(bundleCounts.bundle || 0) + ')</button>');
+  parts.push('<button type="button" data-bundle="clear"' + (bundleFilter === 'clear' ? ' class="on"' : '')
+    + '>正常 (' + Number(bundleCounts.clear || 0) + ')</button>');
+  const shopTotal = shopCounts.reduce((sum, s) => sum + Number(s.products || 0), 0);
+  const shopOptions = ['<option value="">全部店铺 (' + shopTotal + ')</option>'];
+  for (const shop of shopCounts) {
+    shopOptions.push('<option value="' + esc(shop.id) + '"' + (shopFilter === String(shop.id) ? ' selected' : '')
+      + '>' + esc(shop.name) + ' (' + shop.products + ')</option>');
+  }
+  parts.push('<span class="sep"></span><span class="label">店铺：</span>');
+  parts.push('<select id="shopSelect" title="按 1688 来源店铺筛选">' + shopOptions.join('') + '</select>');
   el.innerHTML = parts.join('');
 }
 function renderPager(){
@@ -224,6 +256,8 @@ async function loadPage(){
     if (keyword) params.set('search', keyword);
     if (colors) params.set('colors', String(colors));
     if (wpFilter) params.set('wp', wpFilter);
+    if (bundleFilter) params.set('bundle', bundleFilter);
+    if (shopFilter) params.set('shop', shopFilter);
     const res = await fetch('/api/product-catalog?' + params.toString(), { headers: { accept: 'application/json' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const body = await res.json();
@@ -232,6 +266,9 @@ async function loadPage(){
     totalAll = Number(body.total) || totalFiltered;
     colorCounts = body.colorCounts || {};
     wpCounts = body.wpCounts || {};
+    bundleCounts = body.bundleCounts || {};
+    shopCounts = Array.isArray(body.shopCounts) ? body.shopCounts : [];
+    manualBundleCount = Number(body.manualBundleCount) || 0;
     render();
   } catch (e) {
     document.getElementById('list').innerHTML = '<div class="empty">加载失败：' + esc(String((e && e.message) || e)) + '</div>';
@@ -289,7 +326,24 @@ function wireFilters(){
       wpFilter = next;
       offset = 0;
       void loadPage();
+      return;
     }
+    const bundleBtn = e.target.closest('button[data-bundle]');
+    if (bundleBtn) {
+      const next = String(bundleBtn.dataset.bundle || '');
+      if (next === bundleFilter) return;
+      bundleFilter = next;
+      offset = 0;
+      void loadPage();
+    }
+  });
+  el.addEventListener('change', (e) => {
+    if (e.target.id !== 'shopSelect') return;
+    const next = String(e.target.value || '');
+    if (next === shopFilter) return;
+    shopFilter = next;
+    offset = 0;
+    void loadPage();
   });
 }
 async function setBundleStatus(id, value, stateEl){
