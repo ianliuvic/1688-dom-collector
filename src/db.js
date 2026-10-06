@@ -2246,7 +2246,8 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
-  async function updateProductSkusFromMatrix(productDetailId, { rows, dimensions, skuMatrix, priceMin, priceMax }) {
+  async function updateProductSkusFromMatrix(productDetailId, { rows, dimensions, skuMatrix, priceMin, priceMax,
+    skuOptions = null, source = null }) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -2266,6 +2267,19 @@ export function createDatabase(databaseUrl) {
         JSON.stringify(dimensions ?? []), JSON.stringify(skuMatrix ?? {}),
         Number.isFinite(Number(priceMin)) ? Number(priceMin) : null,
         Number.isFinite(Number(priceMax)) ? Number(priceMax) : null]);
+      if (Array.isArray(skuOptions) && skuOptions.length) {
+        // Replace the stored option dimension (colour x size) only when the
+        // caller has a complete option list — this is what the translation and
+        // bundle detector read downstream.
+        await client.query(`UPDATE product_details SET raw_data = jsonb_set(
+          coalesce(raw_data,'{}'::jsonb), '{skuOptions}', $2::jsonb, true) WHERE id=$1`,
+        [productDetailId, JSON.stringify(skuOptions)]);
+      }
+      if (source) {
+        await client.query(`UPDATE product_details SET raw_data = jsonb_set(
+          coalesce(raw_data,'{}'::jsonb), '{variantRowsSource}', $2::jsonb, true) WHERE id=$1`,
+        [productDetailId, JSON.stringify({ source, at: new Date().toISOString(), rows: rows.length })]);
+      }
       await client.query('COMMIT');
       return { updated: updated.rowCount > 0, skuCount: rows.length };
     } catch (error) {

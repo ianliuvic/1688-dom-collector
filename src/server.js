@@ -960,7 +960,36 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
     if (!existing) return reply.code(404).send({ error: 'existing_detail_required_for_merge' });
     const extras = linkfoxExtrasForMerge(raw);
     const updated = await db.updateProductLinkFoxData(existing.id, extras);
-    return { mode: 'merge', productDetailId: existing.id, fields: Object.keys(extras), updated };
+    let skus = null;
+    if (body.updateSkus === true) {
+      // Variant backfill: rewrite the stored colour x size rows (price/stock/
+      // skuId), the option dimensions and the matrix from the LinkFox skuList,
+      // then re-run the deterministic bundle detector on the fresh data.
+      const capture = buildLinkFoxCapture(raw, { offerId, offerKey: offerId });
+      if (!capture.data.skuRows.length) {
+        return reply.code(422).send({ error: 'linkfox_no_sku_rows', merged: true });
+      }
+      const dimensions = capture.data.skuDimensions;
+      const skuMatrix = capture.data.skuMatrix;
+      const prices = capture.data.skuRows
+        .map((row) => Number(row.price))
+        .filter((value) => Number.isFinite(value) && value >= 0);
+      const priceMin = prices.length ? Math.min(...prices) : null;
+      const priceMax = prices.length ? Math.max(...prices) : null;
+      await db.updateProductSkusFromMatrix(existing.id, {
+        rows: capture.data.skuRows, dimensions, skuMatrix, priceMin, priceMax,
+        skuOptions: capture.data.skuOptions, source: 'linkfox',
+      });
+      const detection = detectBundle({
+        skuOptions: capture.data.skuOptions, skuDimensions: dimensions, skuMatrix,
+      });
+      await db.saveProductBundleStatus(existing.id, detection);
+      skus = {
+        rows: capture.data.skuRows.length, dimensions: dimensions.map((dimension) => dimension.name),
+        priceMin, priceMax, bundle: detection.status,
+      };
+    }
+    return { mode: 'merge', productDetailId: existing.id, fields: Object.keys(extras), updated, skus };
   }
 
   const offerKey = `lfx-${offerId}`;
