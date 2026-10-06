@@ -964,9 +964,8 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
     .filter((image) => image.image_type === 'sku')
     .map((image) => [normalizeImageKey(image.source_url), image]));
   const rawOptions = Array.isArray(raw.skuOptions) ? raw.skuOptions : [];
-  const translatedPayload = translation?.translated ?? null;
-  const translatedOptions = Array.isArray(translatedPayload?.skuOptions) ? translatedPayload.skuOptions : [];
-  const translatedDimensions = Array.isArray(translatedPayload?.skuDimensions) ? translatedPayload.skuDimensions : [];
+  const translatedOptions = Array.isArray(translation?.sku_options) ? translation.sku_options : [];
+  const translatedDimensions = Array.isArray(translation?.sku_dimensions) ? translation.sku_dimensions : [];
   const translatedByIndex = new Map(translatedOptions.map((option) => [Number(option?.index), option]));
   const isColour = (name) => /(颜色|color|colour)/i.test(String(name ?? ''));
   const isSize = (name) => /(尺码|尺寸|码数|size)/i.test(String(name ?? ''));
