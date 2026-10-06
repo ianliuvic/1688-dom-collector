@@ -924,7 +924,7 @@ app.get('/api/product-details', { preHandler: requireApiKey }, async (request, r
   if (offerId && !/^\d{10,13}$/.test(String(offerId))) {
     return reply.code(400).send({ error: 'offerId must be a 10 to 13 digit number.' });
   }
-  return db.listProductDetails({ offerId, limit: request.query?.limit });
+  return db.listProductDetails({ offerId, limit: request.query?.limit, offset: request.query?.offset });
 });
 
 app.get('/api/marketing/weekly-new-products', { preHandler: requireApiKey }, async (request, reply) => {

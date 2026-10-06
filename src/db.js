@@ -984,14 +984,17 @@ export function createDatabase(databaseUrl) {
     }
   }
 
-  async function listProductDetails({ offerId = null, limit = 100 } = {}) {    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 1000);
+  async function listProductDetails({ offerId = null, limit = 100, offset = 0 } = {}) {
+    const safeLimit = Math.max(Number(limit) || 100, 1);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
     if (offerId) {
       const result = await pool.query(`SELECT * FROM product_details
-        WHERE offer_id=$1 ORDER BY last_crawled_at DESC LIMIT $2`, [String(offerId), safeLimit]);
+        WHERE offer_id=$1 ORDER BY last_crawled_at DESC LIMIT $2 OFFSET $3`,
+        [String(offerId), safeLimit, safeOffset]);
       return result.rows;
     }
     const result = await pool.query(`SELECT * FROM product_details
-      ORDER BY last_crawled_at DESC LIMIT $1`, [safeLimit]);
+      ORDER BY last_crawled_at DESC LIMIT $1 OFFSET $2`, [safeLimit, safeOffset]);
     return result.rows;
   }
 
