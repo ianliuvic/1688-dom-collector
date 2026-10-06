@@ -14,7 +14,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   get1688ArrivalDate, setWordPressProductArrivalDate,
   setWordPressProductPublicationDate, setWordPressProductStatus,
   syncWordPressProductPricing, replaceWordPressBestSellers,
-  resolveWordPressProduct, updateWordPressProductStyleNumber } from './wordpress-publisher.js';
+  resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -929,6 +929,150 @@ app.put('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrA
   if (!plan.products.length) return reply.code(400).send({ error: 'empty_plan' });
   const saved = await db.saveProductSplitPlan(id, plan);
   return { productDetailId: id, plan: saved.plan, updatedAt: saved.updated_at };
+});
+
+// Pre-publish review layer: everything the publisher would use for this
+// capture, assembled from stored data without any model call. Mirrors the
+// translation, pricing, merchandising, images, variants and every publish gate.
+app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const [translation, publication, sourceListings] = await Promise.all([
+    db.getLatestProductTranslation(id, 'en'),
+    db.getWordPressPublication(id),
+    db.listShopProductSources(detail.offer_id),
+  ]);
+  const policy = evaluateShopProductPolicy(sourceListings);
+  let pricing = null;
+  try { pricing = buildWearHongxiuPricing(detail); } catch { pricing = null; }
+  const raw = detail.raw_data ?? {};
+  const priceInfo = raw.price ?? {};
+  const skuRows = detail.skus ?? [];
+  const sourcePrices = skuRows.map((row) => Number(row.price)).filter((value) => Number.isFinite(value) && value > 0);
+  const skuPriceMax = sourcePrices.length ? Math.max(...sourcePrices) : null;
+  const stockKnown = skuRows.length > 0 && skuRows.every((row) => row.stock !== null && Number(row.stock) >= 0);
+  const allInStock = skuRows.length > 0 && skuRows.every((row) => row.stock !== null && Number(row.stock) > 0);
+
+  // Swatch mapping: colour option text -> local thumbnail when the source URL
+  // matches a stored SKU image (same rule the publisher uses).
+  const normalizeImageKey = (value) => String(value ?? '').trim()
+    .replace(/^http:/i, 'https:').replace(/[?#].*$/, '').replace(/_\.webp$/i, '')
+    .replace(/_\d+x\d+[^/]*$/i, '');
+  const skuImageByKey = new Map((detail.images ?? [])
+    .filter((image) => image.image_type === 'sku')
+    .map((image) => [normalizeImageKey(image.source_url), image]));
+  const swatches = (Array.isArray(raw.skuOptions) ? raw.skuOptions : [])
+    .filter((option) => /(颜色|color|colour)/i.test(String(option?.dimensionName ?? '')))
+    .map((option) => {
+      const source = String(option?.image ?? '').trim();
+      const matched = source ? skuImageByKey.get(normalizeImageKey(source)) : null;
+      const base = matched ? imagePublicPath(matched.storage_path) : null;
+      return { value: String(option?.text ?? ''), thumb: base ? `${base}?w=96` : (source || null) };
+    })
+    .filter((swatch) => swatch.value);
+  const galleryImages = (detail.images ?? [])
+    .filter((image) => image.image_type === 'main' || image.image_type === 'gallery')
+    .sort((left, right) => (left.image_type !== right.image_type
+      ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)))
+    .map((image) => {
+      const base = imagePublicPath(image.storage_path);
+      return { id: String(image.id), type: image.image_type, thumb: base ? `${base}?w=160` : (image.source_url || null) };
+    });
+  const payloadMeta = publication?.payload?.meta ?? {};
+  const payloadColors = publication?.payload?.colors?.colors ?? [];
+  const payloadSizes = publication?.payload?.sizes?.sizes ?? [];
+  const updatedAt = publication?.updated_at ? String(publication.updated_at) : null;
+  return {
+    productDetailId: detail.id,
+    offerId: detail.offer_id,
+    sourceTitle: detail.title,
+    wp: {
+      status: publication?.wp_status ?? null,
+      styleNo: publication?.style_no ?? null,
+      url: publication?.wp_url ?? null,
+      postId: publication?.wp_post_id ?? null,
+      externalId: publication?.external_id ?? null,
+      lastError: publication?.last_error ?? null,
+      updatedAt,
+    },
+    translation: translation ? {
+      id: translation.id,
+      title: translation.title ?? null,
+      description: translation.description ?? null,
+      model: translation.model ?? null,
+      createdAt: translation.created_at ?? null,
+    } : null,
+    merchandising: publication ? {
+      primaryCategory: payloadMeta.primary_category ?? null,
+      primaryCategoryId: payloadMeta.primary_category_id ?? null,
+      material: payloadMeta.material ?? null,
+      tags: publication.payload?.tags ?? [],
+      categoryIds: publication.payload?.category_ids ?? [],
+      tagIds: publication.payload?.tag_ids ?? [],
+    } : null,
+    price: {
+      currency: detail.currency ?? 'CNY',
+      moq: detail.moq ?? null,
+      sourceMin: detail.price_min === null ? null : Number(detail.price_min),
+      sourceMax: detail.price_max === null ? null : Number(detail.price_max),
+      skuPriceMax,
+      verified: priceInfo.verified === true,
+      priceSource: priceInfo.source ?? null,
+      tiers: (detail.priceTiers ?? []).map((tier) => ({
+        minQuantity: tier.min_quantity === null ? null : Number(tier.min_quantity),
+        price: tier.price === null ? null : Number(tier.price),
+      })),
+      pricing,
+      samplePrice: '50.00',
+      moqText: '50 pcs',
+      retailAvailable: allInStock,
+      stockKnown,
+    },
+    images: {
+      gallery: galleryImages,
+      swatches,
+      descriptionCount: (detail.images ?? []).filter((image) => image.image_type === 'description').length,
+      publishedImageCount: Array.isArray(publication?.payload?.images) ? publication.payload.images.length : null,
+      publishedColorCount: payloadColors.length || null,
+      publishedSizeCount: payloadSizes.length || null,
+    },
+    variants: {
+      dimensions: raw.skuDimensions ?? [],
+      rows: skuRows.slice(0, 60).map((row) => ({
+        skuKey: row.sku_key,
+        options: row.option_data ?? {},
+        price: row.price === null ? null : Number(row.price),
+        stock: row.stock === null ? null : Number(row.stock),
+        skuId: row.sku_id ?? null,
+      })),
+      total: skuRows.length,
+    },
+    gates: {
+      bundle: {
+        status: detail.bundle_status ?? null,
+        manual: detail.bundle_manual_status ?? null,
+        reason: detail.bundle_analysis?.reason ?? null,
+      },
+      duplicate: detail.duplicate_status ?? null,
+      gallery: {
+        source: raw.gallery?.source ?? null,
+        complete: raw.gallery?.complete === true,
+      },
+      shopPolicy: { allowed: policy.allowed, reason: policy.reason ?? null },
+      priceVerified: priceInfo.verified === true,
+      hasTranslation: Boolean(translation),
+      hasPublication: Boolean(publication?.wp_post_id),
+    },
+    dates: {
+      publicationDate: detail.publication_date ? String(detail.publication_date) : null,
+      publicationDateSource: detail.publication_date_source ?? null,
+      arrivalDate: get1688ArrivalDate(detail) ?? null,
+      firstSeen: detail.first_seen_at ? String(detail.first_seen_at) : null,
+      lastCrawled: detail.last_crawled_at ? String(detail.last_crawled_at) : null,
+    },
+  };
 });
 
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({

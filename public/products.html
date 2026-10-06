@@ -56,6 +56,33 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .sp-assign{display:flex;gap:3px;justify-content:center;margin-top:3px;flex-wrap:wrap}
 .sp-assign button{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);background:#fff;font-size:10.5px;cursor:pointer;line-height:1;padding:0}
 .sp-assign button.on{background:var(--info);border-color:var(--info);color:#fff}
+.pp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.pp-chip{font-size:11.5px;border-radius:999px;padding:2px 10px;border:1px solid var(--line);background:#fff;color:var(--text)}
+.pp-chip.ok{background:#ecfdf3;border-color:#a6f4c5;color:#067647}
+.pp-chip.warn{background:#fffaeb;border-color:#fedf89;color:#b54708}
+.pp-chip.bad{background:#fef3f2;border-color:#fecdca;color:#b42318}
+.pp-chip.info{background:#eff8ff;border-color:#b2ddff;color:#175cd3}
+.pp-chip.gray{background:#f2f4f7;border-color:#e4e7ec;color:#475467}
+.pp-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:10px}
+@media(max-width:1100px){.pp-grid{grid-template-columns:1fr}}
+.pp-card{border:1px solid var(--line);border-radius:8px;background:#fff;padding:8px 10px;min-width:0}
+.pp-card.pp-wide{grid-column:1 / -1}
+.pp-card-title{font-size:11.5px;font-weight:700;color:var(--muted);margin-bottom:6px}
+.pp-title{font-size:13.5px;font-weight:600;line-height:1.4}
+.pp-desc{font-size:12.5px;color:#344054;line-height:1.5;margin-top:4px}
+.pp-table{width:100%;border-collapse:collapse;font-size:12px}
+.pp-table th,.pp-table td{border-bottom:1px solid var(--line);padding:3px 6px;text-align:left;vertical-align:top}
+.pp-table th{color:var(--muted);font-weight:600;font-size:11px}
+.pp-table tr:last-child td{border-bottom:none}
+.pp-swatches{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.pp-swatch{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:6px;padding:2px 8px 2px 3px;font-size:12px;background:#fff}
+.pp-swatch img{width:26px;height:26px;object-fit:cover;border-radius:4px;display:block;background:#f2f4f7}
+.pp-thumbs{display:flex;flex-wrap:wrap;gap:5px}
+.pp-thumbs img{width:52px;height:52px;object-fit:cover;border-radius:4px;border:1px solid var(--line);background:#f2f4f7;display:block}
+.pp-muted{font-size:12px;color:var(--muted)}
+.pp-tags{display:flex;flex-wrap:wrap;gap:5px}
+.pp-tag{font-size:11.5px;border:1px solid var(--line);border-radius:999px;padding:1px 9px;background:#fff;color:var(--text)}
+.pp-tag.cat{background:#eff8ff;border-color:#b2ddff;color:#175cd3}
 main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width:1500px;margin:0 auto}
 .row{display:grid;grid-template-columns:96px 200px minmax(0,1fr) 260px;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;align-items:start}
 .row.is-bundle{border-left:4px solid var(--bundle)}
@@ -201,6 +228,7 @@ function row(it){
       ? '<div class="line"><button type="button" class="split-toggle" data-split-id="' + it.id + '">拆分 ▾'
         + (it.hasSplitPlan ? '（已保存）' : '') + '</button></div>'
       : '')
+    + '<div class="line"><button type="button" class="split-toggle" data-pp-id="' + it.id + '">发布预览 ▾</button></div>'
     + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
     + '</div></article>';
 }
@@ -562,11 +590,128 @@ async function saveSplitPlan(id){
   }
 }
 
+// --- pre-publish review layer -------------------------------------------------
+function fmtMoney(value, currency){
+  if (value === null || value === undefined) return '—';
+  const unit = currency === 'CNY' ? '¥' : (currency === 'USD' ? '$' : (currency ? currency + ' ' : ''));
+  return unit + Number(value).toFixed(value % 1 === 0 ? 0 : 2);
+}
+
+async function togglePublishPreview(id){
+  const row = document.querySelector('.row[data-id="' + id + '"]');
+  if (!row) return;
+  const existing = document.getElementById('pp-panel-' + id);
+  if (existing) { existing.remove(); return; }
+  const panel = document.createElement('section');
+  panel.className = 'split-panel';
+  panel.id = 'pp-panel-' + id;
+  panel.innerHTML = '<div class="sp-status">加载发布预览…</div>';
+  row.insertAdjacentElement('afterend', panel);
+  try {
+    const res = await fetch('/api/product-details/' + id + '/publish-preview', { headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    renderPublishPreview(id, body);
+  } catch (e) {
+    panel.innerHTML = '<div class="sp-status">加载失败：' + esc(String((e && e.message) || e)) + '</div>';
+  }
+}
+
+function renderPublishPreview(id, data){
+  const panel = document.getElementById('pp-panel-' + id);
+  if (!panel) return;
+  const chip = (label, cls) => '<span class="pp-chip ' + (cls || '') + '">' + label + '</span>';
+  const chips = [];
+  chips.push(data.wp.status
+    ? chip('WP ' + esc(data.wp.status), data.wp.status === 'publish' ? 'ok' : 'info')
+    : chip('未发布', 'gray'));
+  if (data.wp.styleNo) chips.push(chip(esc(data.wp.styleNo), 'info'));
+  chips.push(data.gates.hasTranslation ? chip('已翻译', 'ok') : chip('未翻译（发布前需翻译）', 'bad'));
+  chips.push(data.gates.priceVerified ? chip('可信价格', 'ok') : chip('价格未核实', 'warn'));
+  chips.push(data.gates.gallery.complete
+    ? chip('图库完整', 'ok')
+    : chip('图库未验证（' + esc(data.gates.gallery.source || '无') + '）', 'warn'));
+  chips.push(data.gates.bundle.status === 'bundle'
+    ? chip('捆绑' + (data.gates.bundle.manual ? '（手动）' : ''), 'bad')
+    : chip('非捆绑', 'ok'));
+  chips.push(data.gates.duplicate === 'no_similar_products' ? chip('无重复', 'ok')
+    : chip('重复：' + esc(String(data.gates.duplicate || '未检查')), 'info'));
+  chips.push(data.gates.shopPolicy.allowed ? chip('店铺政策通过', 'ok') : chip('店铺政策拒绝', 'bad'));
+  if (data.wp.lastError) chips.push(chip('上次发布错误：' + esc(String(data.wp.lastError).slice(0, 40)), 'bad'));
+  if (data.dates.publicationDate) chips.push(chip('排序日期 ' + esc(String(data.dates.publicationDate).slice(0, 10)), 'gray'));
+  if (data.dates.arrivalDate) chips.push(chip('到货批次 ' + esc(data.dates.arrivalDate), 'gray'));
+
+  const translationCard = data.translation
+    ? '<div class="pp-card"><div class="pp-card-title">英文标题与描述（将发布到 WP 的文案）</div>'
+      + '<div class="pp-title">' + esc(data.translation.title || '（无标题）') + '</div>'
+      + '<div class="pp-desc">' + esc(data.translation.description || '（无描述）') + '</div>'
+      + '<div class="pp-muted" style="margin-top:6px">模型 ' + esc(data.translation.model || '?') + (data.translation.createdAt ? ' · ' + esc(new Date(data.translation.createdAt).toLocaleString()) : '') + '</div></div>'
+    : '<div class="pp-card"><div class="pp-card-title">英文标题与描述</div><div class="pp-muted">尚未翻译：发布前需先执行翻译（POST /api/product-details/' + id + '/translations）。</div></div>';
+
+  const pricing = data.price.pricing;
+  const pricingCard = '<div class="pp-card"><div class="pp-card-title">定价（确定性公式）</div>'
+    + '<table class="pp-table"><tbody>'
+    + '<tr><th>1688 价格</th><td>' + fmtMoney(data.price.sourceMin, data.price.currency) + ' – ' + fmtMoney(data.price.sourceMax, data.price.currency)
+    + (data.price.skuPriceMax !== null ? ' · 单行最高 ' + fmtMoney(data.price.skuPriceMax, data.price.currency) : '')
+    + '（' + (data.price.verified ? '已核实' : '未核实') + '）</td></tr>'
+    + (pricing
+      ? pricing.tiers.map((tier) => '<tr><th>' + esc(tier.label) + '</th><td>$' + Number(tier.price).toFixed(2) + ' <span class="pp-muted">(源价+' + tier.cny_markup + ')/6.5</span></td></tr>').join('')
+      : '<tr><th>美元价</th><td class="pp-muted">缺少可信价格，无法计算</td></tr>')
+    + '<tr><th>样品价 / MOQ</th><td>$' + data.price.samplePrice + ' · ' + esc(data.price.moqText) + '</td></tr>'
+    + '<tr><th>零售可售</th><td>' + (data.price.retailAvailable ? '是（全部变体有货，页面显示 2× 首档价）' : (data.price.stockKnown ? '否（存在 0 库存）' : '库存未知')) + '</td></tr>'
+    + '</tbody></table></div>';
+
+  const merch = data.merchandising
+    ? '<div class="pp-card"><div class="pp-card-title">类目 / 标签 / 材质（上次发布结果）</div>'
+      + '<div class="pp-muted">主类目：' + esc(data.merchandising.primaryCategory || '—') + ' · 材质：' + esc(data.merchandising.material || '—') + '</div>'
+      + ((data.merchandising.tags || []).length ? '<div class="pp-tags" style="margin-top:6px">' + data.merchandising.tags.map((tag) => '<span class="pp-tag">' + esc(tag) + '</span>').join('') + '</div>' : '')
+      + '</div>'
+    : '<div class="pp-card"><div class="pp-card-title">类目 / 标签 / 材质</div><div class="pp-muted">发布时由模型自动选择（尚无发布记录）。</div></div>';
+
+  const swatchHtml = (data.images.swatches || []).map((swatch) => '<span class="pp-swatch">'
+    + (swatch.thumb ? '<img src="' + esc(swatch.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">' : '')
+    + '<span>' + esc(swatch.value) + '</span></span>').join('');
+  const imagesCard = '<div class="pp-card"><div class="pp-card-title">颜色与图片（发布用）</div>'
+    + (swatchHtml ? '<div class="pp-swatches">' + swatchHtml + '</div>' : '<div class="pp-muted">无颜色色卡</div>')
+    + '<div class="pp-thumbs">' + (data.images.gallery || []).map((image) => '<img src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">').join('') + '</div>'
+    + '<div class="pp-muted" style="margin-top:6px">主图+图库 ' + (data.images.gallery || []).length + ' 张 · 详情图 ' + data.images.descriptionCount + ' 张'
+    + (data.images.publishedImageCount !== null ? ' · 已发布 ' + data.images.publishedImageCount + ' 张 / 色卡 ' + (data.images.publishedColorCount || 0) + ' / 尺码 ' + (data.images.publishedSizeCount || 0) : '')
+    + '</div></div>';
+
+  const rows = (data.variants.rows || []).slice(0, 20).map((row) => '<tr><td>' + esc(row.skuKey) + '</td>'
+    + '<td>' + fmtMoney(row.price, data.price.currency) + '</td><td>' + (row.stock === null ? '—' : row.stock) + '</td><td class="pp-muted">' + esc(row.skuId || '') + '</td></tr>').join('');
+  const variantsCard = '<div class="pp-card pp-wide"><div class="pp-card-title">变体矩阵（' + data.variants.total + ' 行，显示前 20）</div>'
+    + '<table class="pp-table"><thead><tr><th>变体</th><th>源价</th><th>库存</th><th>skuId</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+
+  panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 发布前预览</b>'
+    + '<button type="button" data-pp-reload="' + id + '">刷新</button>'
+    + '<button type="button" data-pp-close="' + id + '">收起</button>'
+    + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（只读）</span></div>'
+    + '<div class="pp-chips">' + chips.join('') + '</div>'
+    + '<div class="pp-grid">' + translationCard + pricingCard + merch + imagesCard + variantsCard + '</div>';
+}
+
 document.addEventListener('click', (e) => {
   const bundleBtn = e.target.closest('button[data-bundle-value]');
   if (bundleBtn) {
     const stateEl = document.querySelector('[data-bstate="' + bundleBtn.dataset.bundleId + '"]');
     void setBundleStatus(bundleBtn.dataset.bundleId, bundleBtn.dataset.bundleValue, stateEl);
+    return;
+  }
+  const ppToggle = e.target.closest('button[data-pp-id]');
+  if (ppToggle) { void togglePublishPreview(String(ppToggle.dataset.ppId)); return; }
+  const ppReload = e.target.closest('button[data-pp-reload]');
+  if (ppReload) {
+    const id = String(ppReload.dataset.ppReload);
+    const existing = document.getElementById('pp-panel-' + id);
+    if (existing) existing.remove();
+    void togglePublishPreview(id);
+    return;
+  }
+  const ppClose = e.target.closest('button[data-pp-close]');
+  if (ppClose) {
+    const panel = document.getElementById('pp-panel-' + ppClose.dataset.ppClose);
+    if (panel) panel.remove();
     return;
   }
   const toggle = e.target.closest('button[data-split-id]');
