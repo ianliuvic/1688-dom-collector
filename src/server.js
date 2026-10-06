@@ -966,19 +966,33 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
   const rawOptions = Array.isArray(raw.skuOptions) ? raw.skuOptions : [];
   const translatedOptions = Array.isArray(translation?.sku_options) ? translation.sku_options : [];
   const translatedDimensions = Array.isArray(translation?.sku_dimensions) ? translation.sku_dimensions : [];
-  const translatedByIndex = new Map(translatedOptions.map((option) => [Number(option?.index), option]));
+  // The translated indices point at the option order captured WHEN the
+  // translation was made. The stored source snapshot keeps that order, so the
+  // original text must be read from there, not from the (possibly re-imported)
+  // current raw options.
+  const sourceOptions = Array.isArray(translation?.source_data?.skuOptions)
+    ? translation.source_data.skuOptions : [];
+  const sourceTextByIndex = new Map(sourceOptions.map((option, position) => [
+    Number(option?.index ?? position), String(option?.text ?? ''),
+  ]));
+  const rawByText = new Map();
+  for (const option of rawOptions) {
+    if (option?.text) rawByText.set(String(option.text), option);
+  }
   const isColour = (name) => /(颜色|color|colour)/i.test(String(name ?? ''));
   const isSize = (name) => /(尺码|尺寸|码数|size)/i.test(String(name ?? ''));
-  const colourOptions = [];
-  for (const [index, option] of rawOptions.entries()) {
-    if (!isColour(option?.dimensionName)) continue;
-    const translated = translatedByIndex.get(Number(option?.index ?? index));
-    colourOptions.push({
-      value: String(translated?.text ?? option?.text ?? ''),
-      source: String(option?.text ?? ''),
-      imageUrl: translated?.imageUrl ?? option?.image ?? null,
-    });
-  }
+  const colourOptions = translatedOptions.length
+    ? translatedOptions.filter((option) => isColour(option?.dimensionName)).map((option) => {
+      const source = sourceTextByIndex.get(Number(option?.index)) ?? null;
+      const rawMatch = source ? rawByText.get(source) : null;
+      return {
+        value: String(option?.text ?? ''),
+        source,
+        imageUrl: option?.imageUrl ?? rawMatch?.image ?? null,
+      };
+    })
+    : rawOptions.filter((option) => isColour(option?.dimensionName))
+      .map((option) => ({ value: String(option?.text ?? ''), source: null, imageUrl: option?.image ?? null }));
   const swatches = colourOptions.map((option) => {
     const matched = option.imageUrl ? skuImageByKey.get(normalizeImageKey(option.imageUrl)) : null;
     const base = matched ? imagePublicPath(matched.storage_path) : null;
