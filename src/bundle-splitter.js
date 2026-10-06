@@ -11,7 +11,7 @@ import { applyReasoning } from './model-request.js';
 
 const SIZE_RE = /(尺码|尺寸|码数|size)/i;
 const COLOR_RE = /(颜色|color|colour)/i;
-const MAX_IMAGES = 24;
+const MAX_IMAGES = 8;
 const MAX_PRODUCTS = 6;
 const FALLBACK_BASE_URL = 'https://api.deepseek.com';
 
@@ -176,7 +176,10 @@ ${input.images.map((image) => `${image.index}. ${image.type}`).join('\n')}`;
     }, config.reasoningEffort)),
     signal: AbortSignal.timeout(180000),
   });
-  if (!response.ok) throw new Error(`Split analysis failed (${response.status}).`);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Split analysis failed (${response.status}): ${String(detail).slice(0, 200)}`);
+  }
   const payload = await response.json();
   const text = contentText(payload.choices?.[0]?.message?.content);
   let parsed = null;
