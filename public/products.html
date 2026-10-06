@@ -22,6 +22,14 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .filters .label{font-size:12px;color:var(--muted)}
 .filters button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:4px 12px;cursor:pointer;font-size:12.5px;color:var(--text)}
 .filters button.on{background:var(--info);border-color:var(--info);color:#fff}
+.filters .sep{width:1px;height:18px;background:var(--line);margin:0 4px}
+.bundle-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap;font-size:12px}
+.bbtn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:2px 9px;font-size:11.5px;cursor:pointer;color:var(--text)}
+.bbtn:hover{border-color:#98a2b3}
+.bbtn.on.red{background:var(--bundle);border-color:var(--bundle);color:#fff}
+.bbtn.on.green{background:var(--normal);border-color:var(--normal);color:#fff}
+.bbtn.on.gray{background:#475467;border-color:#475467;color:#fff}
+.bstate{font-size:11.5px;color:var(--muted)}
 main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width:1500px;margin:0 auto}
 .row{display:grid;grid-template-columns:96px 200px minmax(0,1fr) 260px;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;align-items:start}
 .row.is-bundle{border-left:4px solid var(--bundle)}
@@ -80,7 +88,9 @@ let offset = 0;
 let totalFiltered = 0;
 let totalAll = 0;
 let colorCounts = {};
+let wpCounts = {};
 let colors = 0;
+let wpFilter = '';
 let keyword = '';
 let loading = false;
 
@@ -120,14 +130,18 @@ function wpBadge(it){
 }
 function row(it){
   const isBundle = it.status === 'bundle';
+  const manual = it.bundleManual || null;
   const thumbs = (it.gallery || []).slice(0, 6);
   const overflow = (it.gallery || []).length - thumbs.length;
+  const bundleBtn = (value, label, cls) =>
+    '<button type="button" class="bbtn' + (manual === value || (!manual && value === 'auto') ? ' on ' + cls : '') + '"'
+    + ' data-bundle-id="' + it.id + '" data-bundle-value="' + value + '">' + label + '</button>';
   return '<article class="row' + (isBundle ? ' is-bundle' : '') + '" data-id="' + it.id + '">'
     + (it.cover
       ? '<img class="cover" loading="lazy" referrerpolicy="no-referrer" src="' + esc(it.cover) + '" onerror="imgFallback(this)" alt="">'
       : '<span class="cover"></span>')
     + '<div class="meta">'
-    + '<span class="badge ' + (isBundle ? 'bundle' : 'normal') + '">' + (isBundle ? '捆绑' : '正常') + '</span>'
+    + '<span class="badge ' + (isBundle ? 'bundle' : 'normal') + '">' + (isBundle ? '捆绑' : '正常') + (manual ? ' · 手动' : '') + '</span>'
     + '<span class="style">#' + it.id + (it.styleNo ? ' · ' + esc(it.styleNo) : '') + '</span>'
     + '<span class="muted">采集 ' + esc(it.date || '') + '</span>'
     + '<span class="muted">offer ' + esc(String(it.offerId || '')) + '</span>'
@@ -139,6 +153,9 @@ function row(it){
     + '<div class="line"><b>' + priceText(it) + '</b>' + (it.moq != null ? ' <span class="muted">· 起订 ' + it.moq + '</span>' : '') + '</div>'
     + '<div class="line">颜色 <b>' + (it.colorCount || 0) + '</b> · 变体组合 <b>' + it.skuRows + '</b> 条 · 图库 ' + (it.gallery || []).length + ' 张</div>'
     + (it.wpUrl ? '<div class="muted"><a href="' + esc(it.wpUrl) + '" target="_blank" rel="noopener">查看线上页面</a></div>' : '')
+    + '<div class="bundle-actions"><span class="muted">判定：</span>'
+    + bundleBtn('bundle', '捆绑', 'red') + bundleBtn('clear', '正常', 'green') + bundleBtn('auto', '自动', 'gray')
+    + '<span class="bstate" data-bstate="' + it.id + '"></span></div>'
     + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
     + '</div></article>';
 }
@@ -158,14 +175,23 @@ function colorLabel(value){
 function renderFilters(){
   const el = document.getElementById('filters');
   if (!el) return;
-  const total = Object.values(colorCounts).reduce((sum, n) => sum + Number(n || 0), 0);
+  const colorTotal = Object.values(colorCounts).reduce((sum, n) => sum + Number(n || 0), 0);
+  const wpPublish = Number(wpCounts.publish || 0);
+  const wpUnpublished = Number(wpCounts.unpublished || 0);
   const parts = ['<span class="label">颜色变体数量：</span>',
-    '<button type="button" data-colors="0"' + (colors === 0 ? ' class="on"' : '') + '>全部 (' + total + ')</button>'];
+    '<button type="button" data-colors="0"' + (colors === 0 ? ' class="on"' : '') + '>全部 (' + colorTotal + ')</button>'];
   for (const value of [1, 2, 3, 4, 5, 6]) {
     const count = Number(colorCounts[String(value)] || 0);
     parts.push('<button type="button" data-colors="' + value + '"' + (colors === value ? ' class="on"' : '')
       + '>' + colorLabel(value) + ' (' + count + ')</button>');
   }
+  parts.push('<span class="sep"></span><span class="label">发布状态：</span>');
+  parts.push('<button type="button" data-wp=""' + (wpFilter === '' ? ' class="on"' : '')
+    + '>全部 (' + (wpPublish + wpUnpublished) + ')</button>');
+  parts.push('<button type="button" data-wp="publish"' + (wpFilter === 'publish' ? ' class="on"' : '')
+    + '>已发布 (' + wpPublish + ')</button>');
+  parts.push('<button type="button" data-wp="unpublished"' + (wpFilter === 'unpublished' ? ' class="on"' : '')
+    + '>未发布 (' + wpUnpublished + ')</button>');
   el.innerHTML = parts.join('');
 }
 function renderPager(){
@@ -197,6 +223,7 @@ async function loadPage(){
     const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
     if (keyword) params.set('search', keyword);
     if (colors) params.set('colors', String(colors));
+    if (wpFilter) params.set('wp', wpFilter);
     const res = await fetch('/api/product-catalog?' + params.toString(), { headers: { accept: 'application/json' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const body = await res.json();
@@ -204,6 +231,7 @@ async function loadPage(){
     totalFiltered = Number(body.count) || 0;
     totalAll = Number(body.total) || totalFiltered;
     colorCounts = body.colorCounts || {};
+    wpCounts = body.wpCounts || {};
     render();
   } catch (e) {
     document.getElementById('list').innerHTML = '<div class="empty">加载失败：' + esc(String((e && e.message) || e)) + '</div>';
@@ -245,15 +273,49 @@ function wireFilters(){
   const el = document.getElementById('filters');
   if (!el) return;
   el.addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-colors]');
-    if (!btn) return;
-    const next = Number(btn.dataset.colors);
-    if (next === colors) return;
-    colors = next;
-    offset = 0;
-    void loadPage();
+    const colorBtn = e.target.closest('button[data-colors]');
+    if (colorBtn) {
+      const next = Number(colorBtn.dataset.colors);
+      if (next === colors) return;
+      colors = next;
+      offset = 0;
+      void loadPage();
+      return;
+    }
+    const wpBtn = e.target.closest('button[data-wp]');
+    if (wpBtn) {
+      const next = String(wpBtn.dataset.wp || '');
+      if (next === wpFilter) return;
+      wpFilter = next;
+      offset = 0;
+      void loadPage();
+    }
   });
 }
+async function setBundleStatus(id, value, stateEl){
+  const item = DATA.find((x) => String(x.id) === String(id));
+  if (!item) return;
+  if (stateEl) stateEl.textContent = '保存中…';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/bundle-status', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: value }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    item.status = body.status;
+    item.bundleManual = body.manual || null;
+    render();
+  } catch (e) {
+    if (stateEl) stateEl.textContent = '保存失败：' + String((e && e.message) || e);
+  }
+}
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-bundle-value]');
+  if (!btn) return;
+  const stateEl = document.querySelector('[data-bstate="' + btn.dataset.bundleId + '"]');
+  void setBundleStatus(btn.dataset.bundleId, btn.dataset.bundleValue, stateEl);
+});
 (async () => {
   wireTabs();
   wireFilters();

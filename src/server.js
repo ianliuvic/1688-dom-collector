@@ -735,6 +735,73 @@ app.post('/api/bundle-audit/recheck', { preHandler: requireApiKey }, async (requ
   return { scanned: rows.length, flipped, unchanged, details };
 });
 
+// Full bundle re-evaluation over every capture (used after a detector rule
+// change). Manual overrides are preserved untouched.
+app.post('/api/bundle-audit/recheck-all', { preHandler: requireApiKey }, async (request) => {
+  const batchSize = Math.min(Math.max(Number(request.body?.batchSize) || 400, 50), 1000);
+  const stats = { scanned: 0, bundles: 0, clear: 0, changed: 0, bundleToClear: 0, clearToBundle: 0, manualSkipped: 0 };
+  const samples = [];
+  let offset = 0;
+  while (true) {
+    const rows = await db.listBundleRecheckRows({ limit: batchSize, offset });
+    if (!rows.length) break;
+    for (const row of rows) {
+      stats.scanned += 1;
+      if (row.bundle_manual_status) { stats.manualSkipped += 1; continue; }
+      const detection = detectBundle({
+        skuOptions: row.sku_options ?? [],
+        skuDimensions: row.sku_dimensions ?? [],
+        skuMatrix: row.sku_matrix ?? null,
+      });
+      if (detection.status === 'bundle') stats.bundles += 1; else stats.clear += 1;
+      const previous = row.bundle_status ?? 'clear';
+      if (previous !== detection.status) {
+        stats.changed += 1;
+        if (detection.status === 'bundle') stats.clearToBundle += 1; else stats.bundleToClear += 1;
+        if (samples.length < 50) {
+          samples.push({ id: row.id, offerId: row.offer_id, title: row.title, from: previous, to: detection.status });
+        }
+      }
+      await db.saveProductBundleStatus(row.id, detection);
+    }
+    offset += rows.length;
+    if (rows.length < batchSize) break;
+  }
+  return { ...stats, samples };
+});
+
+// Manual bundle verdict for one capture: {status: 'bundle' | 'clear' | 'auto'}.
+// Stored in bundle_manual_status, so it survives re-captures and detector
+// re-runs; 'auto' clears the override and re-runs the detector right away.
+app.post('/api/product-details/:id/bundle-status', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const requested = String(request.body?.status ?? '').trim();
+  if (!['bundle', 'clear', 'auto'].includes(requested)) {
+    return reply.code(400).send({ error: 'invalid_status', message: 'status must be bundle, clear or auto' });
+  }
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (requested === 'auto') {
+    await db.setProductBundleManual(id, null);
+    const detection = detectBundle({
+      skuOptions: detail.raw_data?.skuOptions ?? [],
+      skuDimensions: detail.raw_data?.skuDimensions ?? [],
+      skuMatrix: detail.raw_data?.skuMatrix ?? null,
+    });
+    const saved = await db.saveProductBundleStatus(id, detection);
+    return {
+      productDetailId: id, status: saved?.bundle_status ?? detection.status,
+      manual: null, detector: detection.status,
+    };
+  }
+  const saved = await db.setProductBundleManual(id, requested);
+  return {
+    productDetailId: id, status: saved?.bundle_status ?? requested,
+    manual: saved?.bundle_manual_status ?? requested, manualAt: saved?.bundle_manual_at ?? null,
+  };
+});
+
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({
   ...(await db.getDashboardStats()),
   runtime: {
@@ -2306,6 +2373,7 @@ function toProductCatalogItem(row) {
     moq: row.moq === null ? null : Number(row.moq),
     skuRows: row.sku_rows ?? 0,
     colorCount: Number(row.color_count) || 0,
+    bundleManual: row.bundle_manual_status || null,
     styleNo: row.style_no || null,
     wpStatus: row.wp_status || null,
     wpUrl: row.wp_url || null,
@@ -2318,15 +2386,19 @@ function toProductCatalogItem(row) {
 app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async (request) => {
   const colorsRaw = String(request.query?.colors ?? '').trim();
   const colors = /^[0-6]$/.test(colorsRaw) ? Number(colorsRaw) : 0;
+  const wp = ['publish', 'unpublished'].includes(String(request.query?.wp ?? '').trim())
+    ? String(request.query.wp).trim() : '';
   const result = await db.listProductCatalog({
     limit: request.query?.limit ?? 100,
     offset: request.query?.offset ?? 0,
     search: request.query?.search ?? '',
     colors,
+    wp,
   });
   return {
     count: result.filteredTotal, total: result.total,
     colorCounts: result.colorCounts,
+    wpCounts: result.wpCounts,
     limit: result.limit, offset: result.offset,
     items: result.items.map(toProductCatalogItem),
   };

@@ -165,6 +165,8 @@ export function createDatabase(databaseUrl) {
       ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_status text;
       ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_analysis jsonb;
       ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_checked_at timestamptz;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_manual_status text;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_manual_at timestamptz;
       CREATE INDEX IF NOT EXISTS product_details_bundle_status_idx
         ON product_details (bundle_status);
       CREATE INDEX IF NOT EXISTS product_details_gallery_fingerprint_idx
@@ -1050,11 +1052,12 @@ export function createDatabase(databaseUrl) {
    * captured product with its option dimensions (and swatch sources), the
    * main/gallery/sku image list, price range, WordPress publication state and
    * the colour-variant count used by the colour filter. */
-  async function listProductCatalog({ limit = 100, offset = 0, search = '', colors = 0 } = {}) {
+  async function listProductCatalog({ limit = 100, offset = 0, search = '', colors = 0, wp = '' } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
     const safeOffset = Math.max(Number(offset) || 0, 0);
     const colorBucket = [1, 2, 3, 4, 5].includes(Number(colors)) ? Number(colors)
       : (Number(colors) === 6 ? 6 : 0);
+    const wpValues = ['publish', 'unpublished'].includes(String(wp)) ? String(wp) : '';
     const searchTerm = String(search || '').trim().slice(0, 120);
     const params = [searchTerm ? `%${searchTerm}%` : null];
     const where = `($1::text IS NULL OR details.title ILIKE $1 OR details.offer_id ILIKE $1
@@ -1085,12 +1088,19 @@ export function createDatabase(databaseUrl) {
     const colorFilter = `($2::int = 0
       OR ($2::int = 6 AND color_count >= 6)
       OR ($2::int BETWEEN 1 AND 5 AND color_count = $2))`;
-    const counts = await pool.query(`${base} SELECT count(*)::int AS total FROM base WHERE ${colorFilter}`,
-      [...params, colorBucket]);
+    const wpFilter = `($3::text = ''
+      OR ($3::text = 'publish' AND coalesce(wp_status, 'none') = 'publish')
+      OR ($3::text = 'unpublished' AND coalesce(wp_status, 'none') <> 'publish'))`;
+    const counts = await pool.query(
+      `${base} SELECT count(*)::int AS total FROM base WHERE ${colorFilter} AND ${wpFilter}`,
+      [...params, colorBucket, wpValues]);
     const all = await pool.query(`${base} SELECT count(*)::int AS total FROM base`, params);
     const distribution = await pool.query(
       `${base} SELECT LEAST(color_count, 6) AS bucket, count(*)::int AS products
-        FROM base GROUP BY 1 ORDER BY 1`, params);
+        FROM base WHERE ${wpFilter} GROUP BY 1 ORDER BY 1`, [...params, wpValues]);
+    const wpRows = await pool.query(
+      `${base} SELECT CASE WHEN coalesce(wp_status,'none') = 'publish' THEN 'publish' ELSE 'unpublished' END AS bucket,
+        count(*)::int AS products FROM base WHERE ${colorFilter} GROUP BY 1`, [...params, colorBucket]);
     const result = await pool.query(`${base}
       SELECT base.*,
         (SELECT count(*) FROM product_detail_skus skus WHERE skus.product_detail_id=base.id)::int AS sku_rows,
@@ -1104,15 +1114,17 @@ export function createDatabase(databaseUrl) {
         FROM product_detail_images images
         WHERE images.product_detail_id=base.id AND images.image_type IN ('main','gallery','sku')
       ) media ON true
-      WHERE ${colorFilter}
+      WHERE ${colorFilter} AND ${wpFilter}
       ORDER BY base.id DESC
-      LIMIT $3 OFFSET $4`, [...params, colorBucket, safeLimit, safeOffset]);
+      LIMIT $4 OFFSET $5`, [...params, colorBucket, wpValues, safeLimit, safeOffset]);
     const colorCounts = {};
     for (const row of distribution.rows) colorCounts[String(row.bucket)] = Number(row.products);
+    const wpCounts = {};
+    for (const row of wpRows.rows) wpCounts[String(row.bucket)] = Number(row.products);
     return {
       total: all.rows[0]?.total ?? 0,
       filteredTotal: counts.rows[0]?.total ?? 0,
-      colorCounts, limit: safeLimit, offset: safeOffset, items: result.rows,
+      colorCounts, wpCounts, limit: safeLimit, offset: safeOffset, items: result.rows,
     };
   }
 
@@ -1176,12 +1188,38 @@ export function createDatabase(databaseUrl) {
   }
 
   async function saveProductBundleStatus(productDetailId, detection) {
+    // A manual operator decision always wins over the automatic detector, so a
+    // re-capture or a rule re-run cannot silently revert it.
     const result = await pool.query(`UPDATE product_details
-      SET bundle_status=$2, bundle_analysis=$3, bundle_checked_at=now()
-      WHERE id=$1 RETURNING id, bundle_status, bundle_checked_at`,
+      SET bundle_status=COALESCE(bundle_manual_status, $2), bundle_analysis=$3, bundle_checked_at=now()
+      WHERE id=$1 RETURNING id, bundle_status, bundle_manual_status, bundle_checked_at`,
       [productDetailId, detection?.status ?? null,
         detection ? JSON.stringify(detection.analysis ?? {}) : null]);
     return result.rows[0] ?? null;
+  }
+
+  /** Set or clear the manual bundle verdict ('bundle' / 'clear' / null = auto). */
+  async function setProductBundleManual(productDetailId, status) {
+    if (status === null) {
+      const result = await pool.query(`UPDATE product_details
+        SET bundle_manual_status=NULL, bundle_manual_at=NULL
+        WHERE id=$1 RETURNING id, bundle_status, bundle_manual_status`, [productDetailId]);
+      return result.rows[0] ?? null;
+    }
+    const result = await pool.query(`UPDATE product_details
+      SET bundle_manual_status=$2, bundle_manual_at=now(), bundle_status=$2
+      WHERE id=$1 RETURNING id, bundle_status, bundle_manual_status, bundle_manual_at`, [productDetailId, status]);
+    return result.rows[0] ?? null;
+  }
+
+  /** Every product with the stored data needed for a full bundle re-evaluation. */
+  async function listBundleRecheckRows({ limit = 400, offset = 0 } = {}) {
+    const result = await pool.query(`SELECT id, offer_id, title, bundle_status, bundle_manual_status,
+      raw_data->'skuOptions' AS sku_options,
+      raw_data->'skuDimensions' AS sku_dimensions,
+      raw_data->'skuMatrix' AS sku_matrix
+      FROM product_details ORDER BY id LIMIT $1 OFFSET $2`, [limit, offset]);
+    return result.rows;
   }
 
   async function listWeeklyMarketingProducts({ from, to, limit = 24 } = {}) {
@@ -2464,6 +2502,7 @@ export function createDatabase(databaseUrl) {
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     updateProductLinkFoxData, deleteProductDetail,
     listBundleInbox, listProductCatalog, listDetailsMissingBundleAudit, saveProductBundleStatus,
+    setProductBundleManual, listBundleRecheckRows,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     listBundleAuditRows, summarizeWordPressPublications, listWordPressPublications,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
