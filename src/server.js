@@ -24,8 +24,8 @@ import { computeImageHashes } from './image-hash.js';
 import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
-import { detectBundle } from './bundle-detector.js';
-import { classifyBundleSemantically, bundleClassifierConfig } from './bundle-classifier.js';
+import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
+import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
   linkfoxExtrasForMerge } from './linkfox-1688.js';
@@ -70,6 +70,9 @@ const config = {
   portalAdminSecret: process.env.PORTAL_ADMIN_SECRET || '',
   linkfoxApiKey: process.env.LINKFOX_API_KEY?.trim() || process.env.LINKFOX_AGENT_API_KEY?.trim() || '',
   linkfoxGateway: process.env.LINKFOX_TOOL_GATEWAY?.trim() || 'https://tool-gateway.linkfox.com',
+  feishuAppId: process.env.FEISHU_APP_ID?.trim() || '',
+  feishuAppSecret: process.env.FEISHU_APP_SECRET?.trim() || '',
+  feishuChatId: process.env.FEISHU_CHAT_ID?.trim() || '',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -158,7 +161,7 @@ function requireCollectorMode(_request, reply, done) {
 }
 
 // Dashboard pages authenticate with HTTP Basic; maintenance scripts use the
-// collector Bearer key. Both are accepted for the manual split-plan endpoints.
+// collector Bearer key. Both are accepted for the products page API.
 function requireDashboardOrApiKey(request, reply, done) {
   const header = request.headers.authorization || '';
   if (/^Bearer\s+/i.test(header)) return requireApiKey(request, reply, done);
@@ -501,7 +504,6 @@ app.get('/', async () => ({
   dashboard: '/dashboard',
   review: '/review',
   bundleCheck: '/bundle-check',
-  bundleInbox: '/bundle-inbox',
   shops: '/shops',
   browserMode: getBrowserModeStatus(),
   session: collector.getSessionStatus(),
@@ -714,35 +716,17 @@ app.post('/api/portal/publish-batch', { preHandler: requireDashboardOrApiKey }, 
   };
 });
 
-// Re-run bundle detection for products currently flagged as bundles (e.g.
-// after a detector rule change). Only clears flags; never adds new ones.
-app.post('/api/bundle-audit/recheck', { preHandler: requireApiKey }, async (request) => {
-  const rows = await db.listBundleAuditRows();
-  let flipped = 0; let unchanged = 0; const details = [];
-  for (const row of rows) {
-    const detection = detectBundle({
-      skuOptions: row.sku_options ?? [],
-      skuDimensions: row.sku_dimensions ?? [],
-      skuMatrix: row.sku_matrix ?? null,
-    });
-    if (detection.status !== 'bundle') {
-      await db.saveProductBundleStatus(row.id, detection);
-      flipped += 1;
-      if (details.length < 50) details.push({ id: row.id, offerId: row.offer_id, title: row.title, status: detection.status });
-    } else {
-      unchanged += 1;
-    }
-  }
-  return { scanned: rows.length, flipped, unchanged, details };
-});
+// Re-run bundle classification for products currently flagged as bundles (e.g.
+// after a classifier policy change). Only clears flags; never adds new ones.
+// The keyword rules were removed; the model verdict is authoritative.
 
 // Full bundle re-evaluation over every capture, judged semantically by the
-// model from the variant option texts (mode=rules keeps the rule detector).
-// Runs as a background job because the model calls take minutes; manual
-// overrides are preserved untouched. Poll with GET /api/bundle-audit/jobs/{id}.
+// model from the variant option texts. Runs as a background job because the
+// model calls take minutes; manual overrides are preserved untouched.
+// Poll with GET /api/bundle-audit/jobs/{id}.
 const bundleRecheckJobs = new Map();
 
-async function runBundleRecheckJob(job, { mode, limit, concurrency = 6, ids = null }) {
+async function runBundleRecheckJob(job, { limit, concurrency = 6, ids = null }) {
   const batchSize = 200;
   let offset = 0;
   let remaining = limit;
@@ -764,31 +748,24 @@ async function runBundleRecheckJob(job, { mode, limit, concurrency = 6, ids = nu
           skuDimensions: row.sku_dimensions ?? [],
           skuMatrix: row.sku_matrix ?? null,
         };
-        let detection;
-        if (mode === 'llm') {
-          for (let attempt = 1; attempt <= 2; attempt += 1) {
-            try {
-              detection = await classifyBundleSemantically({
-                data, title: row.title, config: bundleClassifierConfig(config),
-              });
-              break;
-            } catch (error) {
-              if (attempt < 2) {
-                await new Promise((resolve) => setTimeout(resolve, 2500));
-                continue;
-              }
-              job.modelErrors += 1;
-              if (job.fallbackIds.length < 500) job.fallbackIds.push(row.id);
-              detection = detectBundle(data);
-              detection.analysis = {
-                ...(detection.analysis ?? {}), detector: 'rules_fallback',
-                error: String(error.message || error).slice(0, 200),
-              };
+        let detection = null;
+        for (let attempt = 1; attempt <= 2 && !detection; attempt += 1) {
+          try {
+            detection = await classifyBundleSemantically({
+              data, title: row.title, config: bundleClassifierConfig(config),
+            });
+          } catch (error) {
+            if (attempt < 2) {
+              await new Promise((resolve) => setTimeout(resolve, 2500));
+              continue;
             }
+            // No previous verdict is overwritten on failure: keep whatever the
+            // row already had and report the row for a later retry.
+            job.modelErrors += 1;
+            if (job.fallbackIds.length < 500) job.fallbackIds.push(row.id);
           }
-        } else {
-          detection = detectBundle(data);
         }
+        if (!detection) continue;
         if (detection.status === 'bundle') job.bundles += 1; else job.clear += 1;
         const previous = row.bundle_status ?? 'clear';
         if (previous !== detection.status) {
@@ -818,7 +795,7 @@ app.post('/api/bundle-audit/recheck-all', { preHandler: requireApiKey }, async (
   if ([...bundleRecheckJobs.values()].some((entry) => entry.status === 'running')) {
     return reply.code(409).send({ error: 'recheck_already_running' });
   }
-  const mode = request.body?.mode === 'rules' ? 'rules' : 'llm';
+  const mode = 'llm';
   const limit = Number(request.body?.limit) > 0 ? Math.min(Number(request.body.limit), 5000) : 5000;
   const ids = Array.isArray(request.body?.ids)
     ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 500)
@@ -831,7 +808,7 @@ app.post('/api/bundle-audit/recheck-all', { preHandler: requireApiKey }, async (
   };
   bundleRecheckJobs.set(id, job);
   trimTerminalJobs(bundleRecheckJobs);
-  runBundleRecheckJob(job, { mode, limit, ids }).catch((error) => {
+  runBundleRecheckJob(job, { limit, ids }).catch((error) => {
     job.status = 'failed';
     job.error = String(error.message || error);
     app.log.error({ err: error, jobId: id }, 'bundle recheck job failed');
@@ -842,6 +819,23 @@ app.post('/api/bundle-audit/recheck-all', { preHandler: requireApiKey }, async (
 app.get('/api/bundle-audit/jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = bundleRecheckJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+// Send one test message to the configured Feishu group (bundle notifications
+// use the same channel and credentials).
+app.post('/api/feishu/test', { preHandler: requireApiKey }, async (request, reply) => {
+  if (!feishuConfigured(config)) {
+    return reply.code(503).send({ error: 'feishu_not_configured' });
+  }
+  try {
+    const result = await sendFeishuText({
+      text: `✅ 采集器飞书通知连通性测试（bundle 判定通知将发送到此群）\n${new Date().toISOString()}`,
+      config,
+    });
+    return { ok: true, messageId: result.messageId };
+  } catch (error) {
+    return reply.code(502).send({ error: 'feishu_send_failed', message: String(error?.message || error).slice(0, 300) });
+  }
 });
 
 // Manual bundle verdict for one capture: {status: 'bundle' | 'clear' | 'auto'}.
@@ -857,7 +851,7 @@ app.post('/api/product-details/:id/bundle-status', { preHandler: requireDashboar
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   if (requested === 'auto') {
-    await db.setProductBundleManual(id, null);
+    // Classify first: a model failure must not clear the manual override.
     let detection;
     try {
       detection = await classifyBundleSemantically({
@@ -869,12 +863,12 @@ app.post('/api/product-details/:id/bundle-status', { preHandler: requireDashboar
         title: detail.title, config: bundleClassifierConfig(config),
       });
     } catch (error) {
-      detection = detectBundle({
-        skuOptions: detail.raw_data?.skuOptions ?? [],
-        skuDimensions: detail.raw_data?.skuDimensions ?? [],
-        skuMatrix: detail.raw_data?.skuMatrix ?? null,
+      return reply.code(502).send({
+        error: 'bundle_classification_failed',
+        message: String(error?.message || error).slice(0, 300),
       });
     }
+    await db.setProductBundleManual(id, null);
     const saved = await db.saveProductBundleStatus(id, detection);
     return {
       productDetailId: id, status: saved?.bundle_status ?? detection.status,
@@ -914,12 +908,6 @@ app.get('/review', { preHandler: requireDashboardAuth }, async (_request, reply)
 // Same HTTP Basic gate as /review.
 app.get('/bundle-check', { preHandler: requireDashboardAuth }, async (_request, reply) => {
   const html = await fs.readFile(new URL('../public/bundle-check.html', import.meta.url), 'utf8');
-  return reply.type('text/html; charset=utf-8').send(html);
-});
-
-// Bundle inbox: captures flagged as multi-product bundles during collection.
-app.get('/bundle-inbox', { preHandler: requireDashboardAuth }, async (_request, reply) => {
-  const html = await fs.readFile(new URL('../public/bundle-inbox.html', import.meta.url), 'utf8');
   return reply.type('text/html; charset=utf-8').send(html);
 });
 
@@ -1202,23 +1190,24 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
         rows: capture.data.skuRows, dimensions, skuMatrix, priceMin, priceMax,
         skuOptions: capture.data.skuOptions, source: 'linkfox',
       });
-      let detection;
+      let bundleOutcome = null;
       try {
-        detection = await classifyBundleSemantically({
+        const detection = await classifyBundleSemantically({
           data: {
             skuOptions: capture.data.skuOptions, skuDimensions: dimensions, skuMatrix,
           },
           title: existing.title, config: bundleClassifierConfig(config),
         });
+        await db.saveProductBundleStatus(existing.id, detection);
+        bundleOutcome = { status: detection.status, reason: detection.analysis?.reason ?? null };
       } catch (error) {
-        detection = detectBundle({
-          skuOptions: capture.data.skuOptions, skuDimensions: dimensions, skuMatrix,
-        });
+        // Keep the previous verdict when the model is unavailable.
+        bundleOutcome = { status: null, error: String(error?.message || error).slice(0, 200) };
       }
-      await db.saveProductBundleStatus(existing.id, detection);
       skus = {
         rows: capture.data.skuRows.length, dimensions: dimensions.map((dimension) => dimension.name),
-        priceMin, priceMax, bundle: detection.status, pricesPreserved,
+        priceMin, priceMax, bundle: bundleOutcome.status, bundleError: bundleOutcome.error ?? undefined,
+        pricesPreserved,
       };
     }
     return {
@@ -1285,8 +1274,8 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
       data, title: data.title, config: bundleClassifierConfig(config),
     });
   } catch (error) {
-    bundleDetection = detectBundle(data);
-    bundleDetection.analysis = { ...(bundleDetection.analysis ?? {}), detector: 'rules_fallback' };
+    bundleDetection = failedBundleDetection(error);
+    request.log.warn({ err: error, offerId }, 'semantic bundle classification failed for a new LinkFox capture');
   }
   // The synthetic query keeps a "new" capture independent from the browser
   // capture of the same offer; a primary capture owns the plain offer URL.
@@ -1318,6 +1307,22 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
     await scheduleProductRagSync(saved.productDetailId, { trigger: 'linkfox_capture' });
   } catch (error) {
     request.log.error({ err: error }, 'failed to schedule the LinkFox capture RAG sync');
+  }
+  if (bundleDetection.status === 'bundle' && feishuConfigured(config)) {
+    try {
+      await notifyBundleCapture({
+        detailId: saved.productDetailId,
+        title: data.title,
+        options: (data.skuOptions ?? [])
+          .filter((option) => /(颜色|color|colour)/i.test(String(option?.dimensionName ?? '')))
+          .map((option) => option?.text)
+          .filter(Boolean),
+        reason: bundleDetection.analysis?.reason ?? null,
+        config,
+      });
+    } catch (error) {
+      request.log.error({ err: error }, 'failed to send the bundle notification to Feishu');
+    }
   }
   return {
     mode: primaryCreate ? 'primary' : 'new',
@@ -1753,7 +1758,7 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
   if (detail.bundle_status === 'bundle' && request.body?.allowBundle !== true) {
     return reply.code(422).send({
       error: 'bundle_review_required',
-      message: 'This capture mixes multiple products in one option dimension. Split it on /bundle-inbox first, or pass allowBundle=true to override.',
+      message: 'This capture mixes multiple products in one option dimension. Pass allowBundle=true to publish it as a single product.',
       bundle: detail.bundle_analysis?.rules ?? null,
     });
   }
@@ -2198,103 +2203,8 @@ app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, as
   return db.listProductAudits('sku', detail.id, request.query?.limit);
 });
 
-// Manual split plans for /bundle-check: variant swatches grouped per output
-// product plus gallery image assignment. Saved per product detail; the page
-// uses the dashboard Basic auth, scripts may use the Bearer key.
-function cleanSplitSkuMatrix(value) {
-  if (!value || typeof value !== 'object') return null;
-  const dimensions = Array.isArray(value.dimensions) ? value.dimensions.slice(0, 4).map((dim) => ({
-    name: String(dim?.name ?? '').trim().slice(0, 40),
-    values: Array.isArray(dim?.values)
-      ? dim.values.slice(0, 100).map((item) => String(item).slice(0, 120)).filter(Boolean) : [],
-  })).filter((dim) => dim.name && dim.values.length) : [];
-  const rows = Array.isArray(value.rows) ? value.rows.slice(0, 500).map((row) => {
-    const options = {};
-    for (const [key, option] of Object.entries(row?.options ?? {})) {
-      if (key) options[String(key).slice(0, 40)] = String(option).slice(0, 120);
-    }
-    return {
-      options,
-      price: Number.isFinite(Number(row?.price)) && row?.price !== null ? Number(row.price) : null,
-      stock: Number.isFinite(Number(row?.stock)) && row?.stock !== null ? Number(row.stock) : null,
-      skuId: row?.skuId != null ? String(row.skuId).slice(0, 32) : null,
-    };
-  }) : [];
-  if (!dimensions.length && !rows.length) return null;
-  return {
-    fetchedAt: typeof value.fetchedAt === 'string' ? value.fetchedAt.slice(0, 40) : new Date().toISOString(),
-    dimensions, rows,
-    priceScale: typeof value.priceScale === 'string' ? value.priceScale.slice(0, 40) : '',
-  };
-}
-
-function validateSplitPlan(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return { ok: false, message: 'plan must be an object' };
-  }
-  const rawGroups = Array.isArray(value.groups) ? value.groups : [];
-  if (!rawGroups.length) return { ok: false, message: 'at least one group is required' };
-  if (rawGroups.length > 8) return { ok: false, message: 'too many groups (max 8)' };
-  const groups = rawGroups.map((group, index) => ({
-    id: typeof group?.id === 'string' && /^[A-Za-z0-9_-]{1,16}$/.test(group.id) ? group.id : `g${index + 1}`,
-    name: String(group?.name ?? '').trim().slice(0, 60),
-  }));
-  const groupIds = new Set(groups.map((group) => group.id));
-  const options = {};
-  for (const [key, groupId] of Object.entries(value.options ?? {})) {
-    if (key && typeof groupId === 'string' && groupIds.has(groupId)) {
-      options[String(key).slice(0, 200)] = groupId;
-    }
-  }
-  const images = {};
-  for (const [key, assigned] of Object.entries(value.images ?? {})) {
-    if (!key || !Array.isArray(assigned)) continue;
-    const list = [...new Set(assigned.filter((id) => typeof id === 'string' && groupIds.has(id)))];
-    if (list.length) images[String(key).slice(0, 40)] = list;
-  }
-  const plan = {
-    version: 1,
-    savedAt: new Date().toISOString(),
-    groups,
-    options,
-    images,
-    skuMatrix: cleanSplitSkuMatrix(value.skuMatrix),
-    note: typeof value.note === 'string' ? value.note.trim().slice(0, 500) : '',
-  };
-  if (JSON.stringify(plan).length > 262144) return { ok: false, message: 'plan too large' };
-  return { ok: true, plan };
-}
-
-app.get('/api/split-plans', { preHandler: requireDashboardOrApiKey }, async () => db.listProductSplitPlans());
-
-app.get('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
-  const id = Number(request.params.id);
-  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
-  const record = await db.getProductSplitPlan(id);
-  return { productDetailId: id, plan: record?.plan ?? null, updatedAt: record?.updated_at ?? null };
-});
-
-app.put('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
-  const id = Number(request.params.id);
-  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
-  const detail = await db.getProductDetail(id).catch(() => null);
-  if (!detail) return reply.code(404).send({ error: 'not_found' });
-  const validation = validateSplitPlan(request.body?.plan);
-  if (!validation.ok) return reply.code(400).send({ error: 'invalid_split_plan', message: validation.message });
-  const saved = await db.saveProductSplitPlan(id, validation.plan);
-  return { ok: true, productDetailId: id, updatedAt: saved.updated_at, plan: saved.plan };
-});
-
-app.delete('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
-  const id = Number(request.params.id);
-  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
-  const result = await db.deleteProductSplitPlan(id);
-  return { ok: true, productDetailId: id, deleted: result.deleted };
-});
-
 // Read the live offer's embedded SKU model (option x size with price/stock)
-// straight from the 1688 page so the split editor does not need manual size
-// grouping. Read-only; runs in the shared collector browser.
+// straight from the 1688 page. Read-only; runs in the shared collector browser.
 app.post('/api/product-details/:id/dom-sku-matrix', { preHandler: [requireDashboardOrApiKey, requireCollectorMode] }, async (request, reply) => {
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
@@ -2350,21 +2260,21 @@ app.post('/api/product-details/:id/repair-skus-from-matrix', { preHandler: [requ
     fetchedAt: new Date().toISOString(),
   };
   await db.updateProductSkusFromMatrix(id, { rows, dimensions, skuMatrix, priceMin, priceMax });
-  let detection;
+  let bundleOutcome = null;
   try {
-    detection = await classifyBundleSemantically({
+    const detection = await classifyBundleSemantically({
       data: { skuOptions: detail.raw_data?.skuOptions ?? [], skuDimensions: dimensions, skuMatrix },
       title: detail.title, config: bundleClassifierConfig(config),
     });
+    await db.saveProductBundleStatus(id, detection);
+    bundleOutcome = { status: detection.status, reason: detection.analysis?.reason ?? null };
   } catch (error) {
-    detection = detectBundle({
-      skuOptions: detail.raw_data?.skuOptions ?? [], skuDimensions: dimensions, skuMatrix,
-    });
+    // Keep the previous verdict when the model is unavailable.
+    bundleOutcome = { status: null, error: String(error?.message || error).slice(0, 200) };
   }
-  await db.saveProductBundleStatus(id, detection);
   return {
     productDetailId: id, rows: rows.length, dimensions: dimensions.map((dimension) => dimension.name),
-    priceMin, priceMax, bundle: detection.status,
+    priceMin, priceMax, bundle: bundleOutcome.status, bundleError: bundleOutcome.error ?? undefined,
   };
 });
 
@@ -2391,8 +2301,7 @@ app.get('/api/portal/repair-candidates', { preHandler: requireDashboardOrApiKey 
   return { count: items.length, needsRepair: items.filter((item) => item.needsRepair).length, items };
 });
 
-// Bundle inbox rows: stored options, gallery/sku images, captured SKU matrix and
-// any saved split plan, ready for the manual split editor.
+// Public path for a stored product image file (used by the products page).
 function imagePublicPath(storagePath) {
   if (!storagePath) return null;
   const normalized = String(storagePath).replace(/\\/g, '/');
@@ -2402,72 +2311,8 @@ function imagePublicPath(storagePath) {
   return '/api/product-images/' + encodeURIComponent(folder) + '/' + encodeURIComponent(file);
 }
 
-function toBundleInboxItem(row) {
-  const images = Array.isArray(row.images) ? row.images : [];
-  const bySource = new Map();
-  for (const image of images) {
-    if (image?.source) bySource.set(String(image.source).trim(), image);
-  }
-  const skuOptions = Array.isArray(row.sku_options) ? row.sku_options : [];
-  const skuDimensions = Array.isArray(row.sku_dimensions) ? row.sku_dimensions : [];
-  const dimOrder = [];
-  const dimMap = new Map();
-  for (const option of skuOptions) {
-    const dim = String(option?.dimensionName || '未命名维度');
-    if (!dimMap.has(dim)) { dimMap.set(dim, []); dimOrder.push(dim); }
-    const source = option?.image ? String(option.image).trim() : null;
-    const hit = source ? bySource.get(source) : null;
-    const base = hit ? imagePublicPath(hit.path) : null;
-    dimMap.get(dim).push({ text: String(option?.text || ''), local: base ? base + '?w=64' : null, source });
-  }
-  for (const dimension of skuDimensions) {
-    const name = String(dimension?.name || '');
-    if (!name || dimMap.has(name)) continue;
-    const values = Array.isArray(dimension?.values) ? dimension.values.filter((value) => value !== null && value !== '') : [];
-    if (!values.length) continue;
-    dimOrder.push(name);
-    dimMap.set(name, values.map((value) => ({ text: String(value), local: null, source: null })));
-  }
-  const gallery = [
-    ...images.filter((image) => image?.type === 'main'),
-    ...images.filter((image) => image?.type === 'gallery'),
-  ].map((image) => ({
-    id: String(image.id),
-    type: image.type,
-    thumb: imagePublicPath(image.path) ? imagePublicPath(image.path) + '?w=160' : (image.source || null),
-  }));
-  return {
-    id: row.id,
-    offerId: row.offer_id,
-    title: row.title,
-    date: row.last_crawled_at ? String(row.last_crawled_at).slice(0, 10) : '',
-    status: row.bundle_status,
-    analysis: row.bundle_analysis ?? null,
-    dims: dimOrder.map((name) => ({ name, options: dimMap.get(name) })),
-    gallery,
-    skuMatrix: row.sku_matrix ?? null,
-    plan: row.split_plan ?? null,
-    planUpdatedAt: row.plan_updated_at ?? null,
-  };
-}
-
-app.get('/api/bundle-inbox', { preHandler: requireDashboardOrApiKey }, async (request) => {
-  const result = await db.listBundleInbox({
-    limit: request.query?.limit ?? 100,
-    offset: request.query?.offset ?? 0,
-    filter: ['all', 'saved', 'unsaved'].includes(request.query?.filter) ? request.query.filter : 'all',
-    search: request.query?.search ?? '',
-    hideSmall: request.query?.hideSmall === '1' || request.query?.hideSmall === 'true',
-  });
-  return {
-    count: result.filteredTotal, total: result.total, saved: result.saved,
-    limit: result.limit, offset: result.offset,
-    items: result.items.map(toBundleInboxItem),
-  };
-});
-
-// All captured products (read-only variants view). Same image mapping as the
-// bundle inbox but for every product, with price range and publication state.
+// All captured products (read-only variants view): option names with swatch
+// images, price range, publication state, source shop and 1688 listing status.
 function toProductCatalogItem(row) {
   const images = Array.isArray(row.images) ? row.images : [];
   const bySource = new Map();
@@ -2558,7 +2403,7 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
 });
 
 // Recompute bundle status for captures that predate the flag (semantic
-// classification with rule fallback; the split page can refresh live sizes).
+// classification only; failures keep the previous verdict).
 app.post('/api/bundle-audit/backfill', { preHandler: requireApiKey }, async (request) => {
   const limit = Number(request.body?.limit) > 0 ? Math.min(Number(request.body.limit), 2000) : 500;
   const rows = await db.listDetailsMissingBundleAudit(limit);
@@ -2570,23 +2415,27 @@ app.post('/api/bundle-audit/backfill', { preHandler: requireApiKey }, async (req
       if (index >= rows.length) return;
       const row = rows[index];
       try {
-        let detection;
-        try {
-          detection = await classifyBundleSemantically({
-            data: {
-              skuOptions: row.sku_options ?? [],
-              skuDimensions: row.sku_dimensions ?? [],
-              skuMatrix: row.sku_matrix ?? null,
-            },
-            title: row.title, config: bundleClassifierConfig(config),
-          });
-        } catch (error) {
-          detection = detectBundle({
-            skuOptions: row.sku_options ?? [],
-            skuDimensions: row.sku_dimensions ?? [],
-            skuMatrix: row.sku_matrix ?? null,
-          });
+        let detection = null;
+        for (let attempt = 1; attempt <= 2 && !detection; attempt += 1) {
+          try {
+            detection = await classifyBundleSemantically({
+              data: {
+                skuOptions: row.sku_options ?? [],
+                skuDimensions: row.sku_dimensions ?? [],
+                skuMatrix: row.sku_matrix ?? null,
+              },
+              title: row.title, config: bundleClassifierConfig(config),
+            });
+          } catch (error) {
+            if (attempt < 2) {
+              await new Promise((resolve) => setTimeout(resolve, 2500));
+              continue;
+            }
+            failed += 1;
+            request.log.warn({ err: error, productDetailId: row.id }, 'bundle classification failed; previous verdict kept');
+          }
         }
+        if (!detection) continue;
         await db.saveProductBundleStatus(row.id, detection);
         if (detection.status === 'bundle') bundles += 1; else clear += 1;
       } catch (error) {
@@ -2919,9 +2768,8 @@ async function workerLoop(queue, workerIndex = 0) {
               config: bundleClassifierConfig(config),
             });
           } catch (error) {
-            app.log.warn({ err: error }, 'semantic bundle classification failed; falling back to rules');
-            bundleDetection = detectBundle(result.extractedData);
-            bundleDetection.analysis = { ...(bundleDetection.analysis ?? {}), detector: 'rules_fallback' };
+            app.log.warn({ err: error }, 'semantic bundle classification failed for a browser capture');
+            bundleDetection = failedBundleDetection(error);
           }
           const saved = await db.saveProductDetail(
             result.extractedData, job.url, result.extractedData.localImages ?? [], duplicateAnalysis,
@@ -2954,6 +2802,22 @@ async function workerLoop(queue, workerIndex = 0) {
           } catch (error) {
             app.log.error({ err: error, productDetailId: saved.productDetailId },
               'failed to schedule automatic products RAG sync');
+          }
+          if (bundleDetection.status === 'bundle' && feishuConfigured(config)) {
+            try {
+              await notifyBundleCapture({
+                detailId: saved.productDetailId,
+                title: result.extractedData?.title,
+                options: (result.extractedData?.skuOptions ?? [])
+                  .filter((option) => /(颜色|color|colour)/i.test(String(option?.dimensionName ?? '')))
+                  .map((option) => option?.text)
+                  .filter(Boolean),
+                reason: bundleDetection.analysis?.reason ?? null,
+                config,
+              });
+            } catch (error) {
+              app.log.error({ err: error }, 'failed to send the bundle notification to Feishu');
+            }
           }
         }
       }

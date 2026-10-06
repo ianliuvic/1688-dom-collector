@@ -1194,53 +1194,6 @@ export function createDatabase(databaseUrl) {
     };
   }
 
-  async function listBundleInbox({ limit = 100, offset = 0, filter = 'all', search = '', hideSmall = false } = {}) {
-    const safeLimit = Math.max(Number(limit) || 100, 1);
-    const safeOffset = Math.max(Number(offset) || 0, 0);
-    const searchTerm = String(search || '').trim().slice(0, 120);
-    const params = [searchTerm ? `%${searchTerm}%` : null, Boolean(hideSmall)];
-    const baseWhere = `details.bundle_status='bundle'
-      AND ($1::text IS NULL OR details.title ILIKE $1)
-      AND (NOT $2::boolean OR (
-        SELECT count(*) FROM jsonb_array_elements(COALESCE(details.raw_data->'skuDimensions','[]'::jsonb)) AS dim
-        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(dim->'values','[]'::jsonb)) AS dim_value
-        WHERE dim->>'name' ~ '(尺码|尺寸|码数|size)'
-          AND dim_value::text !~ '(均码|one\\s*size|free\\s*size)'
-      ) >= 3)`;
-    const counts = await pool.query(`SELECT count(*)::int AS total,
-      count(*) FILTER (WHERE plans.plan IS NOT NULL)::int AS saved
-      FROM product_details details
-      LEFT JOIN product_split_plans plans ON plans.product_detail_id=details.id
-      WHERE ${baseWhere}`, params);
-    const total = counts.rows[0]?.total ?? 0;
-    const saved = counts.rows[0]?.saved ?? 0;
-    const filterSql = filter === 'saved' ? 'AND plans.plan IS NOT NULL'
-      : filter === 'unsaved' ? 'AND plans.plan IS NULL' : '';
-    const result = await pool.query(`SELECT details.id, details.offer_id, details.title,
-      details.last_crawled_at, details.bundle_status, details.bundle_analysis,
-      details.raw_data->'skuOptions' AS sku_options,
-      details.raw_data->'skuDimensions' AS sku_dimensions,
-      details.raw_data->'skuMatrix' AS sku_matrix,
-      (
-        SELECT jsonb_agg(jsonb_build_object('id', images.id, 'type', images.image_type,
-          'source', images.source_url, 'path', images.storage_path)
-          ORDER BY (images.image_type='main') DESC, images.sort_order)
-        FROM product_detail_images images
-        WHERE images.product_detail_id=details.id AND images.image_type IN ('main','gallery')
-      ) AS images,
-      plans.plan AS split_plan, plans.updated_at AS plan_updated_at
-      FROM product_details details
-      LEFT JOIN product_split_plans plans ON plans.product_detail_id=details.id
-      WHERE ${baseWhere} ${filterSql}
-      ORDER BY details.last_crawled_at DESC
-      LIMIT $3 OFFSET $4`, [...params, safeLimit, safeOffset]);
-    return {
-      items: result.rows, total, saved,
-      filteredTotal: filter === 'saved' ? saved : filter === 'unsaved' ? Math.max(total - saved, 0) : total,
-      limit: safeLimit, offset: safeOffset,
-    };
-  }
-
   async function listDetailsMissingBundleAudit(limit = 500) {
     const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 2000);
     const result = await pool.query(`SELECT id, title,
@@ -2392,33 +2345,6 @@ export function createDatabase(databaseUrl) {
     return saved.rows[0];
   }
 
-  async function listProductSplitPlans() {
-    const result = await pool.query(`SELECT product_detail_id,
-      updated_at, coalesce(jsonb_array_length(plan->'groups'), 0) AS group_count
-      FROM product_split_plans ORDER BY updated_at DESC`);
-    return result.rows;
-  }
-
-  async function getProductSplitPlan(productDetailId) {
-    const result = await pool.query(
-      'SELECT * FROM product_split_plans WHERE product_detail_id=$1', [productDetailId]);
-    return result.rows[0] ?? null;
-  }
-
-  async function saveProductSplitPlan(productDetailId, plan) {
-    const result = await pool.query(`INSERT INTO product_split_plans (product_detail_id, plan, updated_at)
-      VALUES ($1,$2,now())
-      ON CONFLICT (product_detail_id) DO UPDATE SET plan=EXCLUDED.plan, updated_at=now()
-      RETURNING *`, [productDetailId, JSON.stringify(plan)]);
-    return result.rows[0];
-  }
-
-  async function deleteProductSplitPlan(productDetailId) {
-    const result = await pool.query(
-      'DELETE FROM product_split_plans WHERE product_detail_id=$1', [productDetailId]);
-    return { deleted: result.rowCount > 0 };
-  }
-
   async function listPortalPublishCandidates({ shopId, since, until, limit = 500 } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 500);
     const result = await pool.query(`SELECT details.id AS product_detail_id, details.offer_id,
@@ -2500,15 +2426,6 @@ export function createDatabase(databaseUrl) {
     }
   }
 
-  async function listBundleAuditRows() {
-    const result = await pool.query(`SELECT id, offer_id, title,
-      raw_data->'skuOptions' AS sku_options,
-      raw_data->'skuDimensions' AS sku_dimensions,
-      raw_data->'skuMatrix' AS sku_matrix
-      FROM product_details WHERE bundle_status='bundle' ORDER BY id`);
-    return result.rows;
-  }
-
   async function summarizeWordPressPublications() {
     const statusRows = await pool.query(`SELECT coalesce(publications.wp_status,'none') AS status, count(*)::int AS products
       FROM product_details details
@@ -2567,10 +2484,10 @@ export function createDatabase(databaseUrl) {
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     updateProductLinkFoxData, deleteProductDetail,
-    listBundleInbox, listProductCatalog, listDetailsMissingBundleAudit, saveProductBundleStatus,
+    listProductCatalog, listDetailsMissingBundleAudit, saveProductBundleStatus,
     setProductBundleManual, listBundleRecheckRows,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
-    listBundleAuditRows, summarizeWordPressPublications, listWordPressPublications,
+    summarizeWordPressPublications, listWordPressPublications,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
     getPerceptualHashSummary, backfillPerceptualHashOffers,
@@ -2584,7 +2501,6 @@ export function createDatabase(databaseUrl) {
     saveWordPressPublication, createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
-    listProductSplitPlans, getProductSplitPlan, saveProductSplitPlan, deleteProductSplitPlan,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };

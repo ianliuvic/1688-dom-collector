@@ -58,6 +58,18 @@ export function bundleClassifierConfig(config = {}) {
   };
 }
 
+/** Classification failed and there is no previous verdict to preserve. */
+export function failedBundleDetection(error) {
+  return {
+    status: null,
+    analysis: {
+      detector: 'llm_error',
+      checkedAt: new Date().toISOString(),
+      error: String(error?.message || error).slice(0, 200),
+    },
+  };
+}
+
 /**
  * Ask the model whether one capture mixes different garments. Returns the same
  * shape as the rule detector: { status, analysis }.
