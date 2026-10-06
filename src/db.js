@@ -1046,6 +1046,44 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  /** Light catalog listing for the all-products browser page: one row per
+   * captured product with its option dimensions (and swatch sources), the
+   * main/gallery/sku image list, price range and WordPress publication state. */
+  async function listProductCatalog({ limit = 100, offset = 0, search = '' } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const searchTerm = String(search || '').trim().slice(0, 120);
+    const params = [searchTerm ? `%${searchTerm}%` : null];
+    const where = `($1::text IS NULL OR details.title ILIKE $1 OR details.offer_id ILIKE $1
+      OR publications.style_no ILIKE $1 OR publications.external_id ILIKE $1)`;
+    const counts = await pool.query(`SELECT count(*)::int AS total
+      FROM product_details details
+      LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
+      WHERE ${where}`, params);
+    const result = await pool.query(`SELECT details.id, details.offer_id, details.title,
+      details.price_min, details.price_max, details.currency, details.moq,
+      details.bundle_status, details.first_seen_at, details.last_crawled_at,
+      details.raw_data->'skuOptions' AS sku_options,
+      details.raw_data->'skuDimensions' AS sku_dimensions,
+      (SELECT count(*) FROM product_detail_skus skus WHERE skus.product_detail_id=details.id)::int AS sku_rows,
+      publications.style_no, publications.wp_status, publications.wp_url,
+      media.images
+      FROM product_details details
+      LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
+      LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object('id', images.id, 'type', images.image_type,
+          'sort', images.sort_order, 'path', images.storage_path, 'source', images.source_url)
+          ORDER BY CASE images.image_type WHEN 'main' THEN 0 WHEN 'gallery' THEN 1 ELSE 2 END,
+            images.sort_order, images.id) AS images
+        FROM product_detail_images images
+        WHERE images.product_detail_id=details.id AND images.image_type IN ('main','gallery','sku')
+      ) media ON true
+      WHERE ${where}
+      ORDER BY details.id DESC
+      LIMIT $2 OFFSET $3`, [...params, safeLimit, safeOffset]);
+    return { total: counts.rows[0]?.total ?? 0, limit: safeLimit, offset: safeOffset, items: result.rows };
+  }
+
   async function listBundleInbox({ limit = 100, offset = 0, filter = 'all', search = '', hideSmall = false } = {}) {
     const safeLimit = Math.max(Number(limit) || 100, 1);
     const safeOffset = Math.max(Number(offset) || 0, 0);
@@ -2393,7 +2431,7 @@ export function createDatabase(databaseUrl) {
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     updateProductLinkFoxData, deleteProductDetail,
-    listBundleInbox, listDetailsMissingBundleAudit, saveProductBundleStatus,
+    listBundleInbox, listProductCatalog, listDetailsMissingBundleAudit, saveProductBundleStatus,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     listBundleAuditRows, summarizeWordPressPublications, listWordPressPublications,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,

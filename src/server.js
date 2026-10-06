@@ -770,6 +770,13 @@ app.get('/bundle-inbox', { preHandler: requireDashboardAuth }, async (_request, 
   return reply.type('text/html; charset=utf-8').send(html);
 });
 
+// All captured products, read-only: names, variant options (with swatch
+// images), gallery thumbnails, price range and WordPress state.
+app.get('/products', { preHandler: requireDashboardAuth }, async (_request, reply) => {
+  const html = await fs.readFile(new URL('../public/products.html', import.meta.url), 'utf8');
+  return reply.type('text/html; charset=utf-8').send(html);
+});
+
 app.get('/api/review/queue', { preHandler: requireDashboardAuth }, async (request, reply) => {
   try {
     const days = request.query?.days;
@@ -2248,6 +2255,75 @@ app.get('/api/bundle-inbox', { preHandler: requireDashboardOrApiKey }, async (re
     count: result.filteredTotal, total: result.total, saved: result.saved,
     limit: result.limit, offset: result.offset,
     items: result.items.map(toBundleInboxItem),
+  };
+});
+
+// All captured products (read-only variants view). Same image mapping as the
+// bundle inbox but for every product, with price range and publication state.
+function toProductCatalogItem(row) {
+  const images = Array.isArray(row.images) ? row.images : [];
+  const bySource = new Map();
+  for (const image of images) {
+    if (image?.source) bySource.set(String(image.source).trim(), image);
+  }
+  const skuOptions = Array.isArray(row.sku_options) ? row.sku_options : [];
+  const skuDimensions = Array.isArray(row.sku_dimensions) ? row.sku_dimensions : [];
+  const dimOrder = [];
+  const dimMap = new Map();
+  for (const option of skuOptions) {
+    const dim = String(option?.dimensionName || '未命名维度');
+    if (!dimMap.has(dim)) { dimMap.set(dim, []); dimOrder.push(dim); }
+    const source = option?.image ? String(option.image).trim() : null;
+    const hit = source ? bySource.get(source) : null;
+    const base = hit ? imagePublicPath(hit.path) : null;
+    dimMap.get(dim).push({ text: String(option?.text || ''), local: base ? `${base}?w=64` : null, source });
+  }
+  for (const dimension of skuDimensions) {
+    const name = String(dimension?.name || '');
+    if (!name || dimMap.has(name)) continue;
+    const values = Array.isArray(dimension?.values)
+      ? dimension.values.filter((value) => value !== null && value !== '') : [];
+    if (!values.length) continue;
+    dimOrder.push(name);
+    dimMap.set(name, values.map((value) => ({ text: String(value), local: null, source: null })));
+  }
+  const gallery = images
+    .filter((image) => image?.type === 'main' || image?.type === 'gallery')
+    .map((image) => {
+      const base = imagePublicPath(image.path);
+      return { id: String(image.id), type: image.type,
+        thumb: base ? `${base}?w=160` : (image.source || null) };
+    });
+  return {
+    id: row.id,
+    offerId: row.offer_id,
+    title: row.title,
+    date: row.last_crawled_at ? String(row.last_crawled_at).slice(0, 10) : '',
+    status: row.bundle_status || '',
+    priceMin: row.price_min === null ? null : Number(row.price_min),
+    priceMax: row.price_max === null ? null : Number(row.price_max),
+    currency: row.currency || 'CNY',
+    moq: row.moq === null ? null : Number(row.moq),
+    skuRows: row.sku_rows ?? 0,
+    styleNo: row.style_no || null,
+    wpStatus: row.wp_status || null,
+    wpUrl: row.wp_url || null,
+    cover: gallery.length ? gallery[0].thumb : null,
+    gallery,
+    dims: dimOrder.map((name) => ({ name, options: dimMap.get(name) })),
+  };
+}
+
+app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async (request) => {
+  const result = await db.listProductCatalog({
+    limit: request.query?.limit ?? 100,
+    offset: request.query?.offset ?? 0,
+    search: request.query?.search ?? '',
+  });
+  return {
+    count: result.total, total: result.total,
+    limit: result.limit, offset: result.offset,
+    items: result.items.map(toProductCatalogItem),
   };
 });
 

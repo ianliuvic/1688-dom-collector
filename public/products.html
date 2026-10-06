@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>全部产品 · 已采集</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--line:#e4e7ec;--text:#111827;--muted:#6b7280;--bundle:#b42318;--normal:#067647;--info:#175cd3;}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--muted);font-size:13px;margin:0 0 8px;max-width:1200px}
+.nav{display:flex;gap:10px;flex-wrap:wrap;font-size:12.5px;margin:6px 0 2px}
+.nav a{color:var(--info);text-decoration:none;border:1px solid var(--line);background:#fff;border-radius:999px;padding:3px 12px}
+.nav a:hover{border-color:#98a2b3}.nav a.on{background:var(--text);color:#fff;border-color:var(--text)}
+.stats{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;margin:8px 0}
+.stats b{font-size:16px}.stats .b{color:var(--bundle)}.stats .n{color:var(--normal)}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;align-items:center;position:sticky;top:0;background:var(--bg);padding:10px 24px;z-index:5;border-bottom:1px solid var(--line)}
+.tabs button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 13px;cursor:pointer;font-size:13px;color:var(--text)}
+.tabs button.on{background:var(--text);color:#fff;border-color:var(--text)}
+.tabs .label{font-size:12px;color:var(--muted)}
+#search{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 12px;font-size:13px;min-width:240px;outline:none}
+main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width:1500px;margin:0 auto}
+.row{display:grid;grid-template-columns:96px 200px minmax(0,1fr) 260px;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;align-items:start}
+.row.is-bundle{border-left:4px solid var(--bundle)}
+.cover{width:96px;height:96px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:#f2f4f7;display:block}
+.meta{display:flex;flex-direction:column;gap:4px;min-width:0}
+.badge{align-self:flex-start;font-size:11.5px;font-weight:700;border-radius:999px;padding:2px 10px;color:#fff}
+.badge.bundle{background:var(--bundle)}
+.badge.normal{background:var(--normal)}
+.badge.wp{background:var(--normal);font-weight:600}
+.badge.wpdraft{background:#b54708;font-weight:600}
+.badge.wpnone{background:#98a2b3;font-weight:600}
+.meta .style{font-weight:700;font-size:13.5px}
+.meta .muted{font-size:12px;color:var(--muted);word-break:break-all}
+.body{display:flex;flex-direction:column;gap:6px;min-width:0}
+.title{font-size:13.5px;font-weight:600;line-height:1.4}
+.dims{display:flex;flex-direction:column;gap:4px}
+.dim{display:flex;gap:8px;align-items:flex-start}
+.dim-name{font-size:11px;font-weight:700;color:var(--muted);min-width:34px;padding-top:6px;flex:none}
+.opts{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.opt{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:6px;padding:2px 8px 2px 3px;background:#fff;font-size:12px;max-width:100%}
+.opt img{width:30px;height:30px;object-fit:cover;border-radius:4px;display:block;background:#fff}
+.opt .ph{width:30px;height:30px;border-radius:4px;background:#eef0f3;color:#98a2b3;font-size:10px;display:flex;align-items:center;justify-content:center}
+.chip{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:6px;padding:4px 9px;background:#fff;font-size:12px}
+.side{display:flex;flex-direction:column;gap:5px;min-width:0}
+.side .line{font-size:12.5px;color:var(--text)}
+.side .muted{font-size:12px;color:var(--muted)}
+.thumbs{display:flex;flex-wrap:wrap;gap:5px}
+.thumbs img{width:44px;height:44px;object-fit:cover;border-radius:4px;border:1px solid var(--line);background:#f2f4f7;display:block}
+.empty{padding:28px;text-align:center;color:var(--muted);font-size:13px}
+.pager{display:flex;align-items:center;gap:12px;padding:10px 24px 0;max-width:1500px;margin:0 auto}
+.pager button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 14px;font-size:13px;cursor:pointer;color:var(--text)}
+.pager button:disabled{opacity:.45;cursor:default}
+.pager span{font-size:12.5px;color:var(--muted)}
+@media(max-width:1100px){.row{grid-template-columns:96px minmax(0,1fr)}.row .side{grid-column:2}.row .meta{grid-column:2}}
+</style>
+</head>
+<body>
+<header>
+  <h1>全部产品 · 已采集</h1>
+  <p class="sub">采集器当前保存的全部商品（只读）。每行显示商品名称、各变体选项的名称与图片（颜色显示来源图，尺码为文字）、价格区间、变体组合数、图库缩略图与 wearhongxiu 发布状态。支持按标题、offer、款式号搜索。</p>
+  <div class="nav">
+    <a href="/products" class="on">全部产品</a>
+    <a href="/bundle-inbox">捆绑待拆分</a>
+    <a href="/bundle-check">拆分检查</a>
+    <a href="/dashboard">控制台</a>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+<nav class="tabs" id="tabs"></nav>
+<div class="pager" id="pager"></div>
+<main id="list"><div class="empty">加载中…</div></main>
+<script>
+let DATA = [];
+let pageSize = Number(localStorage.getItem('hx_products_page_size')) || 100;
+if (![100, 200, 300].includes(pageSize)) pageSize = 100;
+let offset = 0;
+let totalFiltered = 0;
+let keyword = '';
+let loading = false;
+
+function esc(s){return String(s).replace(/[&<>"']/g, (c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function imgFallback(el){
+  const fb = el.getAttribute('data-fallback');
+  if (fb && el.src !== fb) { el.removeAttribute('data-fallback'); el.src = fb; return; }
+  const box = document.createElement('span'); box.className = 'ph'; box.textContent = '无图';
+  el.replaceWith(box);
+}
+function swatchFallback(el){
+  const box = document.createElement('span'); box.className = 'ph'; box.textContent = '无图';
+  el.replaceWith(box);
+}
+function optionChip(o){
+  if (o.local || o.source) {
+    const src = o.local || o.source;
+    const fallback = o.local && o.source ? o.source : '';
+    return '<span class="opt"><img loading="lazy" referrerpolicy="no-referrer" src="' + esc(src) + '"'
+      + (fallback ? ' data-fallback="' + esc(fallback) + '"' : '') + ' onerror="swatchFallback(this)" alt=""><span>' + esc(o.text) + '</span></span>';
+  }
+  return '<span class="chip">' + esc(o.text) + '</span>';
+}
+function dimRow(d){
+  return '<div class="dim"><span class="dim-name">' + esc(d.name) + '</span><span class="opts">' + d.options.map(optionChip).join('') + '</span></div>';
+}
+function priceText(it){
+  if (it.priceMin == null && it.priceMax == null) return '价格未记录';
+  const unit = it.currency === 'CNY' ? '¥' : (it.currency ? it.currency + ' ' : '');
+  if (it.priceMin != null && it.priceMax != null && Number(it.priceMin) !== Number(it.priceMax)) return unit + it.priceMin + ' – ' + it.priceMax;
+  return unit + (it.priceMax != null ? it.priceMax : it.priceMin);
+}
+function wpBadge(it){
+  if (!it.wpStatus) return '<span class="badge wpnone">未发布</span>';
+  const cls = it.wpStatus === 'publish' ? 'wp' : 'wpdraft';
+  return '<span class="badge ' + cls + '">WP ' + esc(it.wpStatus) + '</span>';
+}
+function row(it){
+  const isBundle = it.status === 'bundle';
+  const thumbs = (it.gallery || []).slice(0, 6);
+  const overflow = (it.gallery || []).length - thumbs.length;
+  return '<article class="row' + (isBundle ? ' is-bundle' : '') + '" data-id="' + it.id + '">'
+    + (it.cover
+      ? '<img class="cover" loading="lazy" referrerpolicy="no-referrer" src="' + esc(it.cover) + '" onerror="imgFallback(this)" alt="">'
+      : '<span class="cover"></span>')
+    + '<div class="meta">'
+    + '<span class="badge ' + (isBundle ? 'bundle' : 'normal') + '">' + (isBundle ? '捆绑' : '正常') + '</span>'
+    + '<span class="style">#' + it.id + (it.styleNo ? ' · ' + esc(it.styleNo) : '') + '</span>'
+    + '<span class="muted">采集 ' + esc(it.date || '') + '</span>'
+    + '<span class="muted">offer ' + esc(String(it.offerId || '')) + '</span>'
+    + wpBadge(it)
+    + '</div>'
+    + '<div class="body"><div class="title">' + esc(it.title || '') + '</div>'
+    + '<div class="dims">' + (it.dims.length ? it.dims.map(dimRow).join('') : '<div class="muted" style="font-size:12px;color:var(--muted)">（无变体选项）</div>') + '</div></div>'
+    + '<div class="side">'
+    + '<div class="line"><b>' + priceText(it) + '</b>' + (it.moq != null ? ' <span class="muted">· 起订 ' + it.moq + '</span>' : '') + '</div>'
+    + '<div class="line">变体组合 <b>' + it.skuRows + '</b> 条 · 图库 ' + (it.gallery || []).length + ' 张</div>'
+    + (it.wpUrl ? '<div class="muted"><a href="' + esc(it.wpUrl) + '" target="_blank" rel="noopener">查看线上页面</a></div>' : '')
+    + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
+    + '</div></article>';
+}
+function renderStats(){
+  const el = document.getElementById('stats');
+  if (!el) return;
+  const bundles = DATA.filter((x) => x.status === 'bundle').length;
+  const published = DATA.filter((x) => x.wpStatus === 'publish').length;
+  el.innerHTML = '<span>共 <b>' + totalFiltered + '</b> 个产品</span>'
+    + '<span>本页 <b>' + DATA.length + '</b></span>'
+    + '<span class="b">本页捆绑 <b>' + bundles + '</b></span>'
+    + '<span class="n">本页已发布 <b>' + published + '</b></span>';
+}
+function renderPager(){
+  const el = document.getElementById('pager');
+  if (!el) return;
+  const pages = Math.max(Math.ceil(totalFiltered / pageSize), 1);
+  const current = Math.floor(offset / pageSize) + 1;
+  el.innerHTML = '<button type="button" id="pagePrev"' + (offset <= 0 ? ' disabled' : '') + '>上一页</button>'
+    + '<span>第 ' + current + ' / ' + pages + ' 页 · 每页 ' + pageSize + ' · 共 ' + totalFiltered + ' 条</span>'
+    + '<button type="button" id="pageNext"' + (offset + pageSize >= totalFiltered ? ' disabled' : '') + '>下一页</button>';
+}
+function renderTabs(){
+  document.querySelectorAll('#tabs button[data-size]').forEach((b) => {
+    b.classList.toggle('on', Number(b.dataset.size) === pageSize);
+  });
+}
+function render(){
+  const list = document.getElementById('list');
+  list.innerHTML = DATA.length ? DATA.map(row).join('') : '<div class="empty">没有符合条件的产品</div>';
+  renderStats();
+  renderPager();
+  renderTabs();
+}
+async function loadPage(){
+  if (loading) return;
+  loading = true;
+  try {
+    const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
+    if (keyword) params.set('search', keyword);
+    const res = await fetch('/api/product-catalog?' + params.toString(), { headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    DATA = Array.isArray(body.items) ? body.items : [];
+    totalFiltered = Number(body.count) || 0;
+    render();
+  } catch (e) {
+    document.getElementById('list').innerHTML = '<div class="empty">加载失败：' + esc(String((e && e.message) || e)) + '</div>';
+  } finally {
+    loading = false;
+  }
+}
+function wireTabs(){
+  const tabsEl = document.getElementById('tabs');
+  tabsEl.innerHTML = '<span class="label">每页</span>'
+    + [100, 200, 300].map((n) => '<button type="button" data-size="' + n + '">' + n + '</button>').join('')
+    + '<input id="search" type="search" placeholder="搜索标题 / offer / 款式号…">';
+  tabsEl.addEventListener('click', (e) => {
+    const size = e.target.closest('button[data-size]');
+    if (size) {
+      const next = Number(size.dataset.size);
+      if (next !== pageSize) {
+        pageSize = next;
+        localStorage.setItem('hx_products_page_size', String(pageSize));
+        offset = 0;
+        void loadPage();
+      }
+    }
+  });
+  let searchTimer = null;
+  tabsEl.addEventListener('input', (e) => {
+    if (e.target.id !== 'search') return;
+    keyword = String(e.target.value || '').trim().toLowerCase();
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { offset = 0; void loadPage(); }, 350);
+  });
+  const pagerEl = document.getElementById('pager');
+  pagerEl.addEventListener('click', (e) => {
+    if (e.target.closest('#pagePrev') && offset > 0) { offset = Math.max(offset - pageSize, 0); void loadPage(); return; }
+    if (e.target.closest('#pageNext') && offset + pageSize < totalFiltered) { offset += pageSize; void loadPage(); }
+  });
+}
+(async () => {
+  wireTabs();
+  await loadPage();
+})();
+</script>
+</body>
+</html>

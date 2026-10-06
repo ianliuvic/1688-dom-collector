@@ -10,6 +10,9 @@
 header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--muted);font-size:13px;margin:0 0 8px;max-width:1200px}
 .stats{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;margin:8px 0}
 .stats b{font-size:16px}.stats .b{color:var(--bundle)}.stats .n{color:var(--normal)}
+.nav{display:flex;gap:10px;flex-wrap:wrap;font-size:12.5px;margin:6px 0 2px}
+.nav a{color:#175cd3;text-decoration:none;border:1px solid var(--line);background:#fff;border-radius:999px;padding:3px 12px}
+.nav a:hover{border-color:#98a2b3}.nav a.on{background:var(--text);color:#fff;border-color:var(--text)}
 .tabs{display:flex;gap:8px;flex-wrap:wrap;align-items:center;position:sticky;top:0;background:var(--bg);padding:10px 24px;z-index:5;border-bottom:1px solid var(--line)}
 .tabs button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 13px;cursor:pointer;font-size:13px;color:var(--text)}
 .tabs button.on{background:var(--text);color:#fff;border-color:var(--text)}
@@ -81,6 +84,12 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 <header>
   <h1>捆绑商品 · 待人工拆分</h1>
   <p class="sub">采集时自动识别出的捆绑混卖商品（同一选项维度里混了不同物件）。点「手动拆分」把变体分组并分配 gallery 图片：同一组 = 合并成一个商品（价格按组内各件合计，同款多花色算一件取最高价）；不同组 = 拆分成多个商品；未分配 = 该件不发布。尺码与价格取自 1688 页面（采集中已保存，可点「刷新尺码/价格」重取）。方案保存在采集器。</p>
+  <div class="nav">
+    <a href="/products">全部产品</a>
+    <a href="/bundle-inbox" class="on">捆绑待拆分</a>
+    <a href="/bundle-check">拆分检查</a>
+    <a href="/dashboard">控制台</a>
+  </div>
   <div class="stats" id="stats"></div>
 </header>
 <nav class="tabs" id="tabs"></nav>
