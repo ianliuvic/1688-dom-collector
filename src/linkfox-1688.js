@@ -353,12 +353,12 @@ export async function downloadLinkFoxImages(imagePlan, { storagePath, offerKey }
     }
     const stored = byUrl.get(url);
     if (!stored || stored.error) continue;
+    // The same source URL can appear in more than one bucket (a colour swatch
+    // is often the same file as a gallery image). Download once, but write a
+    // file for every row so each stored image path really exists.
     const fileName = `${item.type}-${String(item.sortOrder ?? results.length).padStart(4, '0')}-${stored.hash}${stored.extension}`;
     const filePath = path.join(stored.folder, fileName);
-    if (!stored.written) {
-      await fs.writeFile(filePath, stored.bytes);
-      stored.written = true;
-    }
+    await fs.writeFile(filePath, stored.bytes);
     results.push({
       type: item.type,
       sortOrder: item.sortOrder ?? 0,
