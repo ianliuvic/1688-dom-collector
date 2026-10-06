@@ -163,50 +163,67 @@ ${optionLines}
 图片清单：
 ${input.images.map((image) => `${image.index}. ${image.type}`).join('\n')}`;
 
-  const content = [
+  const visionContent = [
     { type: 'text', text: prompt },
     ...input.images.map((image) => ({ type: 'image_url', image_url: { url: image.url } })),
   ];
-  const response = await fetch(endpointFrom(config.baseUrl), {
-    method: 'POST',
-    headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify(applyReasoning({
-      model: config.model,
-      messages: [{ role: 'user', content }],
-      response_format: { type: 'json_object' },
-      temperature: 0,
-      max_tokens: 3000,
-    }, config.reasoningEffort)),
-    signal: AbortSignal.timeout(180000),
-  });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(`Split analysis failed (${response.status}): ${String(detail).slice(0, 200)}`);
+  let lastRaw = '';
+  let lastProblem = 'no usable groups';
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const content = attempt === 1
+      ? visionContent
+      : [...visionContent, {
+        type: 'text',
+        text: `上一次输出无法使用（${lastProblem}）。原文片段：${String(lastRaw).slice(0, 300)}
+请重新输出：必须是严格 JSON，products 至少 1 项，options 必须逐字来自上面的选项列表，images 用给定编号，不要输出任何其他文字。`,
+      }];
+    const response = await fetch(endpointFrom(config.baseUrl), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(applyReasoning({
+        model: config.model,
+        messages: [{ role: 'user', content }],
+        response_format: { type: 'json_object' },
+        temperature: 0,
+        max_tokens: 6000,
+      }, config.reasoningEffort)),
+      signal: AbortSignal.timeout(180000),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`Split analysis failed (${response.status}): ${String(detail).slice(0, 200)}`);
+    }
+    const payload = await response.json();
+    const text = contentText(payload.choices?.[0]?.message?.content);
+    lastRaw = text;
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch { parsed = null; }
+    if (!parsed) {
+      const match = String(text || '').match(/\{[\s\S]*\}/);
+      if (match) { try { parsed = JSON.parse(match[0]); } catch { parsed = null; } }
+    }
+    if (!parsed || !Array.isArray(parsed.products)) {
+      lastProblem = 'JSON 无法解析或缺少 products';
+      continue;
+    }
+    const { products, ignoredOptions } = normalisePlan(parsed.products, parsed.ignoredOptions, input, raw);
+    if (!products.length) {
+      lastProblem = '分组后没有有效产品（options 与选项列表不匹配或全为空）';
+      continue;
+    }
+    return {
+      input,
+      plan: {
+        version: 2,
+        source: 'llm',
+        model: config.model ?? null,
+        products,
+        ignoredOptions,
+        updatedAt: new Date().toISOString(),
+      },
+    };
   }
-  const payload = await response.json();
-  const text = contentText(payload.choices?.[0]?.message?.content);
-  let parsed = null;
-  try { parsed = JSON.parse(text); } catch { parsed = null; }
-  if (!parsed) {
-    const match = String(text || '').match(/\{[\s\S]*\}/);
-    if (match) { try { parsed = JSON.parse(match[0]); } catch { parsed = null; } }
-  }
-  if (!parsed || !Array.isArray(parsed.products)) {
-    throw new Error('Split analysis returned no usable groups.');
-  }
-  const { products, ignoredOptions } = normalisePlan(parsed.products, parsed.ignoredOptions, input, raw);
-  if (!products.length) throw new Error('Split analysis returned no products.');
-  return {
-    input,
-    plan: {
-      version: 2,
-      source: 'llm',
-      model: config.model ?? null,
-      products,
-      ignoredOptions,
-      updatedAt: new Date().toISOString(),
-    },
-  };
+  throw new Error(`Split analysis returned no usable groups: ${String(lastRaw).slice(0, 300)}`);
 }
 
 /** Recompute sizes/prices for a manually edited plan (authoritative server side). */
