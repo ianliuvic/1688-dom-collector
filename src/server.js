@@ -980,20 +980,54 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
         ? Number(linkfoxPrice.max) : null;
       // LinkFox sometimes publishes only tier prices; keep any per-SKU price
       // the previous rows already had so the variant table does not lose it.
+      // Old browser rows may carry size-only keys with the colour in
+      // option_data, so match on the normalized (colour, size) pair first and
+      // fall back to an unambiguous size-only match.
       const fresh = await db.getProductDetail(existing.id);
-      const priorPrices = new Map();
+      const normalizeValue = (value) => String(value ?? '').replace(/\s+/g, '').toLowerCase();
+      const colorSizeOf = (row) => {
+        const options = row.options ?? row.option_data ?? {};
+        const key = String(row.skuKey ?? row.sku_key ?? '');
+        const fromKey = new Map();
+        for (const part of key.split('|')) {
+          const index = part.indexOf(':');
+          if (index < 0) continue;
+          const name = part.slice(0, index).trim();
+          const value = part.slice(index + 1).trim();
+          const canonical = /^(?:颜色|color)$/i.test(name) ? 'Color'
+            : /^(?:尺码|尺寸|码数|size)$/i.test(name) ? 'Size' : name;
+          fromKey.set(canonical, value);
+        }
+        return {
+          color: normalizeValue(fromKey.get('Color') ?? options.Color ?? options['颜色'] ?? ''),
+          size: normalizeValue(fromKey.get('Size') ?? options.Size ?? options['尺码'] ?? ''),
+        };
+      };
+      const priorByPair = new Map();
+      const priorBySize = new Map();
       for (const row of fresh?.skus ?? []) {
         const value = Number(row.price);
-        if (row.sku_key && Number.isFinite(value) && value > 0) priorPrices.set(String(row.sku_key), value);
+        if (!(Number.isFinite(value) && value > 0)) continue;
+        const { color, size } = colorSizeOf(row);
+        if (color && size) priorByPair.set(`${color}\u0001${size}`, value);
+        if (size) {
+          const entry = priorBySize.get(size) ?? { values: new Set() };
+          entry.values.add(value);
+          priorBySize.set(size, entry);
+        }
       }
       let pricesPreserved = 0;
       for (const row of capture.data.skuRows) {
-        if (row.price === null || row.price === undefined) {
-          const prior = priorPrices.get(String(row.skuKey));
-          if (prior) {
-            row.price = prior;
-            pricesPreserved += 1;
-          }
+        if (row.price !== null && row.price !== undefined) continue;
+        const { color, size } = colorSizeOf(row);
+        let prior = color && size ? priorByPair.get(`${color}\u0001${size}`) : undefined;
+        if (prior === undefined && size) {
+          const entry = priorBySize.get(size);
+          if (entry && entry.values.size === 1) prior = [...entry.values][0];
+        }
+        if (prior !== undefined) {
+          row.price = prior;
+          pricesPreserved += 1;
         }
       }
       await db.updateProductSkusFromMatrix(existing.id, {
