@@ -11,7 +11,7 @@ import { applyReasoning } from './model-request.js';
 
 const SIZE_RE = /(尺码|尺寸|码数|size)/i;
 const COLOR_RE = /(颜色|color|colour)/i;
-const MAX_IMAGES = 8;
+const MAX_IMAGES = 24;
 const MAX_PRODUCTS = 6;
 const FALLBACK_BASE_URL = 'https://api.deepseek.com';
 
