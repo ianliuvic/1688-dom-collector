@@ -1243,7 +1243,7 @@ export function createDatabase(databaseUrl) {
 
   async function listDetailsMissingBundleAudit(limit = 500) {
     const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 2000);
-    const result = await pool.query(`SELECT id,
+    const result = await pool.query(`SELECT id, title,
       raw_data->'skuOptions' AS sku_options,
       raw_data->'skuDimensions' AS sku_dimensions,
       raw_data->'skuMatrix' AS sku_matrix

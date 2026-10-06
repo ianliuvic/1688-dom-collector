@@ -25,6 +25,7 @@ import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { detectBundle } from './bundle-detector.js';
+import { classifyBundleSemantically, bundleClassifierConfig } from './bundle-classifier.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
   linkfoxExtrasForMerge } from './linkfox-1688.js';
@@ -735,44 +736,102 @@ app.post('/api/bundle-audit/recheck', { preHandler: requireApiKey }, async (requ
   return { scanned: rows.length, flipped, unchanged, details };
 });
 
-// Full bundle re-evaluation over every capture (used after a detector rule
-// change). Manual overrides are preserved untouched.
-app.post('/api/bundle-audit/recheck-all', { preHandler: requireApiKey }, async (request) => {
-  const batchSize = Math.min(Math.max(Number(request.body?.batchSize) || 400, 50), 1000);
-  const stats = { scanned: 0, bundles: 0, clear: 0, changed: 0, bundleToClear: 0, clearToBundle: 0, manualSkipped: 0 };
-  const samples = [];
+// Full bundle re-evaluation over every capture, judged semantically by the
+// model from the variant option texts (mode=rules keeps the rule detector).
+// Runs as a background job because the model calls take minutes; manual
+// overrides are preserved untouched. Poll with GET /api/bundle-audit/jobs/{id}.
+const bundleRecheckJobs = new Map();
+
+async function runBundleRecheckJob(job, { mode, limit, concurrency = 6 }) {
+  const batchSize = 200;
   let offset = 0;
-  while (true) {
-    const rows = await db.listBundleRecheckRows({ limit: batchSize, offset });
+  let remaining = limit;
+  while (remaining > 0) {
+    const take = Math.min(batchSize, remaining);
+    const rows = await db.listBundleRecheckRows({ limit: take, offset });
     if (!rows.length) break;
-    for (const row of rows) {
-      stats.scanned += 1;
-      if (row.bundle_manual_status) { stats.manualSkipped += 1; continue; }
-      const detection = detectBundle({
-        skuOptions: row.sku_options ?? [],
-        skuDimensions: row.sku_dimensions ?? [],
-        skuMatrix: row.sku_matrix ?? null,
-      });
-      if (detection.status === 'bundle') stats.bundles += 1; else stats.clear += 1;
-      const previous = row.bundle_status ?? 'clear';
-      if (previous !== detection.status) {
-        stats.changed += 1;
-        if (detection.status === 'bundle') stats.clearToBundle += 1; else stats.bundleToClear += 1;
-        if (samples.length < 50) {
-          samples.push({ id: row.id, offerId: row.offer_id, title: row.title, from: previous, to: detection.status });
+    let next = 0;
+    const workers = Array.from({ length: Math.min(concurrency, rows.length) }, async () => {
+      while (true) {
+        const index = next++;
+        if (index >= rows.length) return;
+        const row = rows[index];
+        job.scanned += 1;
+        if (row.bundle_manual_status) { job.manualSkipped += 1; continue; }
+        const data = {
+          skuOptions: row.sku_options ?? [],
+          skuDimensions: row.sku_dimensions ?? [],
+          skuMatrix: row.sku_matrix ?? null,
+        };
+        let detection;
+        if (mode === 'llm') {
+          try {
+            detection = await classifyBundleSemantically({
+              data, title: row.title, config: bundleClassifierConfig(config),
+            });
+          } catch (error) {
+            job.modelErrors += 1;
+            detection = detectBundle(data);
+            detection.analysis = { ...(detection.analysis ?? {}), detector: 'rules_fallback', error: String(error.message || error).slice(0, 200) };
+          }
+        } else {
+          detection = detectBundle(data);
         }
+        if (detection.status === 'bundle') job.bundles += 1; else job.clear += 1;
+        const previous = row.bundle_status ?? 'clear';
+        if (previous !== detection.status) {
+          job.changed += 1;
+          if (detection.status === 'bundle') job.clearToBundle += 1;
+          else job.bundleToClear += 1;
+          if (job.samples.length < 60) {
+            job.samples.push({
+              id: row.id, offerId: row.offer_id, title: row.title,
+              from: previous, to: detection.status, reason: detection.analysis?.reason ?? null,
+            });
+          }
+        }
+        await db.saveProductBundleStatus(row.id, detection);
       }
-      await db.saveProductBundleStatus(row.id, detection);
-    }
+    });
+    await Promise.all(workers);
     offset += rows.length;
-    if (rows.length < batchSize) break;
+    remaining -= rows.length;
+    if (rows.length < take) break;
   }
-  return { ...stats, samples };
+  job.status = job.modelErrors ? 'completed_with_errors' : 'completed';
+  job.completedAt = new Date().toISOString();
+}
+
+app.post('/api/bundle-audit/recheck-all', { preHandler: requireApiKey }, async (request, reply) => {
+  if ([...bundleRecheckJobs.values()].some((entry) => entry.status === 'running')) {
+    return reply.code(409).send({ error: 'recheck_already_running' });
+  }
+  const mode = request.body?.mode === 'rules' ? 'rules' : 'llm';
+  const limit = Number(request.body?.limit) > 0 ? Math.min(Number(request.body.limit), 5000) : 5000;
+  const id = crypto.randomUUID();
+  const job = {
+    id, mode, status: 'running', scanned: 0, bundles: 0, clear: 0, changed: 0,
+    bundleToClear: 0, clearToBundle: 0, manualSkipped: 0, modelErrors: 0,
+    samples: [], createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), completedAt: null,
+  };
+  bundleRecheckJobs.set(id, job);
+  trimTerminalJobs(bundleRecheckJobs);
+  runBundleRecheckJob(job, { mode, limit }).catch((error) => {
+    job.status = 'failed';
+    job.error = String(error.message || error);
+    app.log.error({ err: error, jobId: id }, 'bundle recheck job failed');
+  });
+  return reply.code(202).send({ id, status: 'running', mode, limit });
+});
+
+app.get('/api/bundle-audit/jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = bundleRecheckJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
 // Manual bundle verdict for one capture: {status: 'bundle' | 'clear' | 'auto'}.
-// Stored in bundle_manual_status, so it survives re-captures and detector
-// re-runs; 'auto' clears the override and re-runs the detector right away.
+// Stored in bundle_manual_status, so it survives re-captures and re-runs;
+// 'auto' clears the override and re-judges the capture right away.
 app.post('/api/product-details/:id/bundle-status', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
@@ -784,15 +843,27 @@ app.post('/api/product-details/:id/bundle-status', { preHandler: requireDashboar
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   if (requested === 'auto') {
     await db.setProductBundleManual(id, null);
-    const detection = detectBundle({
-      skuOptions: detail.raw_data?.skuOptions ?? [],
-      skuDimensions: detail.raw_data?.skuDimensions ?? [],
-      skuMatrix: detail.raw_data?.skuMatrix ?? null,
-    });
+    let detection;
+    try {
+      detection = await classifyBundleSemantically({
+        data: {
+          skuOptions: detail.raw_data?.skuOptions ?? [],
+          skuDimensions: detail.raw_data?.skuDimensions ?? [],
+          skuMatrix: detail.raw_data?.skuMatrix ?? null,
+        },
+        title: detail.title, config: bundleClassifierConfig(config),
+      });
+    } catch (error) {
+      detection = detectBundle({
+        skuOptions: detail.raw_data?.skuOptions ?? [],
+        skuDimensions: detail.raw_data?.skuDimensions ?? [],
+        skuMatrix: detail.raw_data?.skuMatrix ?? null,
+      });
+    }
     const saved = await db.saveProductBundleStatus(id, detection);
     return {
       productDetailId: id, status: saved?.bundle_status ?? detection.status,
-      manual: null, detector: detection.status,
+      manual: null, detector: detection.status, reason: detection.analysis?.reason ?? null,
     };
   }
   const saved = await db.setProductBundleManual(id, requested);
@@ -1108,9 +1179,19 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
         rows: capture.data.skuRows, dimensions, skuMatrix, priceMin, priceMax,
         skuOptions: capture.data.skuOptions, source: 'linkfox',
       });
-      const detection = detectBundle({
-        skuOptions: capture.data.skuOptions, skuDimensions: dimensions, skuMatrix,
-      });
+      let detection;
+      try {
+        detection = await classifyBundleSemantically({
+          data: {
+            skuOptions: capture.data.skuOptions, skuDimensions: dimensions, skuMatrix,
+          },
+          title: existing.title, config: bundleClassifierConfig(config),
+        });
+      } catch (error) {
+        detection = detectBundle({
+          skuOptions: capture.data.skuOptions, skuDimensions: dimensions, skuMatrix,
+        });
+      }
       await db.saveProductBundleStatus(existing.id, detection);
       skus = {
         rows: capture.data.skuRows.length, dimensions: dimensions.map((dimension) => dimension.name),
@@ -2217,9 +2298,17 @@ app.post('/api/product-details/:id/repair-skus-from-matrix', { preHandler: [requ
     fetchedAt: new Date().toISOString(),
   };
   await db.updateProductSkusFromMatrix(id, { rows, dimensions, skuMatrix, priceMin, priceMax });
-  const detection = detectBundle({
-    skuOptions: detail.raw_data?.skuOptions ?? [], skuDimensions: dimensions, skuMatrix,
-  });
+  let detection;
+  try {
+    detection = await classifyBundleSemantically({
+      data: { skuOptions: detail.raw_data?.skuOptions ?? [], skuDimensions: dimensions, skuMatrix },
+      title: detail.title, config: bundleClassifierConfig(config),
+    });
+  } catch (error) {
+    detection = detectBundle({
+      skuOptions: detail.raw_data?.skuOptions ?? [], skuDimensions: dimensions, skuMatrix,
+    });
+  }
   await db.saveProductBundleStatus(id, detection);
   return {
     productDetailId: id, rows: rows.length, dimensions: dimensions.map((dimension) => dimension.name),
@@ -2416,26 +2505,45 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
   };
 });
 
-// Recompute bundle detection for captures that predate the flag (name/size
-// rules only; the split page can refresh live sizes/prices on demand).
+// Recompute bundle status for captures that predate the flag (semantic
+// classification with rule fallback; the split page can refresh live sizes).
 app.post('/api/bundle-audit/backfill', { preHandler: requireApiKey }, async (request) => {
   const limit = Number(request.body?.limit) > 0 ? Math.min(Number(request.body.limit), 2000) : 500;
   const rows = await db.listDetailsMissingBundleAudit(limit);
   let bundles = 0; let clear = 0; let failed = 0;
-  for (const row of rows) {
-    try {
-      const detection = detectBundle({
-        skuOptions: row.sku_options ?? [],
-        skuDimensions: row.sku_dimensions ?? [],
-        skuMatrix: row.sku_matrix ?? null,
-      });
-      await db.saveProductBundleStatus(row.id, detection);
-      if (detection.status === 'bundle') bundles += 1; else clear += 1;
-    } catch (error) {
-      failed += 1;
-      request.log.error({ err: error, productDetailId: row.id }, 'bundle audit backfill failed');
+  let next = 0;
+  const workers = Array.from({ length: Math.min(6, rows.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= rows.length) return;
+      const row = rows[index];
+      try {
+        let detection;
+        try {
+          detection = await classifyBundleSemantically({
+            data: {
+              skuOptions: row.sku_options ?? [],
+              skuDimensions: row.sku_dimensions ?? [],
+              skuMatrix: row.sku_matrix ?? null,
+            },
+            title: row.title, config: bundleClassifierConfig(config),
+          });
+        } catch (error) {
+          detection = detectBundle({
+            skuOptions: row.sku_options ?? [],
+            skuDimensions: row.sku_dimensions ?? [],
+            skuMatrix: row.sku_matrix ?? null,
+          });
+        }
+        await db.saveProductBundleStatus(row.id, detection);
+        if (detection.status === 'bundle') bundles += 1; else clear += 1;
+      } catch (error) {
+        failed += 1;
+        request.log.error({ err: error, productDetailId: row.id }, 'bundle audit backfill failed');
+      }
     }
-  }
+  });
+  await Promise.all(workers);
   return { scanned: rows.length, bundles, clear, failed, more: rows.length >= limit };
 });
 
@@ -2751,7 +2859,18 @@ async function workerLoop(queue, workerIndex = 0) {
           result.status = 'rejected_duplicate';
           result.error = null;
         } else {
-          const bundleDetection = detectBundle(result.extractedData);
+          let bundleDetection;
+          try {
+            bundleDetection = await classifyBundleSemantically({
+              data: result.extractedData,
+              title: result.extractedData?.title,
+              config: bundleClassifierConfig(config),
+            });
+          } catch (error) {
+            app.log.warn({ err: error }, 'semantic bundle classification failed; falling back to rules');
+            bundleDetection = detectBundle(result.extractedData);
+            bundleDetection.analysis = { ...(bundleDetection.analysis ?? {}), detector: 'rules_fallback' };
+          }
           const saved = await db.saveProductDetail(
             result.extractedData, job.url, result.extractedData.localImages ?? [], duplicateAnalysis,
             bundleDetection,
