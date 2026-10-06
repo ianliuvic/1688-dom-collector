@@ -25,6 +25,7 @@ import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
+import { analyzeBundleSplit, recomputePlan } from './bundle-splitter.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
@@ -73,6 +74,7 @@ const config = {
   feishuAppId: process.env.FEISHU_APP_ID?.trim() || '',
   feishuAppSecret: process.env.FEISHU_APP_SECRET?.trim() || '',
   feishuChatId: process.env.FEISHU_CHAT_ID?.trim() || '',
+  publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() || 'https://collector.yiswim.cloud',
 };
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
@@ -880,6 +882,53 @@ app.post('/api/product-details/:id/bundle-status', { preHandler: requireDashboar
     productDetailId: id, status: saved?.bundle_status ?? requested,
     manual: saved?.bundle_manual_status ?? requested, manualAt: saved?.bundle_manual_at ?? null,
   };
+});
+
+// LLM split analysis for a bundle capture: groups the option texts into the
+// products actually sold in the listing (ignoring seller chatter), assigns the
+// gallery images to them, and derives sizes/prices from the stored SKU matrix.
+app.post('/api/product-details/:id/split-analysis', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  try {
+    const { plan } = await analyzeBundleSplit({
+      detail,
+      config: {
+        apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+        model: config.complexModel, reasoningEffort: config.reasoningEffort,
+      },
+      baseUrl: config.publicBaseUrl,
+    });
+    const saved = await db.saveProductSplitPlan(id, plan);
+    return { productDetailId: id, plan: saved.plan, updatedAt: saved.updated_at };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: id }, 'bundle split analysis failed');
+    return reply.code(502).send({
+      error: 'split_analysis_failed', message: String(error?.message || error).slice(0, 300),
+    });
+  }
+});
+
+app.get('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const record = await db.getProductSplitPlan(id);
+  return { productDetailId: id, plan: record?.plan ?? null, updatedAt: record?.updated_at ?? null };
+});
+
+// Save a manually adjusted split plan. Sizes and prices are always recomputed
+// from the stored SKU matrix, never trusted from the client.
+app.put('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const plan = recomputePlan(request.body?.plan ?? {}, detail);
+  if (!plan.products.length) return reply.code(400).send({ error: 'empty_plan' });
+  const saved = await db.saveProductSplitPlan(id, plan);
+  return { productDetailId: id, plan: saved.plan, updatedAt: saved.updated_at };
 });
 
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({
@@ -2360,6 +2409,7 @@ function toProductCatalogItem(row) {
     skuRows: row.sku_rows ?? 0,
     colorCount: Number(row.color_count) || 0,
     bundleManual: row.bundle_manual_status || null,
+    hasSplitPlan: row.has_split_plan === true,
     shopId: row.shop_id === null || row.shop_id === undefined ? null : Number(row.shop_id),
     shopName: row.shop_name || null,
     listingStatus: row.availability_status || null,

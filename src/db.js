@@ -1084,6 +1084,7 @@ export function createDatabase(databaseUrl) {
         details.raw_data->'skuDimensions' AS sku_dimensions,
         publications.style_no, publications.wp_status, publications.wp_url,
         source.shop_id, source.shop_name, source.availability_status, source.delisted_at,
+        EXISTS (SELECT 1 FROM product_split_plans plans WHERE plans.product_detail_id=details.id) AS has_split_plan,
         ${colorExpr} AS color_count
       FROM product_details details
       LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
@@ -2345,6 +2346,21 @@ export function createDatabase(databaseUrl) {
     return saved.rows[0];
   }
 
+  /** Saved bundle split plan for one product detail (manual or LLM). */
+  async function getProductSplitPlan(productDetailId) {
+    const result = await pool.query(
+      'SELECT * FROM product_split_plans WHERE product_detail_id=$1', [productDetailId]);
+    return result.rows[0] ?? null;
+  }
+
+  async function saveProductSplitPlan(productDetailId, plan) {
+    const result = await pool.query(`INSERT INTO product_split_plans (product_detail_id, plan, updated_at)
+      VALUES ($1,$2,now())
+      ON CONFLICT (product_detail_id) DO UPDATE SET plan=EXCLUDED.plan, updated_at=now()
+      RETURNING *`, [productDetailId, JSON.stringify(plan)]);
+    return result.rows[0];
+  }
+
   async function listPortalPublishCandidates({ shopId, since, until, limit = 500 } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 500);
     const result = await pool.query(`SELECT details.id AS product_detail_id, details.offer_id,
@@ -2501,6 +2517,7 @@ export function createDatabase(databaseUrl) {
     saveWordPressPublication, createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
+    getProductSplitPlan, saveProductSplitPlan,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };

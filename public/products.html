@@ -30,6 +30,32 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .bbtn.on.green{background:var(--normal);border-color:var(--normal);color:#fff}
 .bbtn.on.gray{background:#475467;border-color:#475467;color:#fff}
 .bstate{font-size:11.5px;color:var(--muted)}
+.split-toggle{border:1px solid var(--line);background:#fff;border-radius:6px;padding:2px 9px;font-size:11.5px;cursor:pointer}
+.split-toggle:hover{border-color:#98a2b3}
+.split-panel{background:#fbfcfe;border:1px solid var(--line);border-top:none;border-radius:0 0 8px 8px;padding:12px 14px;margin-top:-9px}
+.sp-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.sp-head b{font-size:13.5px}
+.sp-head button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer}
+.sp-head button:hover{border-color:#98a2b3}
+.sp-status{font-size:12px;color:var(--muted)}
+.sp-products{display:flex;flex-direction:column;gap:8px}
+.sp-product{border:1px solid var(--line);border-radius:8px;background:#fff;padding:8px 10px}
+.sp-title{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
+.sp-title b{font-size:12.5px}
+.sp-title input{border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:13px;min-width:220px}
+.sp-row{display:flex;gap:8px;align-items:flex-start;margin-top:5px}
+.sp-label{font-size:11px;font-weight:700;color:var(--muted);min-width:40px;padding-top:6px;flex:none}
+.sp-opts{display:flex;flex-wrap:wrap;gap:6px}
+.sp-opt{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:6px;padding:2px 6px 2px 3px;font-size:12px;background:#fff;max-width:100%}
+.sp-opt img{width:26px;height:26px;object-fit:cover;border-radius:4px;display:block;background:#f2f4f7}
+.sp-opt select{border:1px solid var(--line);border-radius:4px;font-size:11px;padding:1px 2px;background:#fff;max-width:80px}
+.sp-ignored .sp-opt{opacity:.7}
+.sp-imgs{display:flex;flex-wrap:wrap;gap:6px}
+.sp-img{width:94px;border:1px solid var(--line);border-radius:6px;padding:3px;background:#fff}
+.sp-img img{width:86px;height:86px;object-fit:cover;border-radius:4px;display:block;background:#f2f4f7}
+.sp-assign{display:flex;gap:3px;justify-content:center;margin-top:3px;flex-wrap:wrap}
+.sp-assign button{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);background:#fff;font-size:10.5px;cursor:pointer;line-height:1;padding:0}
+.sp-assign button.on{background:var(--info);border-color:var(--info);color:#fff}
 main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width:1500px;margin:0 auto}
 .row{display:grid;grid-template-columns:96px 200px minmax(0,1fr) 260px;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;align-items:start}
 .row.is-bundle{border-left:4px solid var(--bundle)}
@@ -171,6 +197,10 @@ function row(it){
     + '<div class="bundle-actions"><span class="muted">判定：</span>'
     + bundleBtn('bundle', '捆绑', 'red') + bundleBtn('clear', '正常', 'green') + bundleBtn('auto', '自动', 'gray')
     + '<span class="bstate" data-bstate="' + it.id + '"></span></div>'
+    + (isBundle
+      ? '<div class="line"><button type="button" class="split-toggle" data-split-id="' + it.id + '">拆分 ▾'
+        + (it.hasSplitPlan ? '（已保存）' : '') + '</button></div>'
+      : '')
     + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
     + '</div></article>';
 }
@@ -364,11 +394,204 @@ async function setBundleStatus(id, value, stateEl){
     if (stateEl) stateEl.textContent = '保存失败：' + String((e && e.message) || e);
   }
 }
+
+// --- bundle split editor -----------------------------------------------------
+const SPLITS = new Map();
+
+function splitItem(id){ return DATA.find((x) => String(x.id) === String(id)); }
+
+function splitOptionImage(id, text){
+  const item = splitItem(id);
+  for (const dim of (item && item.dims) || []) {
+    for (const option of dim.options || []) {
+      if (option.text === text) return option.local || option.source || null;
+    }
+  }
+  return null;
+}
+
+async function toggleSplit(id){
+  const row = document.querySelector('.row[data-id="' + id + '"]');
+  if (!row) return;
+  const existing = document.getElementById('split-panel-' + id);
+  if (existing) { existing.remove(); return; }
+  const panel = document.createElement('section');
+  panel.className = 'split-panel';
+  panel.id = 'split-panel-' + id;
+  panel.innerHTML = '<div class="sp-status">加载拆分方案…</div>';
+  row.insertAdjacentElement('afterend', panel);
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-plan', { headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    if (body.plan) { SPLITS.set(String(id), body.plan); renderSplitPanel(id); }
+    else renderSplitPanel(id, null);
+  } catch (e) {
+    panel.innerHTML = '<div class="sp-status">加载失败：' + esc(String((e && e.message) || e)) + '</div>';
+  }
+}
+
+function renderSplitPanel(id, plan){
+  const panel = document.getElementById('split-panel-' + id);
+  const item = splitItem(id);
+  if (!panel || !item) return;
+  if (!plan) {
+    panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 捆绑拆分</b>'
+      + '<button type="button" data-split-run="' + id + '">开始 LLM 拆分分析</button>'
+      + '<button type="button" data-split-close="' + id + '">收起</button>'
+      + '<span class="sp-status" id="split-status-' + id + '">尚未拆分：模型将查看图片与选项文本自动分组（约 20–60 秒）</span></div>';
+    return;
+  }
+  SPLITS.set(String(id), plan);
+  const products = plan.products || [];
+  const n = products.length;
+  const optionProduct = new Map();
+  products.forEach((product, index) => (product.options || []).forEach((text) => optionProduct.set(text, index)));
+  const moveSelect = (text, current) => {
+    const options = ['<option value="-1"' + (current === -1 ? ' selected' : '') + '>未采用</option>'];
+    for (let i = 0; i < n; i += 1) {
+      options.push('<option value="' + i + '"' + (current === i ? ' selected' : '') + '>产品' + (i + 1) + '</option>');
+    }
+    return '<select data-split-move="' + id + '" data-opt="' + esc(text) + '">' + options.join('') + '</select>';
+  };
+  const chip = (text, current) => {
+    const image = splitOptionImage(id, text);
+    return '<span class="sp-opt">' + (image ? '<img src="' + esc(image) + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">' : '')
+      + '<span>' + esc(text) + '</span>' + moveSelect(text, current) + '</span>';
+  };
+  const cards = products.map((product, index) => {
+    const sizes = (product.sizes || []).map((size) => '<span class="chip">' + esc(size) + '</span>').join('');
+    const price = product.priceMax != null ? '¥' + product.priceMax : '—';
+    const optionChips = (product.options || []).length
+      ? product.options.map((text) => chip(text, index)).join('')
+      : '<span class="muted">（无选项，可在下方未采用里分配）</span>';
+    return '<div class="sp-product"><div class="sp-title"><b>产品' + (index + 1) + '</b>'
+      + '<input type="text" value="' + esc(product.name || '') + '" data-split-name="' + id + '" data-idx="' + index + '" placeholder="拆分后产品名称">'
+      + '<span class="muted">参考价 ' + price + (product.reason ? ' · ' + esc(product.reason) : '') + '</span></div>'
+      + '<div class="sp-row"><span class="sp-label">选项</span><span class="sp-opts">' + optionChips + '</span></div>'
+      + '<div class="sp-row"><span class="sp-label">尺码</span><span class="sp-opts">' + (sizes || '<span class="muted">（保存后按矩阵重算）</span>') + '</span></div>'
+      + '</div>';
+  }).join('');
+  const ignored = (plan.ignoredOptions || []).length
+    ? plan.ignoredOptions.map((text) => chip(text, -1)).join('')
+    : '<span class="muted">（无）</span>';
+  const images = (item.gallery || []).map((image) => {
+    const buttons = products.map((product, index) => {
+      const on = (product.imageIds || []).map(String).includes(String(image.id));
+      return '<button type="button"' + (on ? ' class="on"' : '')
+        + ' data-split-image="' + id + '" data-img="' + image.id + '" data-idx="' + index + '">' + (index + 1) + '</button>';
+    }).join('');
+    return '<div class="sp-img"><img src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">'
+      + '<div class="sp-assign">' + (buttons || '<span class="muted" style="font-size:10px">无产品</span>') + '</div></div>';
+  }).join('');
+  const sourceLabel = plan.source === 'llm'
+    ? '模型拆分' + (plan.model ? '（' + esc(plan.model) + '）' : '')
+    : (plan.source === 'manual' ? '手动方案' : '方案');
+  panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 捆绑拆分</b>'
+    + '<button type="button" data-split-run="' + id + '">重新分析（LLM）</button>'
+    + '<button type="button" data-split-save="' + id + '">保存</button>'
+    + '<button type="button" data-split-close="' + id + '">收起</button>'
+    + '<span class="sp-status" id="split-status-' + id + '">' + sourceLabel + (plan.updatedAt ? ' · ' + esc(new Date(plan.updatedAt).toLocaleString()) : '') + '</span></div>'
+    + '<div class="sp-products">' + cards + '</div>'
+    + '<div class="sp-row sp-ignored"><span class="sp-label">未采用</span><span class="sp-opts">' + ignored + '</span></div>'
+    + '<div class="sp-row"><span class="sp-label">图片</span><span class="sp-imgs">' + images + '</span></div>'
+    + '<div class="sp-status">图片可同时属于多个产品（点数字切换）；选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算。</div>';
+}
+
+async function runSplitAnalysis(id){
+  const status = document.getElementById('split-status-' + id);
+  if (status) status.textContent = '模型分析中（查看图片并分组）…约 20–60 秒';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-analysis', { method: 'POST', headers: { 'content-type': 'application/json' } });
+    if (!res.ok) {
+      const text = await res.text();
+      if (status) status.textContent = '分析失败 HTTP ' + res.status + '：' + text.slice(0, 160);
+      return;
+    }
+    const body = await res.json();
+    renderSplitPanel(id, body.plan);
+  } catch (e) {
+    if (status) status.textContent = '分析失败：' + String((e && e.message) || e);
+  }
+}
+
+function moveSplitOption(id, text, target){
+  const plan = SPLITS.get(String(id));
+  if (!plan) return;
+  for (const product of plan.products || []) {
+    product.options = (product.options || []).filter((value) => value !== text);
+  }
+  plan.ignoredOptions = (plan.ignoredOptions || []).filter((value) => value !== text);
+  if (target >= 0 && plan.products[target]) plan.products[target].options = [...(plan.products[target].options || []), text];
+  else plan.ignoredOptions = [...plan.ignoredOptions, text];
+  plan.source = 'manual';
+  renderSplitPanel(id, plan);
+}
+
+function toggleSplitImage(id, imageId, index){
+  const plan = SPLITS.get(String(id));
+  if (!plan || !plan.products[index]) return;
+  const product = plan.products[index];
+  const list = (product.imageIds || []).map(String);
+  product.imageIds = list.includes(String(imageId))
+    ? list.filter((value) => value !== String(imageId))
+    : [...list, String(imageId)];
+  plan.source = 'manual';
+  renderSplitPanel(id, plan);
+}
+
+async function saveSplitPlan(id){
+  const plan = SPLITS.get(String(id));
+  const status = document.getElementById('split-status-' + id);
+  if (!plan) return;
+  if (status) status.textContent = '保存中…';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-plan', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ plan }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 120));
+    const body = await res.json();
+    renderSplitPanel(id, body.plan);
+    const item = splitItem(id);
+    if (item) item.hasSplitPlan = true;
+  } catch (e) {
+    if (status) status.textContent = '保存失败：' + String((e && e.message) || e);
+  }
+}
+
 document.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-bundle-value]');
-  if (!btn) return;
-  const stateEl = document.querySelector('[data-bstate="' + btn.dataset.bundleId + '"]');
-  void setBundleStatus(btn.dataset.bundleId, btn.dataset.bundleValue, stateEl);
+  const bundleBtn = e.target.closest('button[data-bundle-value]');
+  if (bundleBtn) {
+    const stateEl = document.querySelector('[data-bstate="' + bundleBtn.dataset.bundleId + '"]');
+    void setBundleStatus(bundleBtn.dataset.bundleId, bundleBtn.dataset.bundleValue, stateEl);
+    return;
+  }
+  const toggle = e.target.closest('button[data-split-id]');
+  if (toggle) { void toggleSplit(String(toggle.dataset.splitId)); return; }
+  const run = e.target.closest('button[data-split-run]');
+  if (run) { void runSplitAnalysis(String(run.dataset.splitRun)); return; }
+  const close = e.target.closest('button[data-split-close]');
+  if (close) {
+    const panel = document.getElementById('split-panel-' + close.dataset.splitClose);
+    if (panel) panel.remove();
+    return;
+  }
+  const save = e.target.closest('button[data-split-save]');
+  if (save) { void saveSplitPlan(String(save.dataset.splitSave)); return; }
+  const imgBtn = e.target.closest('button[data-split-image]');
+  if (imgBtn) { toggleSplitImage(String(imgBtn.dataset.splitImage), String(imgBtn.dataset.img), Number(imgBtn.dataset.idx)); }
+});
+document.addEventListener('input', (e) => {
+  const nameInput = e.target.closest('input[data-split-name]');
+  if (!nameInput) return;
+  const plan = SPLITS.get(String(nameInput.dataset.splitName));
+  const product = plan && (plan.products || [])[Number(nameInput.dataset.idx)];
+  if (product) { product.name = nameInput.value; plan.source = 'manual'; }
+});
+document.addEventListener('change', (e) => {
+  const move = e.target.closest('select[data-split-move]');
+  if (move) moveSplitOption(String(move.dataset.splitMove), move.dataset.opt, Number(move.value));
 });
 (async () => {
   wireTabs();
