@@ -1158,6 +1158,41 @@ app.get('/api/product-details/:id', { preHandler: requireApiKey }, async (reques
   return detail ?? reply.code(404).send({ error: 'not_found' });
 });
 
+// Permanent deletion of one capture (all child rows cascade). The dedicated
+// media folder is removed from persistent storage as well. Refuses while a
+// WordPress publication still points at a live post unless ?force=true.
+app.delete('/api/product-details/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const publication = await db.getWordPressPublication(id);
+  if (publication?.wp_post_id && request.query?.force !== 'true') {
+    return reply.code(409).send({
+      error: 'publication_exists',
+      message: 'Remove the WordPress product first, or pass ?force=true to delete the capture anyway.',
+      wpPostId: publication.wp_post_id, wpStatus: publication.wp_status,
+    });
+  }
+  const removed = await db.deleteProductDetail(id);
+  if (!removed) return reply.code(404).send({ error: 'not_found' });
+  const root = path.resolve(config.storagePath, 'product-images');
+  const folders = new Set();
+  for (const storagePath of removed.imageStoragePaths) {
+    const folder = path.dirname(path.resolve(storagePath));
+    if (folder.startsWith(`${root}${path.sep}`) && /^[A-Za-z0-9_-]{1,64}$/.test(path.basename(folder))) {
+      folders.add(folder);
+    }
+  }
+  const foldersRemoved = [];
+  for (const folder of folders) {
+    const entries = await fs.readdir(folder).catch(() => []);
+    await fs.rm(folder, { recursive: true, force: true });
+    foldersRemoved.push({ folder: path.basename(folder), files: entries.length });
+  }
+  return { deleted: true, ...removed, foldersRemoved };
+});
+
 app.post('/api/product-details/:id/translations', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });

@@ -996,6 +996,42 @@ export function createDatabase(databaseUrl) {
     return result.rowCount > 0;
   }
 
+  /** Permanently delete one product detail and every dependent row.
+   * Child tables cascade; the perceptual-hash row is removed explicitly.
+   * Returns the stored image paths so the caller can clean the media folder. */
+  async function deleteProductDetail(productDetailId) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const detail = await client.query(
+        'SELECT id, offer_id, source_url, title FROM product_details WHERE id=$1 FOR UPDATE',
+        [productDetailId],
+      );
+      if (!detail.rows[0]) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const images = await client.query(
+        'SELECT storage_path FROM product_detail_images WHERE product_detail_id=$1', [productDetailId]);
+      const hashes = await client.query(`DELETE FROM product_image_perceptual_hashes
+        WHERE product_detail_id=$1 OR ($2::text IS NOT NULL AND offer_id=$2)`,
+      [productDetailId, detail.rows[0].offer_id]);
+      const deleted = await client.query('DELETE FROM product_details WHERE id=$1', [productDetailId]);
+      await client.query('COMMIT');
+      return {
+        id: productDetailId, offerId: detail.rows[0].offer_id,
+        sourceUrl: detail.rows[0].source_url, title: detail.rows[0].title,
+        imageStoragePaths: images.rows.map((row) => row.storage_path).filter(Boolean),
+        hashRowsDeleted: hashes.rowCount, deleted: deleted.rowCount > 0,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async function listProductDetails({ offerId = null, limit = 100, offset = 0 } = {}) {
     const safeLimit = Math.max(Number(limit) || 100, 1);
     const safeOffset = Math.max(Number(offset) || 0, 0);
@@ -2356,7 +2392,7 @@ export function createDatabase(databaseUrl) {
     saveShopScan, listShopProfiles, listShopProducts, listShopProductSources,
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
-    updateProductLinkFoxData,
+    updateProductLinkFoxData, deleteProductDetail,
     listBundleInbox, listDetailsMissingBundleAudit, saveProductBundleStatus,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     listBundleAuditRows, summarizeWordPressPublications, listWordPressPublications,
