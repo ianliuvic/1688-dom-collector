@@ -995,8 +995,28 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
-  async function listBundleInbox(limit = 200) {
-    const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500);
+  async function listBundleInbox({ limit = 100, offset = 0, filter = 'all', search = '', hideSmall = false } = {}) {
+    const safeLimit = Math.max(Number(limit) || 100, 1);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const searchTerm = String(search || '').trim().slice(0, 120);
+    const params = [searchTerm ? `%${searchTerm}%` : null, Boolean(hideSmall)];
+    const baseWhere = `details.bundle_status='bundle'
+      AND ($1::text IS NULL OR details.title ILIKE $1)
+      AND (NOT $2::boolean OR (
+        SELECT count(*) FROM jsonb_array_elements(COALESCE(details.raw_data->'skuDimensions','[]'::jsonb)) AS dim
+        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(dim->'values','[]'::jsonb)) AS dim_value
+        WHERE dim->>'name' ~ '(尺码|尺寸|码数|size)'
+          AND dim_value::text !~ '(均码|one\\s*size|free\\s*size)'
+      ) >= 3)`;
+    const counts = await pool.query(`SELECT count(*)::int AS total,
+      count(*) FILTER (WHERE plans.plan IS NOT NULL)::int AS saved
+      FROM product_details details
+      LEFT JOIN product_split_plans plans ON plans.product_detail_id=details.id
+      WHERE ${baseWhere}`, params);
+    const total = counts.rows[0]?.total ?? 0;
+    const saved = counts.rows[0]?.saved ?? 0;
+    const filterSql = filter === 'saved' ? 'AND plans.plan IS NOT NULL'
+      : filter === 'unsaved' ? 'AND plans.plan IS NULL' : '';
     const result = await pool.query(`SELECT details.id, details.offer_id, details.title,
       details.last_crawled_at, details.bundle_status, details.bundle_analysis,
       details.raw_data->'skuOptions' AS sku_options,
@@ -1012,10 +1032,14 @@ export function createDatabase(databaseUrl) {
       plans.plan AS split_plan, plans.updated_at AS plan_updated_at
       FROM product_details details
       LEFT JOIN product_split_plans plans ON plans.product_detail_id=details.id
-      WHERE details.bundle_status='bundle'
+      WHERE ${baseWhere} ${filterSql}
       ORDER BY details.last_crawled_at DESC
-      LIMIT $1`, [safeLimit]);
-    return result.rows;
+      LIMIT $3 OFFSET $4`, [...params, safeLimit, safeOffset]);
+    return {
+      items: result.rows, total, saved,
+      filteredTotal: filter === 'saved' ? saved : filter === 'unsaved' ? Math.max(total - saved, 0) : total,
+      limit: safeLimit, offset: safeOffset,
+    };
   }
 
   async function listDetailsMissingBundleAudit(limit = 500) {

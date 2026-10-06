@@ -1982,8 +1982,18 @@ function toBundleInboxItem(row) {
 }
 
 app.get('/api/bundle-inbox', { preHandler: requireDashboardOrApiKey }, async (request) => {
-  const rows = await db.listBundleInbox(request.query?.limit ?? 200);
-  return { count: rows.length, items: rows.map(toBundleInboxItem) };
+  const result = await db.listBundleInbox({
+    limit: request.query?.limit ?? 100,
+    offset: request.query?.offset ?? 0,
+    filter: ['all', 'saved', 'unsaved'].includes(request.query?.filter) ? request.query.filter : 'all',
+    search: request.query?.search ?? '',
+    hideSmall: request.query?.hideSmall === '1' || request.query?.hideSmall === 'true',
+  });
+  return {
+    count: result.filteredTotal, total: result.total, saved: result.saved,
+    limit: result.limit, offset: result.offset,
+    items: result.items.map(toBundleInboxItem),
+  };
 });
 
 // Recompute bundle detection for captures that predate the flag (name/size

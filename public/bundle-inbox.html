@@ -71,6 +71,10 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 .gsum-line{display:inline-flex;align-items:center;gap:6px;font-size:12px;border:1px dashed var(--line);border-radius:6px;padding:3px 9px;background:#fff}
 .gsum-line .dot{width:9px;height:9px;border-radius:50%;flex:none}
 .empty{padding:28px;text-align:center;color:var(--muted);font-size:13px}
+.pager{display:flex;align-items:center;gap:12px;padding:10px 24px 0;max-width:1500px;margin:0 auto}
+.pager button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 14px;font-size:13px;cursor:pointer;color:var(--text)}
+.pager button:disabled{opacity:.45;cursor:default}
+.pager span{font-size:12.5px;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -80,6 +84,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
   <div class="stats" id="stats"></div>
 </header>
 <nav class="tabs" id="tabs"></nav>
+<div class="pager" id="pager"></div>
 <main id="list"><div class="empty">加载中…</div></main>
 <script>
 const SIZE_NAME_RE = /(尺码|尺寸|码数|size)/i;
@@ -110,12 +115,6 @@ function optionChip(o){
 }
 function dimRow(d){
   return '<div class="dim"><span class="dim-name">' + esc(d.name) + '</span><span class="opts">' + d.options.map(optionChip).join('') + '</span></div>';
-}
-function sizeCountOf(it){
-  const dim = (it.dims || []).find((d) => SIZE_NAME_RE.test(d.name));
-  if (!dim) return 0;
-  const values = [...new Set(dim.options.map((o) => String(o.text).trim()).filter((t) => t && !ONE_SIZE_RE.test(t)))];
-  return values.length;
 }
 function row(it){
   const saved = Boolean(it.plan);
@@ -349,8 +348,11 @@ async function savePlan(id){
       const data = await res.json();
       stEl.textContent = '已保存 ' + new Date(data.updatedAt).toLocaleString();
       const item = ITEM.get(String(id));
+      const wasSaved = Boolean(item && item.plan);
       if (item) { item.plan = data.plan || st; item.planUpdatedAt = data.updatedAt; }
       markFlag(id, true);
+      if (!wasSaved) counts.saved += 1;
+      renderTabs();
       renderStats();
     } else {
       stEl.textContent = '保存失败 HTTP ' + res.status;
@@ -363,12 +365,15 @@ async function clearPlan(id){
     const res = await fetch('/api/product-details/' + id + '/split-plan', { method: 'DELETE' });
     if (res.ok) {
       const item = ITEM.get(String(id));
+      const wasSaved = Boolean(item && item.plan);
       if (item) { item.plan = null; item.planUpdatedAt = null; }
       SPLIT.set(String(id), defaultStateFor(ITEM.get(String(id))));
       const stEl = document.getElementById('st-' + id);
       if (stEl) stEl.textContent = '已清除，未保存修改';
       markFlag(id, false);
+      if (wasSaved) counts.saved = Math.max(counts.saved - 1, 0);
       renderEditorBody(String(id));
+      renderTabs();
       renderStats();
     }
   } catch { /* ignore */ }
@@ -435,72 +440,107 @@ document.addEventListener('input', (e) => {
   const stEl = document.getElementById('st-' + input.dataset.id);
   if (stEl) stEl.textContent = '有未保存修改';
 });
-function passes(it){
-  if (keyword && !String(it.title || '').toLowerCase().includes(keyword)) return false;
-  const saved = Boolean(it.plan);
-  if (tab === 'saved' && !saved) return false;
-  if (tab === 'unsaved' && saved) return false;
-  if (hideSmall && sizeCountOf(it) < 3) return false;
-  return true;
-}
+const PAGE_SIZE = 100;
+let offset = 0;
+let counts = { total: 0, saved: 0 };
+let totalFiltered = 0;
+let loading = false;
+
 function renderStats(){
-  const total = DATA.length;
-  const saved = DATA.filter((it) => it.plan).length;
   const el = document.getElementById('stats');
-  if (el) el.innerHTML = '<span class="b">待拆分 <b>' + total + '</b></span><span class="n">已保存方案 <b>' + saved + '</b></span><span>未保存 <b>' + (total - saved) + '</b></span>';
+  if (el) el.innerHTML = '<span class="b">待拆分 <b>' + counts.total + '</b></span><span class="n">已保存方案 <b>' + counts.saved + '</b></span><span>未保存 <b>' + Math.max(counts.total - counts.saved, 0) + '</b></span>';
 }
-function render(){
-  const list = document.getElementById('list');
-  const items = DATA.filter(passes);
-  list.innerHTML = items.length ? items.map(row).join('') : '<div class="empty">没有符合条件的产品</div>';
-  document.querySelectorAll('#tabs button[data-f]').forEach((b) => b.classList.toggle('on', b.dataset.f === tab));
+function renderTabs(){
+  document.querySelectorAll('#tabs button[data-f]').forEach((b) => {
+    const f = b.dataset.f;
+    const n = f === 'all' ? counts.total : f === 'saved' ? counts.saved : Math.max(counts.total - counts.saved, 0);
+    const label = f === 'all' ? '全部' : f === 'saved' ? '已保存方案' : '未保存方案';
+    b.textContent = label + ' ' + n;
+    b.classList.toggle('on', f === tab);
+  });
   const toggleBtn = document.getElementById('sizeToggle');
   if (toggleBtn) {
     toggleBtn.classList.toggle('on', hideSmall);
     toggleBtn.textContent = hideSmall ? '已隐藏尺码<3（均码不算）· 恢复' : '隐藏尺码<3（均码不算）';
   }
-  const visible = new Set(items.map((x) => String(x.id)));
+}
+function renderPager(){
+  const el = document.getElementById('pager');
+  if (!el) return;
+  const pages = Math.max(Math.ceil(totalFiltered / PAGE_SIZE), 1);
+  const current = Math.floor(offset / PAGE_SIZE) + 1;
+  el.innerHTML = '<button type="button" id="pagePrev"' + (offset <= 0 ? ' disabled' : '') + '>上一页</button>'
+    + '<span>第 ' + current + ' / ' + pages + ' 页 · 共 ' + totalFiltered + ' 条</span>'
+    + '<button type="button" id="pageNext"' + (offset + PAGE_SIZE >= totalFiltered ? ' disabled' : '') + '>下一页</button>';
+}
+function render(){
+  const list = document.getElementById('list');
+  list.innerHTML = DATA.length ? DATA.map(row).join('') : '<div class="empty">没有符合条件的产品</div>';
+  renderTabs();
+  renderStats();
+  renderPager();
+  const visible = new Set(DATA.map((x) => String(x.id)));
   for (const id of [...OPEN]) {
     if (visible.has(id)) attachEditor(id); else closeEditor(id);
   }
 }
+async function loadPage(){
+  if (loading) return;
+  loading = true;
+  try {
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset), filter: tab });
+    if (keyword) params.set('search', keyword);
+    if (hideSmall) params.set('hideSmall', '1');
+    const res = await fetch('/api/bundle-inbox?' + params.toString(), { headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    DATA = Array.isArray(body.items) ? body.items : [];
+    counts = { total: Number(body.total) || 0, saved: Number(body.saved) || 0 };
+    totalFiltered = Number(body.count) || 0;
+    for (const item of DATA) {
+      ITEM.set(String(item.id), item);
+      if (!SPLIT.has(String(item.id))) {
+        const state = item.plan ? normalizePlan(item.plan) : defaultStateFor(item);
+        if (!state.skuMatrix && item.skuMatrix) state.skuMatrix = item.skuMatrix;
+        SPLIT.set(String(item.id), state);
+      }
+    }
+    render();
+  } catch (e) {
+    document.getElementById('list').innerHTML = '<div class="empty">加载失败：' + esc(String((e && e.message) || e)) + '</div>';
+  } finally {
+    loading = false;
+  }
+}
 function wireTabs(){
   const tabsEl = document.getElementById('tabs');
-  tabsEl.innerHTML = [['all', '全部'], ['unsaved', '未保存方案'], ['saved', '已保存方案']].map(([f, label]) => {
-    const n = f === 'all' ? DATA.length : DATA.filter((it) => (f === 'saved' ? Boolean(it.plan) : !it.plan)).length;
-    return '<button type="button" data-f="' + f + '">' + label + ' ' + n + '</button>';
-  }).join('')
+  tabsEl.innerHTML = [['all', '全部'], ['unsaved', '未保存方案'], ['saved', '已保存方案']].map(([f, label]) => '<button type="button" data-f="' + f + '">' + label + '</button>').join('')
     + '<button id="sizeToggle" type="button" title="尺码数少于 3 个的商品将被隐藏；均码不计入尺码数"></button>'
     + '<input id="search" type="search" placeholder="搜索标题…">';
   tabsEl.addEventListener('click', (e) => {
     const f = e.target.closest('button[data-f]');
-    if (f) { tab = f.dataset.f; render(); return; }
-    if (e.target.closest('#sizeToggle')) { hideSmall = !hideSmall; render(); }
+    if (f) {
+      if (tab !== f.dataset.f) { tab = f.dataset.f; offset = 0; void loadPage(); }
+      return;
+    }
+    if (e.target.closest('#sizeToggle')) { hideSmall = !hideSmall; offset = 0; void loadPage(); }
   });
+  let searchTimer = null;
   tabsEl.addEventListener('input', (e) => {
     if (e.target.id !== 'search') return;
     keyword = String(e.target.value || '').trim().toLowerCase();
-    render();
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { offset = 0; void loadPage(); }, 350);
+  });
+  const pagerEl = document.getElementById('pager');
+  pagerEl.addEventListener('click', (e) => {
+    if (e.target.closest('#pagePrev') && offset > 0) { offset = Math.max(offset - PAGE_SIZE, 0); void loadPage(); return; }
+    if (e.target.closest('#pageNext') && offset + PAGE_SIZE < totalFiltered) { offset += PAGE_SIZE; void loadPage(); }
   });
 }
 (async () => {
-  try {
-    const res = await fetch('/api/bundle-inbox?limit=300', { headers: { accept: 'application/json' } });
-    const body = await res.json();
-    DATA = Array.isArray(body.items) ? body.items : [];
-  } catch (e) {
-    document.getElementById('list').innerHTML = '<div class="empty">加载失败：' + esc(String((e && e.message) || e)) + '</div>';
-    return;
-  }
-  for (const item of DATA) {
-    ITEM.set(String(item.id), item);
-    const state = item.plan ? normalizePlan(item.plan) : defaultStateFor(item);
-    if (!state.skuMatrix && item.skuMatrix) state.skuMatrix = item.skuMatrix;
-    SPLIT.set(String(item.id), state);
-  }
   wireTabs();
-  renderStats();
-  render();
+  await loadPage();
 })();
 </script>
 </body>
