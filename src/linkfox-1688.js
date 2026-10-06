@@ -23,6 +23,12 @@ function numberOrNull(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/** Treat zero and negative values as "not provided" for price fields. */
+function positiveNumberOrNull(value) {
+  const parsed = numberOrNull(value);
+  return parsed !== null && parsed > 0 ? parsed : null;
+}
+
 function canonicalOptionKey(attributeNameTrans, attributeName) {
   const en = text(attributeNameTrans).toLowerCase();
   if (en === 'color' || en === 'colour') return 'Color';
@@ -141,13 +147,13 @@ export function buildLinkFoxCapture(raw, { offerId, offerKey }) {
       skuKey: entries.map(([key, value]) => `${key}:${value}`).join('|'),
       skuText,
       options,
-      price: numberOrNull(sku.price) ?? numberOrNull(sku.retailPrice),
+      price: positiveNumberOrNull(sku.price) ?? positiveNumberOrNull(sku.retailPrice),
       stock: numberOrNull(sku.amountOnSale),
       skuId: text(sku.skuId) || null,
-      retailPrice: numberOrNull(sku.retailPrice),
-      foreignCurrencyRetailPrice: numberOrNull(sku.foreignCurrencyRetailPrice),
-      promotionPrice: numberOrNull(sku.promotionPrice),
-      consignPrice: numberOrNull(sku.consignPrice),
+      retailPrice: positiveNumberOrNull(sku.retailPrice),
+      foreignCurrencyRetailPrice: positiveNumberOrNull(sku.foreignCurrencyRetailPrice),
+      promotionPrice: positiveNumberOrNull(sku.promotionPrice),
+      consignPrice: positiveNumberOrNull(sku.consignPrice),
       fenxiaoPriceInfo: sku.fenxiaoPriceInfo ?? null,
       specId: text(sku.specId) || null,
       cargoNumber: text(sku.cargoNumber) || null,
@@ -176,15 +182,15 @@ export function buildLinkFoxCapture(raw, { offerId, offerKey }) {
   const priceCandidates = [];
   for (const row of skuRows) {
     for (const value of [row.price, row.retailPrice]) {
-      if (value !== null && value >= 0) priceCandidates.push(value);
+      if (value !== null && value > 0) priceCandidates.push(value);
     }
   }
   const tiers = (Array.isArray(raw.saleInfo?.priceRanges) ? raw.saleInfo.priceRanges : []).map((tier) => ({
     minQuantity: numberOrNull(tier.startQuantity),
     maxQuantity: null,
-    price: numberOrNull(tier.price),
-    promotionPrice: numberOrNull(tier.promotionPrice),
-    foreignCurrencyPrice: numberOrNull(tier.foreignCurrencyPrice),
+    price: positiveNumberOrNull(tier.price),
+    promotionPrice: positiveNumberOrNull(tier.promotionPrice),
+    foreignCurrencyPrice: positiveNumberOrNull(tier.foreignCurrencyPrice),
   })).filter((tier) => tier.minQuantity !== null && tier.price !== null);
   for (const tier of tiers) priceCandidates.push(tier.price);
   const verifiedPrices = priceCandidates.filter((value) => Number.isFinite(value));

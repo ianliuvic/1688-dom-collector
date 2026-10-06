@@ -2265,8 +2265,8 @@ export function createDatabase(databaseUrl) {
         price_min = COALESCE($4, price_min), price_max = COALESCE($5, price_max)
         WHERE id=$1 RETURNING id`, [productDetailId,
         JSON.stringify(dimensions ?? []), JSON.stringify(skuMatrix ?? {}),
-        Number.isFinite(Number(priceMin)) ? Number(priceMin) : null,
-        Number.isFinite(Number(priceMax)) ? Number(priceMax) : null]);
+        Number.isFinite(Number(priceMin)) && Number(priceMin) > 0 ? Number(priceMin) : null,
+        Number.isFinite(Number(priceMax)) && Number(priceMax) > 0 ? Number(priceMax) : null]);
       if (Array.isArray(skuOptions) && skuOptions.length) {
         // Replace the stored option dimension (colour x size) only when the
         // caller has a complete option list — this is what the translation and

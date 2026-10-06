@@ -971,11 +971,13 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
       }
       const dimensions = capture.data.skuDimensions;
       const skuMatrix = capture.data.skuMatrix;
-      const prices = capture.data.skuRows
-        .map((row) => Number(row.price))
-        .filter((value) => Number.isFinite(value) && value >= 0);
-      const priceMin = prices.length ? Math.min(...prices) : null;
-      const priceMax = prices.length ? Math.max(...prices) : null;
+      // Only a verified positive LinkFox range may touch the stored price
+      // columns; Number(null) must never collapse to 0 here.
+      const linkfoxPrice = capture.data.price ?? {};
+      const priceMin = linkfoxPrice.verified === true && Number(linkfoxPrice.min) > 0
+        ? Number(linkfoxPrice.min) : null;
+      const priceMax = linkfoxPrice.verified === true && Number(linkfoxPrice.max) > 0
+        ? Number(linkfoxPrice.max) : null;
       await db.updateProductSkusFromMatrix(existing.id, {
         rows: capture.data.skuRows, dimensions, skuMatrix, priceMin, priceMax,
         skuOptions: capture.data.skuOptions, source: 'linkfox',
