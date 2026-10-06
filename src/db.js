@@ -1097,7 +1097,8 @@ export function createDatabase(databaseUrl) {
     const all = await pool.query(`${base} SELECT count(*)::int AS total FROM base`, params);
     const distribution = await pool.query(
       `${base} SELECT LEAST(color_count, 6) AS bucket, count(*)::int AS products
-        FROM base WHERE ${wpFilter} GROUP BY 1 ORDER BY 1`, [...params, wpValues]);
+        FROM base WHERE ${wpFilter.replaceAll('$3::text', '$2::text')} GROUP BY 1 ORDER BY 1`,
+      [...params, wpValues]);
     const wpRows = await pool.query(
       `${base} SELECT CASE WHEN coalesce(wp_status,'none') = 'publish' THEN 'publish' ELSE 'unpublished' END AS bucket,
         count(*)::int AS products FROM base WHERE ${colorFilter} GROUP BY 1`, [...params, colorBucket]);
