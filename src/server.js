@@ -1873,7 +1873,6 @@ app.post('/api/product-details/:id/repair-skus-from-matrix', { preHandler: [requ
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const detail = await db.getProductDetail(id).catch(() => null);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
-  if (detail.bundle_status === 'bundle') return reply.code(409).send({ error: 'bundle_product' });
   const targetUrl = detail.canonical_url || detail.source_url
     || (detail.offer_id ? `https://detail.1688.com/offer/${detail.offer_id}.html` : null);
   if (!targetUrl) return reply.code(400).send({ error: 'detail_has_no_source_url' });
