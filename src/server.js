@@ -1103,7 +1103,15 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
   if (!config.linkfoxApiKey) {
     return reply.code(503).send({ error: 'linkfox_not_configured' });
   }
-  const captureAs = body.captureAs === 'merge' ? 'merge' : 'new';
+  const captureMode = ['merge', 'primary'].includes(String(body.captureAs)) ? String(body.captureAs) : 'new';
+  const existingDetail = (await db.listProductDetails({ offerId, limit: 1 }))[0] ?? null;
+  if (captureMode === 'merge' && !existingDetail) {
+    return reply.code(404).send({ error: 'existing_detail_required_for_merge' });
+  }
+  // primary: first-class capture under the real offer id — create it when the
+  // offer has no capture yet, otherwise refresh the existing one (merge).
+  const primaryMerge = captureMode === 'primary' && Boolean(existingDetail);
+  const primaryCreate = captureMode === 'primary' && !existingDetail;
   let raw;
   try {
     raw = await fetchLinkFoxProductDetail({ offerId }, config);
@@ -1115,13 +1123,13 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
     });
   }
 
-  if (captureAs === 'merge') {
-    const existing = (await db.listProductDetails({ offerId, limit: 1 }))[0];
-    if (!existing) return reply.code(404).send({ error: 'existing_detail_required_for_merge' });
+  if (captureMode === 'merge' || primaryMerge) {
+    const existing = existingDetail;
+    const updateSkus = primaryMerge ? body.updateSkus !== false : body.updateSkus === true;
     const extras = linkfoxExtrasForMerge(raw);
     const updated = await db.updateProductLinkFoxData(existing.id, extras);
     let skus = null;
-    if (body.updateSkus === true) {
+    if (updateSkus) {
       // Variant backfill: rewrite the stored colour x size rows (price/stock/
       // skuId), the option dimensions and the matrix from the LinkFox skuList,
       // then re-run the deterministic bundle detector on the fresh data.
@@ -1213,10 +1221,15 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
         priceMin, priceMax, bundle: detection.status, pricesPreserved,
       };
     }
-    return { mode: 'merge', productDetailId: existing.id, fields: Object.keys(extras), updated, skus };
+    return {
+      mode: primaryMerge ? 'primary_merged' : 'merge',
+      productDetailId: existing.id,
+      ...(primaryMerge ? { offerKey: String(offerId) } : {}),
+      fields: Object.keys(extras), updated, skus,
+    };
   }
 
-  const offerKey = `lfx-${offerId}`;
+  const offerKey = primaryCreate ? String(offerId) : `lfx-${offerId}`;
   const capture = buildLinkFoxCapture(raw, { offerId, offerKey });
   let imageFiles;
   try {
@@ -1231,43 +1244,66 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
   const imageTypes = {};
   for (const image of imageFiles) imageTypes[image.type] = (imageTypes[image.type] ?? 0) + 1;
 
-  let mainImageHash = null;
-  const mainImage = imageFiles.find((image) => image.type === 'main');
-  if (mainImage?.storagePath) {
-    try {
-      mainImageHash = await computeImageHashes(await fs.readFile(mainImage.storagePath));
-    } catch (error) {
-      request.log.warn({ err: error }, 'failed to hash the LinkFox main image');
-    }
-  }
-  const duplicateAnalysis = {
-    status: 'linkfox_branch_capture',
-    decision: 'accept',
-    checkedAt: new Date().toISOString(),
-    reason: 'Explicit LinkFox capture; the 1688 browser duplicate gates were not applied.',
-    galleryProfile: {
-      fingerprint: null,
-      sourceImageCount: capture.data.gallery.imageCount,
-      verifiedComplete: false,
-    },
-    mainImageHash,
-  };
   const data = { ...capture.data, localImages: imageFiles };
-  const bundleDetection = detectBundle(data);
-  // A synthetic source url keeps this capture independent from the browser
-  // capture of the same offer (which owns the plain offer URL).
-  const sourceUrl = `https://detail.1688.com/offer/${offerId}.html?capture=linkfox`;
+  let duplicateAnalysis;
+  if (primaryCreate) {
+    // A first-class capture keeps the normal duplicate protection: exact
+    // gallery bytes and the main-image perceptual hash both run here.
+    duplicateAnalysis = await analyzeProductDuplicates({
+      data, imageFiles, database: db, ragClient,
+    });
+    if (duplicateAnalysis.decision === 'reject') {
+      await cleanupRejectedProductImages(imageFiles);
+      return reply.code(409).send({ error: 'rejected_duplicate', duplicateAnalysis });
+    }
+  } else {
+    let mainImageHash = null;
+    const mainImage = imageFiles.find((image) => image.type === 'main');
+    if (mainImage?.storagePath) {
+      try {
+        mainImageHash = await computeImageHashes(await fs.readFile(mainImage.storagePath));
+      } catch (error) {
+        request.log.warn({ err: error }, 'failed to hash the LinkFox main image');
+      }
+    }
+    duplicateAnalysis = {
+      status: 'linkfox_branch_capture',
+      decision: 'accept',
+      checkedAt: new Date().toISOString(),
+      reason: 'Explicit LinkFox capture; the 1688 browser duplicate gates were not applied.',
+      galleryProfile: {
+        fingerprint: null,
+        sourceImageCount: capture.data.gallery.imageCount,
+        verifiedComplete: false,
+      },
+      mainImageHash,
+    };
+  }
+  let bundleDetection;
+  try {
+    bundleDetection = await classifyBundleSemantically({
+      data, title: data.title, config: bundleClassifierConfig(config),
+    });
+  } catch (error) {
+    bundleDetection = detectBundle(data);
+    bundleDetection.analysis = { ...(bundleDetection.analysis ?? {}), detector: 'rules_fallback' };
+  }
+  // The synthetic query keeps a "new" capture independent from the browser
+  // capture of the same offer; a primary capture owns the plain offer URL.
+  const sourceUrl = primaryCreate
+    ? `https://detail.1688.com/offer/${offerId}.html`
+    : `https://detail.1688.com/offer/${offerId}.html?capture=linkfox`;
   const saved = await db.saveProductDetail(data, sourceUrl, imageFiles, duplicateAnalysis, bundleDetection);
-  if (mainImageHash?.dhashHex) {
+  if (duplicateAnalysis.mainImageHash?.dhashHex) {
     try {
       await db.upsertProductMainImageHash({
         offerId: offerKey,
         productDetailId: saved.productDetailId,
         title: data.title ?? null,
         sourceUrl: data.mainImage ?? null,
-        dhashHex: mainImageHash.dhashHex,
-        phashHex: mainImageHash.phashHex,
-        origin: 'linkfox_capture',
+        dhashHex: duplicateAnalysis.mainImageHash.dhashHex,
+        phashHex: duplicateAnalysis.mainImageHash.phashHex,
+        origin: primaryCreate ? 'linkfox_primary' : 'linkfox_capture',
       });
     } catch (error) {
       request.log.error({ err: error }, 'failed to register the LinkFox main image hash');
@@ -1284,7 +1320,7 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
     request.log.error({ err: error }, 'failed to schedule the LinkFox capture RAG sync');
   }
   return {
-    mode: 'new',
+    mode: primaryCreate ? 'primary' : 'new',
     productDetailId: saved.productDetailId,
     offerKey,
     linkfoxOfferId: offerId,
@@ -1295,6 +1331,7 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
     attributes: data.attributes.length,
     price: data.price,
     bundleStatus: bundleDetection.status,
+    duplicateStatus: duplicateAnalysis.status,
   };
 });
 
