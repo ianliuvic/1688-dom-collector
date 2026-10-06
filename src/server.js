@@ -963,15 +963,36 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
   const skuImageByKey = new Map((detail.images ?? [])
     .filter((image) => image.image_type === 'sku')
     .map((image) => [normalizeImageKey(image.source_url), image]));
-  const swatches = (Array.isArray(raw.skuOptions) ? raw.skuOptions : [])
-    .filter((option) => /(颜色|color|colour)/i.test(String(option?.dimensionName ?? '')))
-    .map((option) => {
-      const source = String(option?.image ?? '').trim();
-      const matched = source ? skuImageByKey.get(normalizeImageKey(source)) : null;
-      const base = matched ? imagePublicPath(matched.storage_path) : null;
-      return { value: String(option?.text ?? ''), thumb: base ? `${base}?w=96` : (source || null) };
-    })
-    .filter((swatch) => swatch.value);
+  const rawOptions = Array.isArray(raw.skuOptions) ? raw.skuOptions : [];
+  const translatedPayload = translation?.translated ?? null;
+  const translatedOptions = Array.isArray(translatedPayload?.skuOptions) ? translatedPayload.skuOptions : [];
+  const translatedDimensions = Array.isArray(translatedPayload?.skuDimensions) ? translatedPayload.skuDimensions : [];
+  const translatedByIndex = new Map(translatedOptions.map((option) => [Number(option?.index), option]));
+  const isColour = (name) => /(颜色|color|colour)/i.test(String(name ?? ''));
+  const isSize = (name) => /(尺码|尺寸|码数|size)/i.test(String(name ?? ''));
+  const colourOptions = [];
+  for (const [index, option] of rawOptions.entries()) {
+    if (!isColour(option?.dimensionName)) continue;
+    const translated = translatedByIndex.get(Number(option?.index ?? index));
+    colourOptions.push({
+      value: String(translated?.text ?? option?.text ?? ''),
+      source: String(option?.text ?? ''),
+      imageUrl: translated?.imageUrl ?? option?.image ?? null,
+    });
+  }
+  const swatches = colourOptions.map((option) => {
+    const matched = option.imageUrl ? skuImageByKey.get(normalizeImageKey(option.imageUrl)) : null;
+    const base = matched ? imagePublicPath(matched.storage_path) : null;
+    return {
+      value: option.value,
+      source: option.source && option.source !== option.value ? option.source : null,
+      thumb: base ? `${base}?w=96` : (option.imageUrl || null),
+    };
+  }).filter((swatch) => swatch.value);
+  const sizeDimension = translatedDimensions.find((dimension) => isSize(dimension?.name))
+    ?? (Array.isArray(raw.skuDimensions) ? raw.skuDimensions.find((dimension) => isSize(dimension?.name)) : null);
+  const sizes = (Array.isArray(sizeDimension?.values) ? sizeDimension.values : []).map((value) => String(value));
+  const sizesTranslated = translatedOptions.length > 0 || translatedDimensions.length > 0;
   const galleryImages = (detail.images ?? [])
     .filter((image) => image.image_type === 'main' || image.image_type === 'gallery')
     .sort((left, right) => (left.image_type !== right.image_type
@@ -1033,6 +1054,8 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
     images: {
       gallery: galleryImages,
       swatches,
+      sizes,
+      variantsTranslated: sizesTranslated,
       descriptionCount: (detail.images ?? []).filter((image) => image.image_type === 'description').length,
       publishedImageCount: Array.isArray(publication?.payload?.images) ? publication.payload.images.length : null,
       publishedColorCount: payloadColors.length || null,

@@ -670,9 +670,14 @@ function renderPublishPreview(id, data){
 
   const swatchHtml = (data.images.swatches || []).map((swatch) => '<span class="pp-swatch">'
     + (swatch.thumb ? '<img src="' + esc(swatch.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">' : '')
-    + '<span>' + esc(swatch.value) + '</span></span>').join('');
-  const imagesCard = '<div class="pp-card"><div class="pp-card-title">颜色与图片（发布用）</div>'
+    + '<span>' + esc(swatch.value)
+    + (swatch.source ? ' <span class="pp-muted">(' + esc(swatch.source) + ')</span>' : '')
+    + '</span></span>').join('');
+  const sizesHtml = (data.images.sizes || []).map((size) => '<span class="pp-tag">' + esc(size) + '</span>').join('');
+  const imagesCard = '<div class="pp-card"><div class="pp-card-title">颜色与尺码（'
+    + (data.images.variantsTranslated ? '发布用译文' : '未翻译，显示采集原文') + '）</div>'
     + (swatchHtml ? '<div class="pp-swatches">' + swatchHtml + '</div>' : '<div class="pp-muted">无颜色色卡</div>')
+    + (sizesHtml ? '<div class="pp-row" style="margin-bottom:6px"><span class="pp-muted" style="margin-right:6px">尺码</span><span class="pp-tags">' + sizesHtml + '</span></div>' : '')
     + '<div class="pp-thumbs">' + (data.images.gallery || []).map((image) => '<img src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">').join('') + '</div>'
     + '<div class="pp-muted" style="margin-top:6px">主图+图库 ' + (data.images.gallery || []).length + ' 张 · 详情图 ' + data.images.descriptionCount + ' 张'
     + (data.images.publishedImageCount !== null ? ' · 已发布 ' + data.images.publishedImageCount + ' 张 / 色卡 ' + (data.images.publishedColorCount || 0) + ' / 尺码 ' + (data.images.publishedSizeCount || 0) : '')
