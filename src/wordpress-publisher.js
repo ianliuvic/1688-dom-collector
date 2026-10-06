@@ -203,7 +203,11 @@ function buildColorOptions(detail, translation, overrideIndex = null) {
     if (dimensionName && !['color', '颜色'].includes(dimensionName)) continue;
     const text = clean(option?.text).replace(/^color\s*:\s*/i, '');
     const imageUrl = clean(option?.imageUrl);
-    if (text && imageUrl && !/\b(stock|size|\u5e93\u5b58|\u5c3a\u7801)\b/i.test(text)) optionImages.set(text, imageUrl);
+    // Skip option texts that are really size/stock labels ("Size: M", "库存5"),
+    // but keep genuine colour names that merely mention a size, such as
+    // "BH25254B30 One Size Cover-up".
+    const labelOnly = /^(stock|size|库存|尺码)(\s*[:：].*)?$/i.test(text);
+    if (text && imageUrl && !labelOnly) optionImages.set(text, imageUrl);
   }
   const skuImages = new Map((detail.images ?? [])
     .filter((image) => image.image_type === 'sku')
