@@ -1048,40 +1048,72 @@ export function createDatabase(databaseUrl) {
 
   /** Light catalog listing for the all-products browser page: one row per
    * captured product with its option dimensions (and swatch sources), the
-   * main/gallery/sku image list, price range and WordPress publication state. */
-  async function listProductCatalog({ limit = 100, offset = 0, search = '' } = {}) {
+   * main/gallery/sku image list, price range, WordPress publication state and
+   * the colour-variant count used by the colour filter. */
+  async function listProductCatalog({ limit = 100, offset = 0, search = '', colors = 0 } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
     const safeOffset = Math.max(Number(offset) || 0, 0);
+    const colorBucket = [1, 2, 3, 4, 5].includes(Number(colors)) ? Number(colors)
+      : (Number(colors) === 6 ? 6 : 0);
     const searchTerm = String(search || '').trim().slice(0, 120);
     const params = [searchTerm ? `%${searchTerm}%` : null];
     const where = `($1::text IS NULL OR details.title ILIKE $1 OR details.offer_id ILIKE $1
       OR publications.style_no ILIKE $1 OR publications.external_id ILIKE $1)`;
-    const counts = await pool.query(`SELECT count(*)::int AS total
+    const dimsJson = `(CASE WHEN jsonb_typeof(details.raw_data->'skuDimensions') = 'array'
+      THEN details.raw_data->'skuDimensions' ELSE '[]'::jsonb END)`;
+    const optsJson = `(CASE WHEN jsonb_typeof(details.raw_data->'skuOptions') = 'array'
+      THEN details.raw_data->'skuOptions' ELSE '[]'::jsonb END)`;
+    const colorExpr = `COALESCE(
+      (SELECT CASE WHEN jsonb_typeof(dim->'values') = 'array' THEN jsonb_array_length(dim->'values') ELSE 0 END
+        FROM jsonb_array_elements(${dimsJson}) AS dim
+        WHERE (dim->>'name') ~* '(颜色|color|colour)' LIMIT 1),
+      (SELECT count(DISTINCT opt->>'text')
+        FROM jsonb_array_elements(${optsJson}) AS opt
+        WHERE (opt->>'dimensionName') ~* '(颜色|color|colour)'),
+      CASE WHEN jsonb_array_length(${dimsJson}) > 0 OR jsonb_array_length(${optsJson}) > 0 THEN 1 ELSE 0 END)`;
+    const base = `WITH base AS (
+      SELECT details.id, details.offer_id, details.title,
+        details.price_min, details.price_max, details.currency, details.moq,
+        details.bundle_status, details.first_seen_at, details.last_crawled_at,
+        details.raw_data->'skuOptions' AS sku_options,
+        details.raw_data->'skuDimensions' AS sku_dimensions,
+        publications.style_no, publications.wp_status, publications.wp_url,
+        ${colorExpr} AS color_count
       FROM product_details details
       LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
-      WHERE ${where}`, params);
-    const result = await pool.query(`SELECT details.id, details.offer_id, details.title,
-      details.price_min, details.price_max, details.currency, details.moq,
-      details.bundle_status, details.first_seen_at, details.last_crawled_at,
-      details.raw_data->'skuOptions' AS sku_options,
-      details.raw_data->'skuDimensions' AS sku_dimensions,
-      (SELECT count(*) FROM product_detail_skus skus WHERE skus.product_detail_id=details.id)::int AS sku_rows,
-      publications.style_no, publications.wp_status, publications.wp_url,
-      media.images
-      FROM product_details details
-      LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
+      WHERE ${where})`;
+    const colorFilter = `($2::int = 0
+      OR ($2::int = 6 AND color_count >= 6)
+      OR ($2::int BETWEEN 1 AND 5 AND color_count = $2))`;
+    const counts = await pool.query(`${base} SELECT count(*)::int AS total FROM base WHERE ${colorFilter}`,
+      [...params, colorBucket]);
+    const all = await pool.query(`${base} SELECT count(*)::int AS total FROM base`, params);
+    const distribution = await pool.query(
+      `${base} SELECT LEAST(color_count, 6) AS bucket, count(*)::int AS products
+        FROM base GROUP BY 1 ORDER BY 1`, params);
+    const result = await pool.query(`${base}
+      SELECT base.*,
+        (SELECT count(*) FROM product_detail_skus skus WHERE skus.product_detail_id=base.id)::int AS sku_rows,
+        media.images
+      FROM base
       LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object('id', images.id, 'type', images.image_type,
           'sort', images.sort_order, 'path', images.storage_path, 'source', images.source_url)
           ORDER BY CASE images.image_type WHEN 'main' THEN 0 WHEN 'gallery' THEN 1 ELSE 2 END,
             images.sort_order, images.id) AS images
         FROM product_detail_images images
-        WHERE images.product_detail_id=details.id AND images.image_type IN ('main','gallery','sku')
+        WHERE images.product_detail_id=base.id AND images.image_type IN ('main','gallery','sku')
       ) media ON true
-      WHERE ${where}
-      ORDER BY details.id DESC
-      LIMIT $2 OFFSET $3`, [...params, safeLimit, safeOffset]);
-    return { total: counts.rows[0]?.total ?? 0, limit: safeLimit, offset: safeOffset, items: result.rows };
+      WHERE ${colorFilter}
+      ORDER BY base.id DESC
+      LIMIT $3 OFFSET $4`, [...params, colorBucket, safeLimit, safeOffset]);
+    const colorCounts = {};
+    for (const row of distribution.rows) colorCounts[String(row.bucket)] = Number(row.products);
+    return {
+      total: all.rows[0]?.total ?? 0,
+      filteredTotal: counts.rows[0]?.total ?? 0,
+      colorCounts, limit: safeLimit, offset: safeOffset, items: result.rows,
+    };
   }
 
   async function listBundleInbox({ limit = 100, offset = 0, filter = 'all', search = '', hideSmall = false } = {}) {

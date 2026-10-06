@@ -18,6 +18,10 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .tabs button.on{background:var(--text);color:#fff;border-color:var(--text)}
 .tabs .label{font-size:12px;color:var(--muted)}
 #search{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 12px;font-size:13px;min-width:240px;outline:none}
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 24px 2px;max-width:1500px;margin:0 auto}
+.filters .label{font-size:12px;color:var(--muted)}
+.filters button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:4px 12px;cursor:pointer;font-size:12.5px;color:var(--text)}
+.filters button.on{background:var(--info);border-color:var(--info);color:#fff}
 main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width:1500px;margin:0 auto}
 .row{display:grid;grid-template-columns:96px 200px minmax(0,1fr) 260px;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;align-items:start}
 .row.is-bundle{border-left:4px solid var(--bundle)}
@@ -60,13 +64,12 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
   <p class="sub">采集器当前保存的全部商品（只读）。每行显示商品名称、各变体选项的名称与图片（颜色显示来源图，尺码为文字）、价格区间、变体组合数、图库缩略图与 wearhongxiu 发布状态。支持按标题、offer、款式号搜索。</p>
   <div class="nav">
     <a href="/products" class="on">全部产品</a>
-    <a href="/bundle-inbox">捆绑待拆分</a>
-    <a href="/bundle-check">拆分检查</a>
     <a href="/dashboard">控制台</a>
   </div>
   <div class="stats" id="stats"></div>
 </header>
 <nav class="tabs" id="tabs"></nav>
+<nav class="filters" id="filters"></nav>
 <div class="pager" id="pager"></div>
 <main id="list"><div class="empty">加载中…</div></main>
 <script>
@@ -75,6 +78,9 @@ let pageSize = Number(localStorage.getItem('hx_products_page_size')) || 100;
 if (![100, 200, 300].includes(pageSize)) pageSize = 100;
 let offset = 0;
 let totalFiltered = 0;
+let totalAll = 0;
+let colorCounts = {};
+let colors = 0;
 let keyword = '';
 let loading = false;
 
@@ -131,7 +137,7 @@ function row(it){
     + '<div class="dims">' + (it.dims.length ? it.dims.map(dimRow).join('') : '<div class="muted" style="font-size:12px;color:var(--muted)">（无变体选项）</div>') + '</div></div>'
     + '<div class="side">'
     + '<div class="line"><b>' + priceText(it) + '</b>' + (it.moq != null ? ' <span class="muted">· 起订 ' + it.moq + '</span>' : '') + '</div>'
-    + '<div class="line">变体组合 <b>' + it.skuRows + '</b> 条 · 图库 ' + (it.gallery || []).length + ' 张</div>'
+    + '<div class="line">颜色 <b>' + (it.colorCount || 0) + '</b> · 变体组合 <b>' + it.skuRows + '</b> 条 · 图库 ' + (it.gallery || []).length + ' 张</div>'
     + (it.wpUrl ? '<div class="muted"><a href="' + esc(it.wpUrl) + '" target="_blank" rel="noopener">查看线上页面</a></div>' : '')
     + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
     + '</div></article>';
@@ -141,10 +147,26 @@ function renderStats(){
   if (!el) return;
   const bundles = DATA.filter((x) => x.status === 'bundle').length;
   const published = DATA.filter((x) => x.wpStatus === 'publish').length;
-  el.innerHTML = '<span>共 <b>' + totalFiltered + '</b> 个产品</span>'
+  el.innerHTML = '<span>筛选后 <b>' + totalFiltered + '</b> / 全部 <b>' + totalAll + '</b> 个产品</span>'
     + '<span>本页 <b>' + DATA.length + '</b></span>'
     + '<span class="b">本页捆绑 <b>' + bundles + '</b></span>'
     + '<span class="n">本页已发布 <b>' + published + '</b></span>';
+}
+function colorLabel(value){
+  return value === 6 ? '6+ 色' : value + ' 色';
+}
+function renderFilters(){
+  const el = document.getElementById('filters');
+  if (!el) return;
+  const total = Object.values(colorCounts).reduce((sum, n) => sum + Number(n || 0), 0);
+  const parts = ['<span class="label">颜色变体数量：</span>',
+    '<button type="button" data-colors="0"' + (colors === 0 ? ' class="on"' : '') + '>全部 (' + total + ')</button>'];
+  for (const value of [1, 2, 3, 4, 5, 6]) {
+    const count = Number(colorCounts[String(value)] || 0);
+    parts.push('<button type="button" data-colors="' + value + '"' + (colors === value ? ' class="on"' : '')
+      + '>' + colorLabel(value) + ' (' + count + ')</button>');
+  }
+  el.innerHTML = parts.join('');
 }
 function renderPager(){
   const el = document.getElementById('pager');
@@ -164,6 +186,7 @@ function render(){
   const list = document.getElementById('list');
   list.innerHTML = DATA.length ? DATA.map(row).join('') : '<div class="empty">没有符合条件的产品</div>';
   renderStats();
+  renderFilters();
   renderPager();
   renderTabs();
 }
@@ -173,11 +196,14 @@ async function loadPage(){
   try {
     const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
     if (keyword) params.set('search', keyword);
+    if (colors) params.set('colors', String(colors));
     const res = await fetch('/api/product-catalog?' + params.toString(), { headers: { accept: 'application/json' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const body = await res.json();
     DATA = Array.isArray(body.items) ? body.items : [];
     totalFiltered = Number(body.count) || 0;
+    totalAll = Number(body.total) || totalFiltered;
+    colorCounts = body.colorCounts || {};
     render();
   } catch (e) {
     document.getElementById('list').innerHTML = '<div class="empty">加载失败：' + esc(String((e && e.message) || e)) + '</div>';
@@ -215,8 +241,22 @@ function wireTabs(){
     if (e.target.closest('#pageNext') && offset + pageSize < totalFiltered) { offset += pageSize; void loadPage(); }
   });
 }
+function wireFilters(){
+  const el = document.getElementById('filters');
+  if (!el) return;
+  el.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-colors]');
+    if (!btn) return;
+    const next = Number(btn.dataset.colors);
+    if (next === colors) return;
+    colors = next;
+    offset = 0;
+    void loadPage();
+  });
+}
 (async () => {
   wireTabs();
+  wireFilters();
   await loadPage();
 })();
 </script>

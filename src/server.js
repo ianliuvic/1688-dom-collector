@@ -2305,6 +2305,7 @@ function toProductCatalogItem(row) {
     currency: row.currency || 'CNY',
     moq: row.moq === null ? null : Number(row.moq),
     skuRows: row.sku_rows ?? 0,
+    colorCount: Number(row.color_count) || 0,
     styleNo: row.style_no || null,
     wpStatus: row.wp_status || null,
     wpUrl: row.wp_url || null,
@@ -2315,13 +2316,17 @@ function toProductCatalogItem(row) {
 }
 
 app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async (request) => {
+  const colorsRaw = String(request.query?.colors ?? '').trim();
+  const colors = /^[0-6]$/.test(colorsRaw) ? Number(colorsRaw) : 0;
   const result = await db.listProductCatalog({
     limit: request.query?.limit ?? 100,
     offset: request.query?.offset ?? 0,
     search: request.query?.search ?? '',
+    colors,
   });
   return {
-    count: result.total, total: result.total,
+    count: result.filteredTotal, total: result.total,
+    colorCounts: result.colorCounts,
     limit: result.limit, offset: result.offset,
     items: result.items.map(toProductCatalogItem),
   };
