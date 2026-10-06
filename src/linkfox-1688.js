@@ -47,6 +47,55 @@ function parseDescriptionImages(html) {
   return urls;
 }
 
+function linkfoxEndpoint(gateway) {
+  const base = String(gateway || DEFAULT_GATEWAY).replace(/\/+$/, '');
+  return `${base}/alibaba1688/productDetail`;
+}
+
+/** Fetch one 1688 product record through the LinkFox gateway. */
+export async function fetchLinkFoxProductDetail({ offerId }, config = {}) {
+  const apiKey = String(config?.linkfoxApiKey || '').trim();
+  if (!apiKey) throw new Error('LINKFOX_API_KEY is not configured.');
+  const response = await fetch(linkfoxEndpoint(config.linkfoxGateway), {
+    method: 'POST',
+    headers: {
+      authorization: apiKey,
+      'content-type': 'application/json',
+      'user-agent': 'LinkFox-Skill/2.0',
+    },
+    body: JSON.stringify({ offerId: String(offerId) }),
+    signal: AbortSignal.timeout(150000),
+  });
+  const rawText = await response.text();
+  let body = null;
+  try {
+    body = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    body = null;
+  }
+  if ([401, 402, 403].includes(response.status)) {
+    const error = new Error(`LinkFox access blocked (HTTP ${response.status}).`);
+    error.providerAccess = true;
+    error.status = response.status;
+    throw error;
+  }
+  if (!response.ok) {
+    const error = new Error(String(body?.errmsg || body?.message || `LinkFox HTTP ${response.status}`));
+    error.status = response.status;
+    throw error;
+  }
+  if (!body) throw new Error('LinkFox returned an empty response.');
+  if (body.errcode && Number(body.errcode) !== 200) {
+    const error = new Error(String(body.errmsg || 'LinkFox returned an error.'));
+    error.status = 502;
+    throw error;
+  }
+  if (String(body.offerId ?? '') !== String(offerId)) {
+    throw new Error('LinkFox response offerId mismatch.');
+  }
+  return body;
+}
+
 /** Normalize the LinkFox response into the collector product shape plus an image download plan. */
 export function buildLinkFoxCapture(raw, { offerId, offerKey }) {
   const skuList = Array.isArray(raw.skuList) ? raw.skuList : [];
