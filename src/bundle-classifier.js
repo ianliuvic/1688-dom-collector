@@ -115,7 +115,7 @@ ${lines.join('\n')}
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
       temperature: 0,
-      max_tokens: 3000,
+      max_tokens: 384000,
     }, config.reasoningEffort)),
     signal: AbortSignal.timeout(120000),
   });

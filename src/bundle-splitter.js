@@ -11,7 +11,7 @@ import { applyReasoning } from './model-request.js';
 
 const SIZE_RE = /(尺码|尺寸|码数|size)/i;
 const COLOR_RE = /(颜色|color|colour)/i;
-const MAX_IMAGES = 24;
+const MAX_IMAGES = 40;
 const MAX_PRODUCTS = 6;
 const FALLBACK_BASE_URL = 'https://api.deepseek.com';
 
@@ -185,7 +185,7 @@ ${input.images.map((image) => `${image.index}. ${image.type}`).join('\n')}`;
         messages: [{ role: 'user', content }],
         response_format: { type: 'json_object' },
         temperature: 0,
-        max_tokens: 6000,
+        max_tokens: 384000,
       }, config.reasoningEffort)),
       signal: AbortSignal.timeout(180000),
     });
