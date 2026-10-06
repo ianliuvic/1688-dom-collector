@@ -435,13 +435,15 @@ function renderSplitPanel(id, plan){
   const panel = document.getElementById('split-panel-' + id);
   const item = splitItem(id);
   if (!panel || !item) return;
-  if (!plan) {
+  const resolved = plan === undefined ? SPLITS.get(String(id)) : plan;
+  if (!resolved) {
     panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 捆绑拆分</b>'
       + '<button type="button" data-split-run="' + id + '">开始 LLM 拆分分析</button>'
       + '<button type="button" data-split-close="' + id + '">收起</button>'
       + '<span class="sp-status" id="split-status-' + id + '">尚未拆分：模型将查看图片与选项文本自动分组（约 20–60 秒）</span></div>';
     return;
   }
+  plan = resolved;
   SPLITS.set(String(id), plan);
   const products = plan.products || [];
   const n = products.length;
