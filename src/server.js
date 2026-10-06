@@ -978,6 +978,24 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
         ? Number(linkfoxPrice.min) : null;
       const priceMax = linkfoxPrice.verified === true && Number(linkfoxPrice.max) > 0
         ? Number(linkfoxPrice.max) : null;
+      // LinkFox sometimes publishes only tier prices; keep any per-SKU price
+      // the previous rows already had so the variant table does not lose it.
+      const fresh = await db.getProductDetail(existing.id);
+      const priorPrices = new Map();
+      for (const row of fresh?.skus ?? []) {
+        const value = Number(row.price);
+        if (row.sku_key && Number.isFinite(value) && value > 0) priorPrices.set(String(row.sku_key), value);
+      }
+      let pricesPreserved = 0;
+      for (const row of capture.data.skuRows) {
+        if (row.price === null || row.price === undefined) {
+          const prior = priorPrices.get(String(row.skuKey));
+          if (prior) {
+            row.price = prior;
+            pricesPreserved += 1;
+          }
+        }
+      }
       await db.updateProductSkusFromMatrix(existing.id, {
         rows: capture.data.skuRows, dimensions, skuMatrix, priceMin, priceMax,
         skuOptions: capture.data.skuOptions, source: 'linkfox',
@@ -988,7 +1006,7 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
       await db.saveProductBundleStatus(existing.id, detection);
       skus = {
         rows: capture.data.skuRows.length, dimensions: dimensions.map((dimension) => dimension.name),
-        priceMin, priceMax, bundle: detection.status,
+        priceMin, priceMax, bundle: detection.status, pricesPreserved,
       };
     }
     return { mode: 'merge', productDetailId: existing.id, fields: Object.keys(extras), updated, skus };
