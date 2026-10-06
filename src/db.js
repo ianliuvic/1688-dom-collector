@@ -202,6 +202,7 @@ export function createDatabase(databaseUrl) {
         raw_data jsonb NOT NULL DEFAULT '{}'::jsonb,
         UNIQUE (product_detail_id, sku_key)
       );
+      ALTER TABLE product_detail_skus ADD COLUMN IF NOT EXISTS sku_id text;
       CREATE TABLE IF NOT EXISTS product_detail_attributes (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -904,10 +905,10 @@ export function createDatabase(databaseUrl) {
       }
       for (const [index, sku] of (data.skuRows ?? []).entries()) {
         await client.query(`INSERT INTO product_detail_skus
-          (product_detail_id, sku_key, sku_text, price, stock, option_data, raw_data)
-          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [detailId, String(sku.skuKey ?? sku.skuText ?? index),
+          (product_detail_id, sku_key, sku_text, price, stock, option_data, raw_data, sku_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [detailId, String(sku.skuKey ?? sku.skuText ?? index),
           sku.skuText ?? sku.text ?? null, sku.price ?? null, sku.stock ?? null,
-          JSON.stringify(sku.options ?? {}), JSON.stringify(sku)]);
+          JSON.stringify(sku.options ?? {}), JSON.stringify(sku), sku.skuId ?? null]);
       }
       for (const [index, attribute] of (data.attributes ?? []).entries()) {
         await client.query(`INSERT INTO product_detail_attributes
@@ -2241,11 +2242,11 @@ export function createDatabase(databaseUrl) {
       await client.query('DELETE FROM product_detail_skus WHERE product_detail_id=$1', [productDetailId]);
       for (const [index, sku] of rows.entries()) {
         await client.query(`INSERT INTO product_detail_skus
-          (product_detail_id, sku_key, sku_text, price, stock, option_data, raw_data)
-          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [productDetailId,
+          (product_detail_id, sku_key, sku_text, price, stock, option_data, raw_data, sku_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [productDetailId,
           String(sku.skuKey ?? sku.skuText ?? index), sku.skuText ?? null,
           sku.price ?? null, sku.stock ?? null,
-          JSON.stringify(sku.options ?? {}), JSON.stringify(sku)]);
+          JSON.stringify(sku.options ?? {}), JSON.stringify(sku), sku.skuId ?? null]);
       }
       const updated = await client.query(`UPDATE product_details SET
         raw_data = jsonb_set(jsonb_set(coalesce(raw_data,'{}'::jsonb), '{skuDimensions}', $2::jsonb, true), '{skuMatrix}', $3::jsonb, true),

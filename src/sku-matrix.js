@@ -36,6 +36,7 @@ export function buildSkuRowsFromSkuModel(model) {
       options,
       price: row?.price != null && row.price !== '' && Number.isFinite(Number(row.price)) ? Number(row.price) : null,
       stock: row?.stock != null && row.stock !== '' && Number.isFinite(Number(row.stock)) ? Number(row.stock) : null,
+      skuId: row?.skuId != null ? String(row.skuId) : null,
     });
   }
   return rows;
