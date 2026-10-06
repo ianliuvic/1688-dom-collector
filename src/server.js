@@ -765,14 +765,25 @@ async function runBundleRecheckJob(job, { mode, limit, concurrency = 6 }) {
         };
         let detection;
         if (mode === 'llm') {
-          try {
-            detection = await classifyBundleSemantically({
-              data, title: row.title, config: bundleClassifierConfig(config),
-            });
-          } catch (error) {
-            job.modelErrors += 1;
-            detection = detectBundle(data);
-            detection.analysis = { ...(detection.analysis ?? {}), detector: 'rules_fallback', error: String(error.message || error).slice(0, 200) };
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            try {
+              detection = await classifyBundleSemantically({
+                data, title: row.title, config: bundleClassifierConfig(config),
+              });
+              break;
+            } catch (error) {
+              if (attempt < 2) {
+                await new Promise((resolve) => setTimeout(resolve, 2500));
+                continue;
+              }
+              job.modelErrors += 1;
+              if (job.fallbackIds.length < 500) job.fallbackIds.push(row.id);
+              detection = detectBundle(data);
+              detection.analysis = {
+                ...(detection.analysis ?? {}), detector: 'rules_fallback',
+                error: String(error.message || error).slice(0, 200),
+              };
+            }
           }
         } else {
           detection = detectBundle(data);
@@ -811,7 +822,7 @@ app.post('/api/bundle-audit/recheck-all', { preHandler: requireApiKey }, async (
   const id = crypto.randomUUID();
   const job = {
     id, mode, status: 'running', scanned: 0, bundles: 0, clear: 0, changed: 0,
-    bundleToClear: 0, clearToBundle: 0, manualSkipped: 0, modelErrors: 0,
+    bundleToClear: 0, clearToBundle: 0, manualSkipped: 0, modelErrors: 0, fallbackIds: [],
     samples: [], createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), completedAt: null,
   };
   bundleRecheckJobs.set(id, job);
