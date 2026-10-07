@@ -2421,13 +2421,21 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
-  /** Merge per-split-product WordPress results into the stored contents. */
+  /** Merge per-split-product WordPress results (and reviewed copy) into the stored contents. */
   async function mergeSplitContentWpResults(productDetailId, entries) {
     const record = await getSplitContents(productDetailId);
     if (!record?.result?.products) return null;
-    const byId = new Map((entries ?? []).map((entry) => [String(entry.productId), entry.wp]));
-    const products = record.result.products.map((product) => (byId.has(String(product.id))
-      ? { ...product, wp: byId.get(String(product.id)) } : product));
+    const byId = new Map((entries ?? []).map((entry) => [String(entry.productId), entry]));
+    const products = record.result.products.map((product) => {
+      const entry = byId.get(String(product.id));
+      if (!entry) return product;
+      const next = { ...product };
+      if (entry.wp) next.wp = entry.wp;
+      const fields = entry.fields ?? {};
+      if (fields.title) next.title = fields.title;
+      if (fields.description) next.description = fields.description;
+      return next;
+    });
     return saveSplitContents(productDetailId, { ...record.result, products }, record.model);
   }
 

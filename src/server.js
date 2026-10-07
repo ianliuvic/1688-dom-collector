@@ -1782,8 +1782,16 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
               job.keeperUpdated += 1;
             }
             const wpEntries = [
-              ...(result.keeper ? [{ productId: result.keeper.productId, wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' } }] : []),
-              ...result.created.map((item) => ({ productId: item.productId, wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status, categoryId: item.categoryId, role: 'split' } })),
+              ...(result.keeper ? [{
+                productId: result.keeper.productId,
+                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' },
+                fields: { title: result.keeper.title, description: result.keeper.description },
+              }] : []),
+              ...result.created.map((item) => ({
+                productId: item.productId,
+                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status, categoryId: item.categoryId, role: 'split' },
+                fields: { title: item.title, description: item.description },
+              })),
             ];
             if (wpEntries.length) await db.mergeSplitContentWpResults(productDetailId, wpEntries);
             job.bundles += 1;
@@ -1918,8 +1926,16 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
               }
             }
             const wpEntries = [
-              ...(result.keeper ? [{ productId: result.keeper.productId, wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' } }] : []),
-              ...publishedCreates.map((item) => ({ productId: item.productId, wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split' } })),
+              ...(result.keeper ? [{
+                productId: result.keeper.productId,
+                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' },
+                fields: { title: result.keeper.title, description: result.keeper.description },
+              }] : []),
+              ...publishedCreates.map((item) => ({
+                productId: item.productId,
+                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split' },
+                fields: { title: item.title, description: item.description },
+              })),
             ];
             if (wpEntries.length) await db.mergeSplitContentWpResults(productDetailId, wpEntries);
             job.bundles += 1;

@@ -959,7 +959,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
     });
     results.keeper = {
-      productId: keeper.id, title: keeperTitle, styleNo: publication.style_no,
+      productId: keeper.id, title: keeperTitle, description: keeperDescription, styleNo: publication.style_no,
       postId: synced.post_id ?? publication.wp_post_id, url: synced.permalink ?? publication.wp_url,
       status: synced.status ?? 'publish', imageCount: images.length, skippedImages: skipped.length,
       dedupedImages: deduped,
@@ -1038,7 +1038,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
       });
       results.created.push({
-        productId: content.id, title, styleNo, categoryId, categoryName,
+        productId: content.id, title, description, styleNo, categoryId, categoryName,
         postId: synced.post_id ?? null, url: synced.permalink ?? null, status: synced.status ?? 'draft',
         imageCount: images.length, skippedImages: skipped.length, dedupedImages: deduped,
       });
