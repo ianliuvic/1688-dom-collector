@@ -44,11 +44,17 @@ export function allocateBestSellerSlots(groups, target) {
   return rows;
 }
 
+// Shops that must not appear in Best Sellers for now (by shop domain).
+// 兴城市尤优制衣厂 — excluded on request; remove the domain to include it again.
+const EXCLUDED_BEST_SELLER_DOMAINS = new Set(['shop60h73866i1702.1688.com']);
+
 export function selectBestSellers(candidates, target = 48, { random = Math.random, girlsSwimMax = 5 } = {}) {
   const unique = new Map();
   for (const candidate of candidates ?? []) {
     const postId = numeric(candidate.wp_post_id);
     if (!postId || unique.has(postId)) continue;
+    const domain = String(candidate.domain ?? '').trim().toLowerCase();
+    if (domain && EXCLUDED_BEST_SELLER_DOMAINS.has(domain)) continue;
     unique.set(postId, { ...candidate, wp_post_id: postId });
   }
 
