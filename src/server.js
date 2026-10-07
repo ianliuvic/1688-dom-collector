@@ -2143,6 +2143,53 @@ async function stripNonProductDetailImages({ detail, contents, config }) {
   return { removed, considered: items.length, nonProduct: junkKeys.size, errors };
 }
 
+/** Publish one bundle's split contents and persist every WordPress result. */
+async function syncSplitBundle({ productDetailId, detail, publication, contents, plan }) {
+  const result = await publishSplitProductsToWordPress({
+    detail, contents, publication, plan, skipReview: true, config,
+  });
+  if (result.keeper) {
+    const keeperPayload = result.keeper.payload;
+    const syncHash = crypto.createHash('sha256').update(JSON.stringify(keeperPayload)).digest('hex');
+    await db.saveWordPressPublication(productDetailId, {
+      translationId: publication.translation_id,
+      externalId: publication.external_id,
+      styleNo: result.keeper.styleNo ?? publication.style_no,
+      wpPostId: result.keeper.postId,
+      wpUrl: result.keeper.url,
+      wpEditUrl: publication.wp_edit_url,
+      wpStatus: 'publish',
+      syncHash, payload: keeperPayload,
+      result: { ...(publication.result ?? {}), split_sync: true },
+      lastError: null,
+    });
+  }
+  const publicationDate = detail.publication_date ? new Date(detail.publication_date).toISOString() : null;
+  const publishedCreates = [];
+  for (const created of result.created ?? []) {
+    if (!created.postId) continue;
+    await setWordPressProductStatus({ postId: created.postId, status: 'publish', config }).catch(() => {});
+    if (publicationDate) {
+      await setWordPressProductPublicationDate({ postId: created.postId, publicationDate, config }).catch(() => {});
+    }
+    publishedCreates.push({ ...created, status: 'publish' });
+  }
+  const wpEntries = [
+    ...(result.keeper ? [{
+      productId: result.keeper.productId,
+      wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper', externalId: result.keeper.externalId },
+      fields: { title: result.keeper.title, description: result.keeper.description },
+    }] : []),
+    ...publishedCreates.map((item) => ({
+      productId: item.productId,
+      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId },
+      fields: { title: item.title, description: item.description },
+    })),
+  ];
+  if (wpEntries.length) await db.mergeSplitContentWpResults(productDetailId, wpEntries);
+  return { result, publishedCreates };
+}
+
 /** Bundle products: split first, then continue as regular split products. */
 async function runBundlePipelineStep({ detail, status, publish, refreshSplit = false, run }) {  const planRecord = await db.getProductSplitPlan(detail.id);
   let plan = !refreshSplit && planRecord?.plan?.products?.length ? planRecord.plan : null;
@@ -2661,49 +2708,9 @@ app.post('/api/wordpress/split-swatches/repair', { preHandler: requireApiKey }, 
               await db.saveSplitContents(productDetailId, contents.result, contents.model ?? null);
               job.strippedImages += cleaned.removed;
             }
-            const result = await publishSplitProductsToWordPress({
-              detail, contents: contents.result, publication,
-              plan: planRow?.plan ?? null, skipReview: true, config,
+            const { publishedCreates } = await syncSplitBundle({
+              productDetailId, detail, publication, contents: contents.result, plan: planRow?.plan ?? null,
             });
-            if (result.keeper) {
-              const keeperPayload = result.keeper.payload;
-              const syncHash = crypto.createHash('sha256').update(JSON.stringify(keeperPayload)).digest('hex');
-              await db.saveWordPressPublication(productDetailId, {
-                translationId: publication.translation_id,
-                externalId: publication.external_id,
-                styleNo: result.keeper.styleNo ?? publication.style_no,
-                wpPostId: result.keeper.postId,
-                wpUrl: result.keeper.url,
-                wpEditUrl: publication.wp_edit_url,
-                wpStatus: 'publish',
-                syncHash, payload: keeperPayload,
-                result: { ...(publication.result ?? {}), split_swatch_repair: true },
-                lastError: null,
-              });
-            }
-            const publicationDate = detail.publication_date ? new Date(detail.publication_date).toISOString() : null;
-            const publishedCreates = [];
-            for (const created of result.created ?? []) {
-              if (!created.postId) continue;
-              await setWordPressProductStatus({ postId: created.postId, status: 'publish', config }).catch(() => {});
-              if (publicationDate) {
-                await setWordPressProductPublicationDate({ postId: created.postId, publicationDate, config }).catch(() => {});
-              }
-              publishedCreates.push({ ...created, status: 'publish' });
-            }
-            const wpEntries = [
-              ...(result.keeper ? [{
-                productId: result.keeper.productId,
-                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper', externalId: result.keeper.externalId },
-                fields: { title: result.keeper.title, description: result.keeper.description },
-              }] : []),
-              ...publishedCreates.map((item) => ({
-                productId: item.productId,
-                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId },
-                fields: { title: item.title, description: item.description },
-              })),
-            ];
-            if (wpEntries.length) await db.mergeSplitContentWpResults(productDetailId, wpEntries);
             job.bundles += 1;
             job.siblings += publishedCreates.length;
           } catch (error) {
@@ -2728,6 +2735,89 @@ app.post('/api/wordpress/split-swatches/repair', { preHandler: requireApiKey }, 
 
 app.get('/api/wordpress/split-swatch-repair-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = splitSwatchRepairJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+// Full variant repair for every published split product: re-runs the variant
+// normalization (swatch text/code/image, sizes, SKUs — model calls per split
+// product), strips non-product detail images, saves the refreshed contents and
+// re-syncs the WordPress pages. Parallel (6-way) and idempotent.
+const splitVariantRepairJobs = new Map();
+
+app.post('/api/wordpress/split-variants/repair', { preHandler: requireApiKey }, async (_request, reply) => {
+  if ([...splitVariantRepairJobs.values()].some((job) => job.status === 'running')) {
+    return reply.code(409).send({ error: 'split_variant_repair_already_running' });
+  }
+  const job = {
+    id: crypto.randomUUID(), status: 'running', total: 0, processed: 0, bundles: 0,
+    siblings: 0, strippedImages: 0, failed: 0, createdAt: new Date().toISOString(), completedAt: null, errors: [],
+  };
+  splitVariantRepairJobs.set(job.id, job);
+  trimTerminalJobs(splitVariantRepairJobs);
+  (async () => {
+    try {
+      const rows = await db.listSplitPublishableBundles({ limit: 2000, offset: 0 });
+      job.total = rows.length;
+      let next = 0;
+      const workers = Array.from({ length: Math.min(6, rows.length) }, async () => {
+        while (true) {
+          const index = next++;
+          if (index >= rows.length) return;
+          const productDetailId = Number(rows[index].product_detail_id);
+          job.processed += 1;
+          try {
+            const detail = await db.getProductDetail(productDetailId);
+            const publication = await db.getWordPressPublication(productDetailId);
+            const contentsRecord = await db.getSplitContents(productDetailId);
+            const planRow = await db.getProductSplitPlan(productDetailId).catch(() => null);
+            if (!detail || !publication?.payload || !contentsRecord?.result?.products?.length
+                || !planRow?.plan?.products?.length) {
+              job.failed += 1;
+              job.errors.push({ productDetailId, message: 'missing plan/contents/publication' });
+              continue;
+            }
+            const contents = await normalizeSplitContents({
+              detail,
+              plan: planRow.plan,
+              contents: contentsRecord.result,
+              styleNo: publication?.style_no ?? null,
+              config: {
+                apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+                model: config.complexModel, reasoningEffort: config.reasoningEffort,
+              },
+              baseUrl: config.publicBaseUrl,
+            });
+            const cleaned = await stripNonProductDetailImages({ detail, contents, config })
+              .catch(() => ({ removed: 0 }));
+            if (cleaned.removed) job.strippedImages += cleaned.removed;
+            await db.saveSplitContents(productDetailId, contents, config.complexModel ?? null);
+            const { publishedCreates } = await syncSplitBundle({
+              productDetailId, detail, publication, contents, plan: planRow.plan,
+            });
+            job.bundles += 1;
+            job.siblings += publishedCreates.length;
+          } catch (error) {
+            job.failed += 1;
+            if (job.errors.length < 100) {
+              job.errors.push({ productDetailId, message: String(error?.message || error).slice(0, 180) });
+            }
+          }
+        }
+      });
+      await Promise.all(workers);
+      job.status = job.failed ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 200);
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress/split-variant-repair-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = splitVariantRepairJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
