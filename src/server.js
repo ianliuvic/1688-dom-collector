@@ -1779,6 +1779,9 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
                 lastError: null,
               });
               job.keeperUpdated += 1;
+              if (result.keeper.renumbered) {
+                try { await scheduleProductRagSync(productDetailId, { trigger: 'wordpress_split_renumber' }); } catch { /* keep publishing */ }
+              }
             }
             const wpEntries = [
               ...(result.keeper ? [{
@@ -1903,6 +1906,9 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
                 result: { ...(publication.result ?? {}), split_publish: true },
                 lastError: null,
               });
+              if (result.keeper.renumbered) {
+                try { await scheduleProductRagSync(productDetailId, { trigger: 'wordpress_split_renumber' }); } catch { /* keep publishing */ }
+              }
             }
             // Publish the draft split products and keep the source date.
             const publicationDate = detail.publication_date

@@ -875,6 +875,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     } catch { /* keep the list as-is when hashing fails */ }
     const images = [];
     const skipped = [];
+    const altFixes = [];
     let index = 0;
     for (const image of rows) {
       const attachment = attachmentFor(image.source_url);
@@ -883,6 +884,9 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
           attachment_id: Number(attachment.attachment_id), alt: altText,
           source_url: clean(image.source_url), url: clean(attachment.url),
         });
+        if (clean(attachment.alt) !== altText) {
+          altFixes.push({ attachmentId: Number(attachment.attachment_id), alt: altText });
+        }
         index += 1;
         continue;
       }
@@ -908,6 +912,16 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       }
       index += 1;
     }
+    // Refresh the alt text of reused attachments so gallery copy follows the
+    // reviewed product name (best-effort; a failure never blocks publishing).
+    for (const fix of altFixes) {
+      try {
+        await wp(`/wp-json/wp/v2/media/${fix.attachmentId}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ alt_text: fix.alt }),
+        });
+      } catch { /* keep publishing */ }
+    }
     return { images, skipped, deduped };
   };
 
@@ -924,20 +938,36 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   const buildSizes = (content) => (content.sizes ?? []).map((size) => ({ label: size.text || size.source, value: size.source || size.text }));
 
-  const buildSkuRows = (content) => (content.skus ?? []).map((sku, index) => ({
-    index,
-    source_sku_key: `${sku.colour ?? ''}|${sku.size ?? ''}`,
-    label: sku.sizeText ?? sku.size ?? '',
-    options: { Color: sku.colour ?? '', Size: sku.sizeText ?? sku.size ?? '' },
-    source_options: { Color: sku.colour ?? '', Size: sku.size ?? '' },
-    color: sku.colour ?? '',
-    size: sku.sizeText ?? sku.size ?? '',
-    source_price: sku.price ?? null,
-    source_currency: clean(template.source?.currency) || 'CNY',
-    source_stock: sku.stock ?? null,
-    supplier_sku: sku.sku ?? null,
-    available: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock) > 0,
-  }));
+  const buildSkuRows = (content, styleNo) => {
+    const used = new Map();
+    return (content.skus ?? []).map((sku, index) => {
+      const segments = [sku.code, sku.sizeText ?? sku.size]
+        .filter((value) => value !== null && value !== undefined && String(value).trim())
+        .map((value) => String(value).toUpperCase().replace(/[^A-Z0-9-]+/g, '-').replace(/^-+|-+$/g, ''))
+        .filter(Boolean);
+      let supplierSku = styleNo && segments.length
+        ? `${styleNo}-${segments.join('-')}` : (clean(sku.sku) || null);
+      if (supplierSku) {
+        const count = (used.get(supplierSku) ?? 0) + 1;
+        used.set(supplierSku, count);
+        if (count > 1) supplierSku = `${supplierSku}-${count}`;
+      }
+      return {
+        index,
+        source_sku_key: `${sku.colour ?? ''}|${sku.size ?? ''}`,
+        label: sku.sizeText ?? sku.size ?? '',
+        options: { Color: sku.colour ?? '', Size: sku.sizeText ?? sku.size ?? '' },
+        source_options: { Color: sku.colour ?? '', Size: sku.size ?? '' },
+        color: sku.colour ?? '',
+        size: sku.sizeText ?? sku.size ?? '',
+        source_price: sku.price ?? null,
+        source_currency: clean(template.source?.currency) || 'CNY',
+        source_stock: sku.stock ?? null,
+        supplier_sku: supplierSku,
+        available: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock) > 0,
+      };
+    });
+  };
 
   const sorted = [...products].sort((left, right) =>
     (right.options?.length ?? 0) - (left.options?.length ?? 0)
@@ -985,7 +1015,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       images,
       colors: colours.length ? { default: colours[0].value, colors: colours } : null,
       sizes: (keeper.sizes ?? []).length ? { default: buildSizes(keeper)[0].label, sizes: buildSizes(keeper) } : null,
-      sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(keeper) },
+      sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(keeper, keeperStyleNo) },
       bulk_pricing: prices,
       meta: {
         ...(template.meta ?? {}),
@@ -1071,7 +1101,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         images,
         colors: colours.length ? { default: colours[0].value, colors: colours } : null,
         sizes: sizes.length ? { default: sizes[0].label, sizes } : null,
-        sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(content) },
+        sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(content, styleNo) },
         bulk_pricing: prices,
         meta: {
           ...(template.meta ?? {}), sku: styleNo, title, description,
