@@ -14,10 +14,9 @@
 import { applyReasoning } from './model-request.js';
 
 const FALLBACK_BASE_URL = 'https://api.deepseek.com';
-// Generous bounds only as a safety net against pathological listings; the
-// provider itself accepts up to 600 images per request.
-const MAX_GALLERY = 50;
-const MAX_SWATCH = 120;
+// The provider accepts up to 600 images per request; use that ceiling directly
+// instead of any artificial cap.
+const MAX_IMAGES = 600;
 const SIZE_RE = /(尺码|尺寸|码数|size)/i;
 const COLOR_RE = /(颜色|color|colour)/i;
 const SIZE_ORDER = ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '2XL', '3XL', '4XL', '5XL'];
@@ -55,6 +54,17 @@ function normalizeImageKey(value) {
     .replace(/[?#].*$/, '').replace(/_\.webp$/i, '').replace(/_\d+x\d+[^/]*$/i, '');
 }
 
+/** Every image URL inside an HTML fragment (LinkFox description pages). */
+function extractHtmlImageUrls(html) {
+  const urls = [];
+  for (const match of String(html ?? '').matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) {
+    let url = match[1].trim();
+    if (url.startsWith('//')) url = `https:${url}`;
+    if (/^https:\/\//i.test(url)) urls.push(url);
+  }
+  return urls;
+}
+
 /** Build the labelled image list and the source option lists for one detail. */
 export function buildNormalizeInput(detail, { baseUrl } = {}) {
   const raw = detail?.raw_data ?? {};
@@ -66,17 +76,29 @@ export function buildNormalizeInput(detail, { baseUrl } = {}) {
     }
   }
   const images = [];
-  const push = (image, role, label) => {
-    const url = /^https:\/\//i.test(image.source_url || '') ? cleanText(image.source_url)
-      : publicImageUrl(image.storage_path, baseUrl);
-    if (!url) return;
-    images.push({ id: String(image.id), role, label, url, type: image.image_type });
+  const seenUrls = new Set();
+  const push = (image, role, label, explicitUrl = null) => {
+    if (images.length >= MAX_IMAGES) return;
+    const url = explicitUrl
+      || (/^https:\/\//i.test(image?.source_url || '') ? cleanText(image.source_url)
+        : publicImageUrl(image?.storage_path, baseUrl));
+    if (!url || seenUrls.has(url)) return;
+    seenUrls.add(url);
+    images.push({ id: image?.id != null ? String(image.id) : `url:${url}`, role, label, url, type: image?.image_type ?? role });
   };
   for (const image of (detail?.images ?? []).filter((item) => item.image_type === 'main' || item.image_type === 'gallery')
     .sort((left, right) => (left.image_type !== right.image_type
-      ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)))
-    .slice(0, MAX_GALLERY)) {
-    push(image, 'gallery', '商品图');
+      ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)))) {
+    push(image, 'gallery', image.image_type === 'main' ? '主图' : '商品图');
+  }
+  // Detail images: stored copies first, then every image URL inside the
+  // LinkFox description HTML (the links are already in the database).
+  for (const image of (detail?.images ?? []).filter((item) => item.image_type === 'description')) {
+    push(image, 'description', '详情图');
+  }
+  const descriptionHtml = raw?.linkfox?.raw?.description ?? '';
+  for (const url of extractHtmlImageUrls(descriptionHtml)) {
+    push(null, 'description', '详情图', url);
   }
   const skuImageByKey = new Map((detail?.images ?? []).filter((image) => image.image_type === 'sku')
     .map((image) => [normalizeImageKey(image.source_url), image]));
@@ -93,7 +115,7 @@ export function buildNormalizeInput(detail, { baseUrl } = {}) {
       ownImage: matched ?? null,
     };
   }).filter((colour) => colour.value);
-  for (const colour of colours.slice(0, MAX_SWATCH)) {
+  for (const colour of colours) {
     const image = colour.ownImage;
     if (image) push(image, 'swatch', `变体色卡：${colour.value}`);
   }
