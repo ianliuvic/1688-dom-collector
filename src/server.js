@@ -2258,21 +2258,46 @@ async function runRegularPipelineStep({ detail, status, publish, run }) {
     return { status: 'waiting_review', run };
   }
   const fresh = await db.getProductDetail(detail.id);
+  const normalizationRecord = await db.getVariantNormalization(detail.id);
   const published = await publishProductToWordPress({
     detail: fresh, translation, config,
     optionOverrides: await db.listProductOptionOverrides(detail.id),
     options: {
       status, categoryMode: 'auto', tagMode: 'auto', imageMode: 'full',
+      normalizedVariants: normalizationRecord?.result ?? null,
       allowUnverifiedGallery: fresh.raw_data?.gallery?.source === 'linkfox'
         || fresh.raw_data?.gallery?.complete === false,
     },
   });
   const wp = published.wordpress;
-  const syncHash = crypto.createHash('sha256').update(JSON.stringify(published.payload)).digest('hex');
+  // Recompose the variant SKUs with the freshly allocated style number so the
+  // published supplier SKUs follow {STYLE}-{CODE}-{SIZE}, then re-sync once.
+  let payload = published.payload;
+  try {
+    const composed = await saveComposedSkus(
+      await db.getProductDetail(detail.id), normalizationRecord, published.draft.styleNo,
+    );
+    const byKey = new Map((composed?.rows ?? []).map((row) => [String(row.skuKey), row.sku]));
+    if (byKey.size) {
+      payload = structuredClone(published.payload);
+      let changed = false;
+      for (const row of payload.sku_matrix?.rows ?? []) {
+        const sku = byKey.get(String(row.source_sku_key));
+        if (sku && row.supplier_sku !== sku) { row.supplier_sku = sku; changed = true; }
+      }
+      if (changed) {
+        const replayed = await updateWordPressProductStyleNumber({
+          publication: { payload }, styleNo: published.draft.styleNo, config,
+        });
+        payload = replayed.payload;
+      }
+    }
+  } catch { /* style-prefixed SKUs are best-effort */ }
+  const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
   await db.saveWordPressPublication(detail.id, {
     translationId: translation.id, externalId: published.draft.externalId, styleNo: published.draft.styleNo,
     wpPostId: wp.post_id ?? null, wpUrl: wp.permalink ?? null, wpEditUrl: wp.edit_link ?? null,
-    wpStatus: wp.status ?? status, syncHash, payload: published.payload, result: wp, lastError: null,
+    wpStatus: wp.status ?? status, syncHash, payload, result: wp, lastError: null,
   });
   await scheduleProductRagSync(detail.id, { trigger: 'pipeline_publish' }).catch(() => {});
   run.published = {
