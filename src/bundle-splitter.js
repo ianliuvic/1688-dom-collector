@@ -403,18 +403,24 @@ function splitProductImageRows(detail, product, { baseUrl }) {
 /**
  * Drop policy for normalized variants: seller chatter / placeholders and
  * variants without any usable name are discarded instead of being published.
+ * A model placeholder flag alone never drops a real option (bundle listings
+ * often use the colour dimension for garment types like 比基尼).
  */
-function applyVariantDropPolicy(colours) {
+const CHATTER_RE = /(现货|包邮|联系客服|客服|备注|勿拍|随机|图片色|运费|差价|补差|速发|放心拍|留言|多款可选|尺码可选|规格)/;
+
+export function applyVariantDropPolicy(colours) {
   const kept = [];
   const dropped = [];
   for (const colour of colours ?? []) {
     const text = cleanText(colour?.text);
-    if (!text || colour?.placeholder === true) {
+    const source = cleanText(colour?.source);
+    const chatter = CHATTER_RE.test(source);
+    if (!text || chatter) {
       dropped.push({
-        source: cleanText(colour?.source) || null,
+        source: source || null,
         text: text || null,
         placeholder: colour?.placeholder === true,
-        reason: colour?.placeholder === true ? 'placeholder_variant' : 'no_usable_variant_name',
+        reason: !text ? 'no_usable_variant_name' : 'placeholder_variant',
       });
       continue;
     }

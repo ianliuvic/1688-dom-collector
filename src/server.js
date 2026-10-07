@@ -26,7 +26,7 @@ import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
-import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents } from './bundle-splitter.js';
+import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
 import { dedupeImagesByHash, dedupeImagesWithLlm } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
@@ -2049,20 +2049,7 @@ async function runRegularVariantStep(detail) {
   const { result } = await normalizeVariants({
     detail: freshDetail, config: pipelineModelConfig(), baseUrl: config.publicBaseUrl,
   });
-  const keptColours = [];
-  const droppedColours = [];
-  for (const colour of result.colours ?? []) {
-    const text = String(colour?.text ?? '').trim();
-    if (!text || colour?.placeholder === true) {
-      droppedColours.push({
-        source: colour?.source ?? null, text: text || null,
-        placeholder: colour?.placeholder === true,
-        reason: colour?.placeholder === true ? 'placeholder_variant' : 'no_usable_variant_name',
-      });
-      continue;
-    }
-    keptColours.push(colour);
-  }
+  const { kept: keptColours, dropped: droppedColours } = applyVariantDropPolicy(result.colours ?? []);
   const saved = await db.saveVariantNormalization(
     detail.id, { ...result, colours: keptColours }, config.complexModel ?? null,
   );
