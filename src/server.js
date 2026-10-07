@@ -1070,8 +1070,9 @@ app.post('/api/product-details/:id/compose-skus', { preHandler: requireDashboard
 const splitContentJobs = new Map();
 
 app.post('/api/product-details/:id/split-content', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
-  if ([...splitContentJobs.values()].some((job) => job.status === 'running')) {
-    return reply.code(409).send({ error: 'split_content_already_running' });
+  const running = [...splitContentJobs.values()].filter((job) => job.status === 'running').length;
+  if (running >= 4) {
+    return reply.code(409).send({ error: 'split_content_busy', running });
   }
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
