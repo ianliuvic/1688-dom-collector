@@ -2400,10 +2400,10 @@ export function createDatabase(databaseUrl) {
         count(*) FILTER (WHERE skus.total > 0 AND skus.not_positive = 0)::int AS all_in_stock,
         count(*) FILTER (WHERE skus.total > 0 AND skus.not_positive > 0)::int AS has_zero_or_unknown,
         count(*) FILTER (WHERE skus.total = 0)::int AS no_skus,
-        count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') = '1')::int AS page_sample_available,
-        count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') = '1'
+        count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') IN ('1', 'true'))::int AS page_sample_available,
+        count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') IN ('1', 'true')
           AND (skus.total = 0 OR skus.not_positive > 0))::int AS sample_available_but_not_in_stock,
-        count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') <> '1'
+        count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') NOT IN ('1', 'true')
           AND skus.total > 0 AND skus.not_positive = 0)::int AS not_available_but_in_stock,
         count(*) FILTER (WHERE skus.total > 0 AND skus.not_positive > 0
           AND coalesce(d.raw_data->'gallery'->>'source', '') = 'linkfox')::int AS linkfox_with_zero_or_unknown,
