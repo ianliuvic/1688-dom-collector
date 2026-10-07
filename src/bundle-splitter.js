@@ -370,13 +370,13 @@ function splitProductImageRows(detail, product, { baseUrl }) {
   for (const id of product?.imageIds ?? []) {
     const image = byId.get(String(id));
     if (!image) continue;
+    const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? cleanText(image.source_url) : null;
     push({
       dbId: String(image.id),
       sourceUrl: cleanText(image.source_url) || null,
       storagePath: image.storage_path ?? null,
       sha: image.content_sha256 ?? null,
-      url: publicImageUrl(image.storage_path, baseUrl)
-        || (/^https:\/\//i.test(image.source_url || '') ? cleanText(image.source_url) : null),
+      url: sourceUrl || publicImageUrl(image.storage_path, baseUrl),
       label: imageLabelForRow(image),
     });
   }
@@ -384,13 +384,13 @@ function splitProductImageRows(detail, product, { baseUrl }) {
     const match = (detail?.images ?? [])
       .find((image) => imageUrlKey(image.source_url) === imageUrlKey(url));
     if (match) {
+      const sourceUrl = /^https:\/\//i.test(match.source_url || '') ? cleanText(match.source_url) : null;
       push({
         dbId: String(match.id),
         sourceUrl: cleanText(match.source_url) || cleanText(url),
         storagePath: match.storage_path ?? null,
         sha: match.content_sha256 ?? null,
-        url: publicImageUrl(match.storage_path, baseUrl)
-          || (/^https:\/\//i.test(match.source_url || '') ? cleanText(match.source_url) : null),
+        url: sourceUrl || publicImageUrl(match.storage_path, baseUrl),
         label: imageLabelForRow(match),
       });
     } else {
