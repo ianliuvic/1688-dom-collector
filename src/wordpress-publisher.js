@@ -814,16 +814,27 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   // 2) Create the remaining split products as drafts.
   for (const [index, content] of siblings.entries()) {
     try {
-      const categoryId = await pickSplitCategory({ content, categories: allCategories, config });
+      let categoryId = await pickSplitCategory({ content, categories: allCategories, config });
       const externalId = `${template.external_id}S${index + 2}`;
-      const allocated = await wp('/wp-json/hx/v1/products/style-number', {
+      const allocate = (primaryCategoryId) => wp('/wp-json/hx/v1/products/style-number', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           external_id: externalId,
-          primary_category_id: categoryId ?? template.meta?.primary_category_id ?? 0,
+          primary_category_id: primaryCategoryId ?? 0,
           reserve: true,
         }),
       });
+      let allocated;
+      try {
+        allocated = await allocate(categoryId);
+      } catch (error) {
+        // Some merchandising categories have no approved style-number prefix:
+        // fall back to the category the original (published) product uses.
+        const fallbackId = Number(template.meta?.primary_category_id) || 0;
+        if (!fallbackId || Number(categoryId) === fallbackId) throw error;
+        allocated = await allocate(fallbackId);
+        categoryId = fallbackId;
+      }
       const styleNo = clean(allocated.style_no);
       if (!styleNo) throw new Error('Style number allocation returned nothing.');
       const { images, skipped } = buildImages(content);
