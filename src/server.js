@@ -1710,6 +1710,7 @@ app.post('/api/wordpress/refresh-published', { preHandler: requireApiKey }, asyn
       });
       await Promise.all(workers);
       job.status = job.failed ? 'completed_with_errors' : 'completed';
+      job.bestSellers = await refreshBestSellersCategory();
     } catch (error) {
       job.status = 'failed';
       job.error = String(error?.message || error).slice(0, 300);
@@ -2624,6 +2625,7 @@ app.post('/api/pipelines/run', { preHandler: requireApiKey }, async (request, re
       });
       await Promise.all(workers);
       job.status = job.failed ? 'completed_with_errors' : 'completed';
+      job.bestSellers = await refreshBestSellersCategory();
       // Single-product runs stay silent; only batch runs send the Feishu summary.
       if (job.total > 1) {
         await notifyPipelineRunSummary(job).catch((error) => {
@@ -2661,6 +2663,22 @@ app.get('/api/pipelines', { preHandler: requireApiKey }, async (request) => db.l
 // publish without any model call so each colour option gets its own uploaded
 // swatch attachment (older split products were published without one).
 const splitSwatchRepairJobs = new Map();
+
+/**
+ * Product syncs replace a product's categories, which wipes the out-of-band
+ * "Best Sellers" membership — restore it after every bulk re-sync.
+ */
+async function refreshBestSellersCategory() {
+  try {
+    const plan = await buildBestSellerPlan(36);
+    const result = await replaceWordPressBestSellers({
+      postIds: plan.selected.map((item) => item.wp_post_id), config,
+    });
+    return { selected: plan.selected.length, ...result };
+  } catch (error) {
+    return { error: String(error?.message || error).slice(0, 200) };
+  }
+}
 
 app.post('/api/wordpress/split-swatches/repair', { preHandler: requireApiKey }, async (_request, reply) => {
   if ([...splitSwatchRepairJobs.values()].some((job) => job.status === 'running')) {
@@ -2725,6 +2743,7 @@ app.post('/api/wordpress/split-swatches/repair', { preHandler: requireApiKey }, 
       });
       await Promise.all(workers);
       job.status = job.failed ? 'completed_with_errors' : 'completed';
+      job.bestSellers = await refreshBestSellersCategory();
     } catch (error) {
       job.status = 'failed';
       job.error = String(error?.message || error).slice(0, 200);
@@ -2808,6 +2827,7 @@ app.post('/api/wordpress/split-variants/repair', { preHandler: requireApiKey }, 
       });
       await Promise.all(workers);
       job.status = job.failed ? 'completed_with_errors' : 'completed';
+      job.bestSellers = await refreshBestSellersCategory();
     } catch (error) {
       job.status = 'failed';
       job.error = String(error?.message || error).slice(0, 200);
@@ -2885,6 +2905,7 @@ app.post('/api/wordpress/split-copy/repair', { preHandler: requireApiKey }, asyn
       });
       await Promise.all(workers);
       job.status = job.failed ? 'completed_with_errors' : 'completed';
+      job.bestSellers = await refreshBestSellersCategory();
     } catch (error) {
       job.status = 'failed';
       job.error = String(error?.message || error).slice(0, 200);
