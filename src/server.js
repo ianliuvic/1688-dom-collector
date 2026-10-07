@@ -1519,6 +1519,133 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
   };
 });
 
+// Refresh re-sync for already-published, non-bundle products: rebuilds the WP
+// payload from the existing translation + the latest images (deduped) +
+// normalized variants, REUSES the attachments already on WordPress (uploads
+// only new images), keeps the stored taxonomies/material/style number (no
+// merchandising model call) and syncs to the same post. Five-way concurrency.
+const wordpressRefreshJobs = new Map();
+
+app.post('/api/wordpress/refresh-published', { preHandler: requireApiKey }, async (request, reply) => {
+  if ([...wordpressRefreshJobs.values()].some((job) => job.status === 'running')) {
+    return reply.code(409).send({ error: 'refresh_already_running' });
+  }
+  const ids = Array.isArray(request.body?.ids)
+    ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 500)
+    : null;
+  const id = crypto.randomUUID();
+  const job = {
+    id, status: 'running', total: 0, processed: 0, updated: 0, skipped: 0, failed: 0,
+    imagesRemoved: 0, imagesAdded: 0, mediaReused: 0, mediaUploaded: 0, variantChanges: 0,
+    createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), completedAt: null,
+    results: [], errors: [],
+  };
+  wordpressRefreshJobs.set(id, job);
+  trimTerminalJobs(wordpressRefreshJobs);
+  (async () => {
+    try {
+      const rows = ids ? ids.map((value) => ({ product_detail_id: value }))
+        : await db.listRefreshablePublications({ limit: 5000, offset: 0 });
+      job.total = rows.length;
+      let next = 0;
+      const workers = Array.from({ length: Math.min(5, rows.length) }, async () => {
+        while (true) {
+          const index = next++;
+          if (index >= rows.length) return;
+          const productDetailId = Number(rows[index].product_detail_id);
+          job.processed += 1;
+          try {
+            const detail = await db.getProductDetail(productDetailId);
+            const publication = await db.getWordPressPublication(productDetailId);
+            const translation = await db.getLatestProductTranslation(productDetailId, 'en');
+            if (!detail || !publication?.wp_post_id || !publication.payload || !translation) {
+              job.skipped += 1;
+              continue;
+            }
+            const normalization = await db.getVariantNormalization(productDetailId);
+            const previousPayload = publication.payload;
+            const options = {
+              status: 'publish',
+              styleNo: publication.style_no ?? '',
+              categoryMode: (previousPayload.category_ids ?? []).length ? 'manual' : 'auto',
+              categoryIds: previousPayload.category_ids ?? [],
+              tagMode: ((previousPayload.tag_ids ?? []).length || (previousPayload.tags ?? []).length) ? 'manual' : 'auto',
+              tagIds: previousPayload.tag_ids ?? [],
+              tags: previousPayload.tags ?? [],
+              primaryCategoryId: Number(previousPayload.meta?.primary_category_id) || 0,
+              material: previousPayload.meta?.material ?? '',
+              imageMode: 'translated',
+              allowUnverifiedGallery: detail.raw_data?.gallery?.complete !== true,
+              reuseMedia: true,
+              previousPayload,
+              normalizedVariants: normalization?.result
+                ? { colours: normalization.result.colours ?? [], sizes: normalization.result.sizes ?? [] }
+                : null,
+            };
+            const published = await publishProductToWordPress({
+              detail, translation, options, config,
+              optionOverrides: await db.listProductOptionOverrides(productDetailId),
+            });
+            const payload = published.payload;
+            const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+            await db.saveWordPressPublication(productDetailId, {
+              translationId: translation.id, externalId: published.draft.externalId,
+              styleNo: published.draft.styleNo,
+              wpPostId: published.wordpress.post_id ?? publication.wp_post_id,
+              wpUrl: published.wordpress.permalink ?? publication.wp_url,
+              wpEditUrl: published.wordpress.edit_link ?? publication.wp_edit_url,
+              wpStatus: published.wordpress.status ?? 'publish',
+              syncHash, payload, result: published.wordpress, lastError: null,
+            });
+            const beforeImages = new Set((previousPayload.images ?? [])
+              .map((image) => normalizedImageUrl(image?.source_url)).filter(Boolean));
+            const afterImages = new Set((payload.images ?? [])
+              .map((image) => normalizedImageUrl(image?.source_url)).filter(Boolean));
+            const removed = [...beforeImages].filter((key) => !afterImages.has(key)).length;
+            const added = [...afterImages].filter((key) => !beforeImages.has(key)).length;
+            const labelsBefore = (previousPayload.colors?.colors ?? []).map((colour) => `${colour.label}|${colour.code ?? ''}`).join('\u0001');
+            const labelsAfter = (payload.colors?.colors ?? []).map((colour) => `${colour.label}|${colour.code ?? ''}`).join('\u0001');
+            const variantChanges = labelsBefore !== labelsAfter ? 1 : 0;
+            const reused = published.media.filter((item) => item.reused).length;
+            job.updated += 1;
+            job.imagesRemoved += removed;
+            job.imagesAdded += added;
+            job.mediaReused += reused;
+            job.mediaUploaded += published.media.length - reused;
+            job.variantChanges += variantChanges;
+            if (job.results.length < 400) {
+              job.results.push({
+                productDetailId, styleNo: published.draft.styleNo,
+                imagesBefore: beforeImages.size, imagesAfter: afterImages.size,
+                removed, added, variantChanges: variantChanges === 1, reused, uploaded: published.media.length - reused,
+              });
+            }
+          } catch (error) {
+            job.failed += 1;
+            if (job.errors.length < 200) {
+              job.errors.push({ productDetailId, message: String(error?.message || error).slice(0, 200) });
+            }
+          }
+        }
+      });
+      await Promise.all(workers);
+      job.status = job.failed ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+      app.log.error({ err: error, jobId: id }, 'published refresh job failed');
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress-refresh-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = wordpressRefreshJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({
   ...(await db.getDashboardStats()),
   runtime: {

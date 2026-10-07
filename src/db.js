@@ -2396,6 +2396,18 @@ export function createDatabase(databaseUrl) {
     return saved.rows[0];
   }
 
+  /** Published, non-bundle products eligible for a refresh re-sync. */
+  async function listRefreshablePublications({ limit = 3000, offset = 0 } = {}) {
+    const result = await pool.query(`SELECT details.id AS product_detail_id
+      FROM product_details details
+      JOIN product_wordpress_publications publications
+        ON publications.product_detail_id = details.id
+      WHERE publications.wp_status = 'publish' AND publications.wp_post_id IS NOT NULL
+        AND details.bundle_status IS DISTINCT FROM 'bundle'
+      ORDER BY details.id LIMIT $1 OFFSET $2`, [limit, offset]);
+    return result.rows;
+  }
+
   /** Saved split-product contents (title/description/variants/SKUs per split product). */
   async function getSplitContents(productDetailId) {
     const result = await pool.query(
@@ -2604,6 +2616,7 @@ export function createDatabase(databaseUrl) {
     getProductSplitPlan, saveProductSplitPlan,
     getVariantNormalization, saveVariantNormalization, addProductImage, updateSkuVariantSkus,
     getSplitContents, saveSplitContents, updateProductRawData,
+    listRefreshablePublications,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };

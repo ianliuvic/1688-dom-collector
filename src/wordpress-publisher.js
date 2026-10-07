@@ -199,6 +199,7 @@ function buildSkuMatrix(detail, translation, overrideIndex = null) {
       source_stock: numberOrNull(sku.stock),
       image_source_url: clean(sku.image_source_url),
       available: numberOrNull(sku.stock) === null ? null : Number(sku.stock) > 0,
+      supplier_sku: clean(sku.variant_sku) || null,
     };
   });
 }
@@ -209,7 +210,24 @@ function normalizedImageKey(value) {
     .replace(/_\d+x\d+[^/]*$/i, '');
 }
 
-function buildColorOptions(detail, translation, overrideIndex = null) {
+function buildNormalizedTranslatedMap(translation, entries, dimensionNames) {
+  if (!Array.isArray(entries) || !entries.length) return null;
+  const bySource = new Map(entries.map((entry) => [clean(entry?.source), entry]));
+  const sourceOptions = Array.isArray(translation?.source_data?.skuOptions)
+    ? translation.source_data.skuOptions : [];
+  const map = new Map();
+  for (const option of translation?.sku_options ?? []) {
+    const dimensionName = clean(option?.dimensionName).toLowerCase();
+    if (dimensionName && !dimensionNames.includes(dimensionName)) continue;
+    const translatedText = clean(option?.text);
+    const sourceText = clean(sourceOptions[Number(option?.index)]?.text);
+    const hit = bySource.get(sourceText);
+    if (translatedText && hit) map.set(translatedText, hit);
+  }
+  return map.size ? map : null;
+}
+
+function buildColorOptions(detail, translation, overrideIndex = null, normalizedColours = null) {
   const dimension = findDimension(translation, ['color', '颜色']);
   const colors = unique(dimension?.values ?? []);
   const optionImages = new Map();
@@ -232,11 +250,15 @@ function buildColorOptions(detail, translation, overrideIndex = null) {
     // display label is replaced by an override.
     const imageUrl = optionImages.get(sourceLabel) || '';
     const matched = skuImages.get(normalizedImageKey(imageUrl)) ?? null;
-    const label = resolveOptionDisplayLabel(overrideIndex, sourceLabel) || sourceLabel;
+    // Priority: variant-normalization text/code > manual override > translated label.
+    const normalized = normalizedColours?.get(clean(sourceLabel)) ?? null;
+    const label = clean(normalized?.text)
+      || resolveOptionDisplayLabel(overrideIndex, sourceLabel) || sourceLabel;
     return {
       label,
       value: `color-${index + 1}`,
       ...(label === sourceLabel ? {} : { source_label: sourceLabel }),
+      ...(clean(normalized?.code) ? { code: clean(normalized.code) } : {}),
       source_image_url: imageUrl,
       image_source_id: matched?.id ? String(matched.id) : '',
     };
@@ -282,7 +304,10 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   );
   const sizeDimension = findDimension(translation, ['size', '尺码']);
   const sizes = unique(sizeDimension?.values ?? []);
-  const colorOptions = buildColorOptions(detail, translation, overrideIndex);
+  const normalizedColours = buildNormalizedTranslatedMap(translation, options.normalizedVariants?.colours, ['color', '颜色']);
+  const normalizedSizes = buildNormalizedTranslatedMap(translation, options.normalizedVariants?.sizes, ['size', '尺码']);
+  const sizeLabel = (value) => clean(normalizedSizes?.get(clean(value))?.text) || value;
+  const colorOptions = buildColorOptions(detail, translation, overrideIndex, normalizedColours);
   const swatchImageIds = new Set(colorOptions.map((color) => color.image_source_id).filter(Boolean));
   const swatchImages = options.imageMode === 'main_only' ? []
     : (detail.images ?? []).filter((image) => swatchImageIds.has(String(image.id)));
@@ -353,8 +378,8 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
     })),
     bulk_pricing: pricing,
     sizes: sizes.length ? {
-      default: sizes[0],
-      sizes: sizes.map((value) => ({ label: value, value })),
+      default: sizeLabel(sizes[0]),
+      sizes: sizes.map((value) => ({ label: sizeLabel(value), value })),
     } : null,
     size_chart: null,
     colors: colorOptions.length ? {
@@ -709,7 +734,29 @@ export async function publishProductToWordPress({ detail, translation, options =
   const wp = wordpressClient(config);
   const media = [];
 
+  // Refresh mode: reuse the attachments already referenced by the stored
+  // publication payload (matched by normalized source URL) and upload only
+  // genuinely new images — no re-verification of unchanged media.
+  const reuseByKey = new Map();
+  if (options.reuseMedia === true && options.previousPayload) {
+    for (const image of (options.previousPayload.images ?? [])) {
+      const key = normalizedImageKey(image?.source_url);
+      const attachmentId = Number(image?.attachment_id);
+      if (key && Number.isInteger(attachmentId) && attachmentId > 0) {
+        reuseByKey.set(key, { attachmentId, url: clean(image?.url) });
+      }
+    }
+  }
+
   for (const [index, image] of draft.uploadImages.entries()) {
+    const reused = reuseByKey.get(normalizedImageKey(image.source_url));
+    if (reused) {
+      media.push({
+        sourceImageId: String(image.id), attachmentId: reused.attachmentId,
+        url: reused.url, reused: true, verification: { reused: true },
+      });
+      continue;
+    }
     if (!image.storage_path) continue;
     const absolutePath = resolveStorageFile(config.storagePath, image.storage_path);
     const binary = await fs.readFile(absolutePath);
