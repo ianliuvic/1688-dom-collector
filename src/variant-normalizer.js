@@ -172,12 +172,17 @@ export function normalizeVariantResult(parsed, input) {
       ? (imageById.get(String(colour.ownImageId)) ?? ownImageById.get(String(colour.ownImageId)) ?? null)
       : null;
     const chosen = ownImage ?? evidence ?? null;
+    const chosenUrl = chosen
+      ? (cleanText(chosen.url)
+        || (/^https:\/\//i.test(chosen.source_url || '') ? cleanText(chosen.source_url) : null))
+      : null;
     colours.push({
       source: colour.value,
       text: cleanText(proposal.text).slice(0, 60) || null,
       code,
       imageId: chosen ? String(chosen.id) : null,
-      imageRole: chosen ? (evidence ? evidence.role : 'swatch') : null,
+      imageUrl: chosenUrl || null,
+      imageRole: chosen ? (chosen === ownImage ? 'swatch' : (evidence ? evidence.role : null)) : null,
       confidence: Number.isFinite(Number(proposal.confidence)) ? Number(proposal.confidence) : null,
       placeholder: proposal.placeholder === true,
       needsReview: !cleanText(proposal.text) || !chosen,
@@ -344,7 +349,8 @@ export async function normalizeVariantScope({
   const thumbById = new Map(images.map((image) => [String(image.id), image.url]));
   result.colours = result.colours.map((colour) => ({
     ...colour,
-    thumb: colour.imageId ? (thumbById.get(String(colour.imageId)) ?? null) : null,
+    thumb: colour.imageUrl
+      || (colour.imageId ? (thumbById.get(String(colour.imageId)) ?? null) : null),
   }));
   return { input: { title, imageCount: images.length }, result };
 }
