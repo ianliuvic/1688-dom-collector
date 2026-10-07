@@ -727,20 +727,52 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   const attachmentFor = (url) => previousImages.get(normalizedUrlKey(url)) ?? null;
 
-  const buildImages = (content) => {
-    const images = [];
-    const skipped = [];
+  const buildImages = async (content, { externalId, styleNo, altText }) => {
+    const rows = [];
     for (const imageId of content.imageRefs?.imageIds ?? []) {
       const image = detailImages.get(String(imageId));
-      if (!image) continue;
+      if (image) rows.push(image);
+    }
+    // URL-only assigned images become usable once downloaded (matched by URL).
+    for (const url of content.imageRefs?.imageUrls ?? []) {
+      const match = (detail?.images ?? [])
+        .find((image) => normalizedUrlKey(image.source_url) === normalizedUrlKey(url));
+      if (match && !rows.some((row) => String(row.id) === String(match.id))) rows.push(match);
+    }
+    const images = [];
+    const skipped = [];
+    let index = 0;
+    for (const image of rows) {
       const attachment = attachmentFor(image.source_url);
-      if (!attachment?.attachment_id) { skipped.push(String(imageId)); continue; }
-      images.push({
-        attachment_id: Number(attachment.attachment_id),
-        alt: clean(content.title),
-        source_url: clean(image.source_url),
-        url: clean(attachment.url),
-      });
+      if (attachment?.attachment_id) {
+        images.push({
+          attachment_id: Number(attachment.attachment_id), alt: altText,
+          source_url: clean(image.source_url), url: clean(attachment.url),
+        });
+        index += 1;
+        continue;
+      }
+      if (!image.storage_path) { skipped.push(String(image.id)); continue; }
+      try {
+        const binary = await fs.readFile(image.storage_path);
+        const mimeType = clean(image.mime_type) || 'image/jpeg';
+        const { uploaded } = await uploadVerifiedWordPressImage({
+          wp, detail, index, binary, mimeType,
+          draft: { externalId, styleNo, payload: { title: altText, images: [] } },
+          image: {
+            source_url: clean(image.source_url),
+            image_type: clean(image.image_type) || 'gallery',
+            sort_order: Number(image.sort_order) || 0,
+          },
+        });
+        images.push({
+          attachment_id: Number(uploaded.attachment_id || uploaded.id), alt: altText,
+          source_url: clean(image.source_url), url: clean(uploaded.url),
+        });
+      } catch {
+        skipped.push(String(image.id));
+      }
+      index += 1;
     }
     return { images, skipped };
   };
@@ -782,7 +814,9 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   // 1) Update the original post with the keeper product.
   {
-    const { images, skipped } = buildImages(keeper);
+    const { images, skipped } = await buildImages(keeper, {
+      externalId: template.external_id, styleNo: publication.style_no, altText: clean(keeper.title),
+    });
     const colours = buildColours(keeper);
     const prices = buildWearHongxiuPricing(detail);
     const payload = {
@@ -837,7 +871,9 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       }
       const styleNo = clean(allocated.style_no);
       if (!styleNo) throw new Error('Style number allocation returned nothing.');
-      const { images, skipped } = buildImages(content);
+      const { images, skipped } = await buildImages(content, {
+        externalId, styleNo, altText: clean(content.title),
+      });
       const colours = buildColours(content);
       const sizes = buildSizes(content);
       const prices = buildWearHongxiuPricing(detail);

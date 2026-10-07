@@ -1260,6 +1260,73 @@ app.get('/api/product-details/:id/image-dedupe', { preHandler: requireDashboardO
   return { productDetailId: id, result: detail.raw_data?.imageDedupe ?? null };
 });
 
+// Download the detail (description) images that only exist as URLs (LinkFox
+// description HTML) into local storage so they can be published. Bounded and
+// failure-tolerant; existing local rows are skipped.
+const DESCRIPTION_IMAGE_LIMIT = 60;
+
+async function ensureDescriptionImages(detail) {
+  const raw = detail?.raw_data ?? {};
+  const stored = new Set((detail?.images ?? [])
+    .filter((image) => image.image_type === 'description')
+    .map((image) => normalizedImageUrl(image.source_url)));
+  const urls = [];
+  const seen = new Set();
+  for (const match of String(raw?.linkfox?.raw?.description ?? '').matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) {
+    let url = match[1].trim();
+    if (url.startsWith('//')) url = `https:${url}`;
+    if (!/^https:\/\//i.test(url)) continue;
+    const key = normalizedImageUrl(url);
+    if (stored.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    urls.push(url);
+    if (urls.length >= DESCRIPTION_IMAGE_LIMIT) break;
+  }
+  for (const image of (detail?.images ?? []).filter((item) => item.image_type === 'description')) {
+    const key = normalizedImageUrl(image.source_url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+  }
+  if (!urls.length) return { downloaded: 0, failed: 0 };
+  const root = path.resolve(config.storagePath, 'product-images');
+  const folder = path.resolve(root, String(detail.offer_id ?? ''));
+  if (!folder.startsWith(`${root}${path.sep}`)) return { downloaded: 0, failed: 0 };
+  await fs.mkdir(folder, { recursive: true });
+  const results = { downloaded: 0, failed: 0 };
+  let next = 0;
+  const workers = Array.from({ length: Math.min(5, urls.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= urls.length) return;
+      const url = urls[index];
+      try {
+        const response = await fetch(url, {
+          headers: { referer: 'https://detail.1688.com/', 'user-agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(45000),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length < 64) throw new Error('image too small');
+        const extension = (url.split('?')[0].match(/\.(jpe?g|png|webp|gif|avif)$/i) || ['.jpg'])[0].toLowerCase();
+        const sha = crypto.createHash('sha256').update(bytes).digest('hex');
+        const fileName = `description-${String(index + 1).padStart(4, '0')}-${sha.slice(0, 12)}${extension}`;
+        const filePath = path.join(folder, fileName);
+        await fs.writeFile(filePath, bytes);
+        await db.addProductImage(detail.id, {
+          type: 'description', sortOrder: index, sourceUrl: url, storagePath: filePath,
+          mimeType: String(response.headers.get('content-type') || '').split(';')[0] || 'image/jpeg',
+          contentSha256: sha, byteSize: bytes.length,
+        });
+        results.downloaded += 1;
+      } catch {
+        results.failed += 1;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 // Variant normalization: the model proposes a swatch text/code/image for every
 // existing colour option plus standardized size labels; the server validates
 // the one-to-one mapping and stores the result for the publisher and the UI.
@@ -1751,6 +1818,133 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
 
 app.get('/api/wordpress-split-publish-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = splitPublishJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+// Finalize splits: download the bundle's detail images, re-sync every split
+// product (uploading the newly downloaded images) and PUBLISH the created
+// drafts (keeping their source publication date). Five-way concurrency.
+const finalizeSplitJobs = new Map();
+
+app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async (request, reply) => {
+  if ([...finalizeSplitJobs.values()].some((job) => job.status === 'running')) {
+    return reply.code(409).send({ error: 'finalize_already_running' });
+  }
+  const ids = Array.isArray(request.body?.ids)
+    ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 200)
+    : null;
+  const id = crypto.randomUUID();
+  const job = {
+    id, status: 'running', total: 0, processed: 0, bundles: 0, imagesDownloaded: 0, imagesUploaded: 0,
+    published: 0, failed: 0, createdAt: new Date().toISOString(), startedAt: new Date().toISOString(),
+    completedAt: null, results: [], errors: [],
+  };
+  finalizeSplitJobs.set(id, job);
+  trimTerminalJobs(finalizeSplitJobs);
+  (async () => {
+    try {
+      const rows = ids ? ids.map((value) => ({ product_detail_id: value }))
+        : await db.listSplitPublishableBundles({ limit: 2000, offset: 0 });
+      job.total = rows.length;
+      let next = 0;
+      const workers = Array.from({ length: Math.min(5, rows.length) }, async () => {
+        while (true) {
+          const index = next++;
+          if (index >= rows.length) return;
+          const productDetailId = Number(rows[index].product_detail_id);
+          job.processed += 1;
+          try {
+            let detail = await db.getProductDetail(productDetailId);
+            const publication = await db.getWordPressPublication(productDetailId);
+            const contents = await db.getSplitContents(productDetailId);
+            if (!detail || !publication?.payload || !contents?.result?.products?.length) {
+              job.failed += 1;
+              job.errors.push({ productDetailId, message: 'missing plan/contents/publication' });
+              continue;
+            }
+            const downloaded = await ensureDescriptionImages(detail).catch(() => ({ downloaded: 0 }));
+            if (downloaded.downloaded) {
+              job.imagesDownloaded += downloaded.downloaded;
+              detail = await db.getProductDetail(productDetailId);
+            }
+            const result = await publishSplitProductsToWordPress({
+              detail, contents: contents.result, publication, config,
+            });
+            if (result.keeper) {
+              const keeperPayload = result.keeper.payload;
+              const syncHash = crypto.createHash('sha256').update(JSON.stringify(keeperPayload)).digest('hex');
+              await db.saveWordPressPublication(productDetailId, {
+                translationId: publication.translation_id,
+                externalId: publication.external_id,
+                styleNo: publication.style_no,
+                wpPostId: result.keeper.postId,
+                wpUrl: result.keeper.url,
+                wpEditUrl: publication.wp_edit_url,
+                wpStatus: 'publish',
+                syncHash, payload: keeperPayload,
+                result: { ...(publication.result ?? {}), split_publish: true },
+                lastError: null,
+              });
+            }
+            // Publish the draft split products and keep the source date.
+            const publicationDate = detail.publication_date
+              ? new Date(detail.publication_date).toISOString() : null;
+            const publishedCreates = [];
+            for (const created of result.created) {
+              if (!created.postId) continue;
+              try {
+                await setWordPressProductStatus({ postId: created.postId, status: 'publish', config });
+                if (publicationDate) {
+                  await setWordPressProductPublicationDate({
+                    postId: created.postId, publicationDate, config,
+                  }).catch(() => {});
+                }
+                publishedCreates.push({ ...created, status: 'publish' });
+                job.published += 1;
+              } catch (error) {
+                publishedCreates.push(created);
+                job.errors.push({ productDetailId, message: `publish failed for ${created.styleNo}: ${String(error?.message || error).slice(0, 120)}` });
+              }
+            }
+            const wpEntries = [
+              ...(result.keeper ? [{ productId: result.keeper.productId, wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' } }] : []),
+              ...publishedCreates.map((item) => ({ productId: item.productId, wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split' } })),
+            ];
+            if (wpEntries.length) await db.mergeSplitContentWpResults(productDetailId, wpEntries);
+            job.bundles += 1;
+            job.imagesUploaded += result.keeper?.imageCount ?? 0;
+            if (job.results.length < 300) {
+              job.results.push({
+                productDetailId, styleNo: publication.style_no,
+                detailImagesDownloaded: downloaded.downloaded,
+                keeper: result.keeper ? { images: result.keeper.imageCount, skipped: result.keeper.skippedImages } : null,
+                publishedProducts: publishedCreates.map((item) => item.styleNo),
+                errors: result.errors,
+              });
+            }
+          } catch (error) {
+            job.failed += 1;
+            if (job.errors.length < 200) {
+              job.errors.push({ productDetailId, message: String(error?.message || error).slice(0, 200) });
+            }
+          }
+        }
+      });
+      await Promise.all(workers);
+      job.status = (job.failed || job.errors.length) ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+      app.log.error({ err: error, jobId: id }, 'finalize splits job failed');
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress-finalize-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = finalizeSplitJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
