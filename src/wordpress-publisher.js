@@ -836,11 +836,12 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   const attachmentFor = (url) => previousImages.get(normalizedUrlKey(url)) ?? null;
 
   // Swatch attachments for colour options: reuse what the template already
-  // uploaded, otherwise upload the colour's stored SKU image so every colour
-  // gets its own swatch (split products used to publish without one).
-  const skuImageByKey = new Map((detail?.images ?? [])
-    .filter((image) => image.image_type === 'sku')
-    .map((image) => [normalizedUrlKey(image.source_url), image]));
+  // uploaded, otherwise resolve the colour's image from ANY stored image (the
+  // colour's picture is often stored as a gallery/detail image, not a SKU
+  // image), and download it directly as a last resort.
+  const imageByUrlKey = new Map((detail?.images ?? [])
+    .map((image) => [normalizedUrlKey(image.source_url), image])
+    .filter(([key]) => Boolean(key)));
   const swatchCache = new Map();
   const swatchAttachmentFor = async (url, label = '') => {
     const key = normalizedUrlKey(url);
@@ -852,18 +853,42 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       swatchCache.set(key, attachment);
       return attachment;
     }
-    const stored = skuImageByKey.get(key);
-    if (!stored?.storage_path) { swatchCache.set(key, null); return null; }
+    let binary = null;
+    let mimeType = null;
+    let sourceUrl = null;
+    const stored = imageByUrlKey.get(key) ?? null;
+    if (stored?.storage_path) {
+      try {
+        binary = await fs.readFile(stored.storage_path);
+        mimeType = clean(stored.mime_type) || 'image/jpeg';
+        sourceUrl = clean(stored.source_url) || url;
+      } catch { binary = null; }
+    }
+    if (!binary && /^https:\/\//i.test(url)) {
+      try {
+        const response = await fetch(url, {
+          headers: { referer: 'https://detail.1688.com/', 'user-agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(45000),
+        });
+        if (response.ok) {
+          const bytes = Buffer.from(await response.arrayBuffer());
+          if (bytes.length > 64) {
+            binary = bytes;
+            mimeType = clean(response.headers.get('content-type')) || 'image/jpeg';
+            sourceUrl = url;
+          }
+        }
+      } catch { binary = null; }
+    }
+    if (!binary) { swatchCache.set(key, null); return null; }
     try {
-      const binary = await fs.readFile(stored.storage_path);
-      const mimeType = clean(stored.mime_type) || 'image/jpeg';
       const { uploaded } = await uploadVerifiedWordPressImage({
         wp, detail, index: 500 + swatchCache.size,
         binary, mimeType,
         draft: { externalId: template.external_id, styleNo: publication?.style_no ?? '', payload: { title: clean(label) || 'Swatch', images: [] } },
         image: {
-          source_url: clean(stored.source_url) || url,
-          image_type: 'sku', sort_order: Number(stored.sort_order) || 0,
+          source_url: sourceUrl || url,
+          image_type: 'sku', sort_order: Number(stored?.sort_order) || 0,
         },
       });
       const attachment = { attachment_id: Number(uploaded.attachment_id || uploaded.id), url: clean(uploaded.url) };
