@@ -807,7 +807,7 @@ function normalizedUrlKey(value) {
  * style numbers from their own category, external ids suffixed `S{n}`).
  * Existing attachments are reused; only genuinely new images are uploaded.
  */
-export async function publishSplitProductsToWordPress({ detail, contents, publication, plan = null, config }) {
+export async function publishSplitProductsToWordPress({ detail, contents, publication, plan = null, skipReview = false, config }) {
   const wp = wordpressClient(config);
   const template = publication?.payload ?? null;
   if (!template) throw new Error('A stored publication payload is required.');
@@ -1062,7 +1062,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   // 1) Update the original post with the keeper product.
   {
-    const review = await reviewSplitProduct({
+    const review = skipReview ? null : await reviewSplitProduct({
       content: keeper,
       options: optionsFor(keeper),
       currentCategoryId: template.meta?.primary_category_id ?? (template.category_ids ?? [])[0] ?? null,
@@ -1136,7 +1136,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       const externalId = clean(previousWp?.externalId)
         || (storedPostId ? postToExternalId.get(storedPostId) : null)
         || `${template.external_id}S${index + 2}`;
-      const review = await reviewSplitProduct({
+      const review = skipReview ? null : await reviewSplitProduct({
         content,
         options: optionsFor(content),
         currentCategoryId: previousWp?.categoryId ?? null,
@@ -1145,7 +1145,9 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       }).catch(() => null);
       const title = clean(review?.title) || clean(content.title);
       const description = clean(review?.description) || clean(content.description);
-      let categoryId = Number(review?.categoryId) || await pickSplitCategory({ content, categories: allCategories, config });
+      let categoryId = Number(review?.categoryId) || Number(previousWp?.categoryId) || null;
+      if (!categoryId && skipReview) categoryId = Number(template.meta?.primary_category_id) || null;
+      if (!categoryId) categoryId = await pickSplitCategory({ content, categories: allCategories, config });
       // Keep an already matching style number; otherwise reserve a fresh one
       // from the reviewed category so style, category and collection align.
       const storedStyle = clean(previousWp?.styleNo) || null;
