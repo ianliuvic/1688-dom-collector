@@ -833,6 +833,61 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   const attachmentFor = (url) => previousImages.get(normalizedUrlKey(url)) ?? null;
 
+  // Swatch attachments for colour options: reuse what the template already
+  // uploaded, otherwise upload the colour's stored SKU image so every colour
+  // gets its own swatch (split products used to publish without one).
+  const skuImageByKey = new Map((detail?.images ?? [])
+    .filter((image) => image.image_type === 'sku')
+    .map((image) => [normalizedUrlKey(image.source_url), image]));
+  const swatchCache = new Map();
+  const swatchAttachmentFor = async (url, label = '') => {
+    const key = normalizedUrlKey(url);
+    if (!key) return null;
+    if (swatchCache.has(key)) return swatchCache.get(key);
+    const existing = attachmentFor(url);
+    if (existing?.attachment_id) {
+      const attachment = { attachment_id: Number(existing.attachment_id), url: clean(existing.url) };
+      swatchCache.set(key, attachment);
+      return attachment;
+    }
+    const stored = skuImageByKey.get(key);
+    if (!stored?.storage_path) { swatchCache.set(key, null); return null; }
+    try {
+      const binary = await fs.readFile(stored.storage_path);
+      const mimeType = clean(stored.mime_type) || 'image/jpeg';
+      const { uploaded } = await uploadVerifiedWordPressImage({
+        wp, detail, index: 500 + swatchCache.size,
+        binary, mimeType,
+        draft: { externalId: template.external_id, styleNo: publication?.style_no ?? '', payload: { title: clean(label) || 'Swatch', images: [] } },
+        image: {
+          source_url: clean(stored.source_url) || url,
+          image_type: 'sku', sort_order: Number(stored.sort_order) || 0,
+        },
+      });
+      const attachment = { attachment_id: Number(uploaded.attachment_id || uploaded.id), url: clean(uploaded.url) };
+      swatchCache.set(key, attachment);
+      return attachment;
+    } catch {
+      swatchCache.set(key, null);
+      return null;
+    }
+  };
+  const buildColours = async (content) => {
+    const colours = [];
+    for (const [index, colour] of (content.colours ?? []).entries()) {
+      const label = colour.text || colour.source;
+      const attachment = colour.thumb ? await swatchAttachmentFor(colour.thumb, label) : null;
+      colours.push({
+        label: colour.text || colour.source,
+        value: `color-${index + 1}`,
+        ...(colour.code ? { code: colour.code } : {}),
+        ...(colour.source && colour.source !== (colour.text || colour.source) ? { source_label: colour.source } : {}),
+        ...(attachment?.attachment_id ? { image_id: Number(attachment.attachment_id) } : {}),
+      });
+    }
+    return colours;
+  };
+
   // Style numbers are bound to external ids by WordPress, so a product whose
   // reviewed category changes prefix gets a freshly reserved number and the
   // sync writes it explicitly; products already matching keep their number.
@@ -944,17 +999,6 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     return { images, skipped, deduped };
   };
 
-  const buildColours = (content) => (content.colours ?? []).map((colour, index) => {
-    const attachment = colour.thumb ? attachmentFor(colour.thumb) : null;
-    return {
-      label: colour.text || colour.source,
-      value: `color-${index + 1}`,
-      ...(colour.code ? { code: colour.code } : {}),
-      ...(colour.source && colour.source !== (colour.text || colour.source) ? { source_label: colour.source } : {}),
-      ...(attachment?.attachment_id ? { image_id: Number(attachment.attachment_id) } : {}),
-    };
-  });
-
   const buildSizes = (content) => (content.sizes ?? []).map((size) => ({ label: size.text || size.source, value: size.source || size.text }));
 
   const buildSkuRows = (content, styleNo) => {
@@ -1021,7 +1065,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     const { images, skipped, deduped } = await buildImages(keeper, {
       externalId: template.external_id, styleNo: keeperStyleNo, altText: keeperTitle,
     });
-    const colours = buildColours(keeper);
+    const colours = await buildColours(keeper);
     const prices = buildWearHongxiuPricing(detail);
     const keeperSkuRows = buildSkuRows(keeper, keeperStyleNo);
     const keeperInStock = keeperSkuRows.length > 0 && keeperSkuRows.every((row) => row.available === true);
@@ -1110,7 +1154,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       const { images, skipped, deduped } = await buildImages(content, {
         externalId, styleNo, altText: title,
       });
-      const colours = buildColours(content);
+      const colours = await buildColours(content);
       const sizes = buildSizes(content);
       const prices = buildWearHongxiuPricing(detail);
       const categoryName = allCategories.find((item) => Number(item.id) === Number(categoryId))?.name ?? clean(template.meta?.primary_category);
