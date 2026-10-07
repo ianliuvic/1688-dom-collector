@@ -2082,29 +2082,25 @@ async function runRegularVariantStep(detail) {
 
 /**
  * Removes non-product images (factory/office/packing/text posters/company
- * intro) from a bundle's split contents. Only detail-section images are judged
- * by the vision model; gallery images are never touched. Mutates the contents.
+ * intro) from a bundle's split contents — detail-section images AND gallery
+ * images alike. Every product keeps at least its first image. Mutates contents.
  */
 async function stripNonProductDetailImages({ detail, contents, config }) {
   const imageById = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
   const items = [];
   const seen = new Set();
+  const addItem = (sourceUrl) => {
+    const key = normalizedImageUrl(sourceUrl);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    items.push({ key, url: String(sourceUrl) });
+  };
   for (const product of contents?.products ?? []) {
-    for (const url of product.imageRefs?.imageUrls ?? []) {
-      const key = normalizedImageUrl(url);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      items.push({ key, url: String(url) });
-    }
+    for (const url of product.imageRefs?.imageUrls ?? []) addItem(url);
     for (const id of product.imageRefs?.imageIds ?? []) {
       const image = imageById.get(String(id));
-      if (!image || String(image.image_type || '') !== 'description') continue;
-      const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? String(image.source_url) : '';
-      if (!sourceUrl) continue;
-      const key = normalizedImageUrl(sourceUrl);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      items.push({ key, url: sourceUrl });
+      const sourceUrl = image && /^https:\/\//i.test(image.source_url || '') ? String(image.source_url) : '';
+      if (sourceUrl) addItem(sourceUrl);
     }
   }
   if (!items.length) return { removed: 0, considered: 0, nonProduct: 0, errors: [] };
@@ -2129,7 +2125,6 @@ async function stripNonProductDetailImages({ detail, contents, config }) {
     const urls = product.imageRefs.imageUrls ?? [];
     const keptUrls = urls.filter((url) => !junkKeys.has(normalizedImageUrl(url)));
     removed += urls.length - keptUrls.length;
-    product.imageRefs.imageUrls = keptUrls;
     const ids = product.imageRefs.imageIds ?? [];
     const keptIds = ids.filter((id) => {
       const image = imageById.get(String(id));
@@ -2138,6 +2133,13 @@ async function stripNonProductDetailImages({ detail, contents, config }) {
       return !sourceUrl || !junkKeys.has(normalizedImageUrl(sourceUrl));
     });
     removed += ids.length - keptIds.length;
+    // Never leave a product without any image: keep its first one when the
+    // classifier flagged everything it had.
+    if (!keptUrls.length && !keptIds.length) {
+      if (ids.length) keptIds.push(ids[0]);
+      else if (urls.length) keptUrls.push(urls[0]);
+    }
+    product.imageRefs.imageUrls = keptUrls;
     product.imageRefs.imageIds = keptIds;
   }
   return { removed, considered: items.length, nonProduct: junkKeys.size, errors };
