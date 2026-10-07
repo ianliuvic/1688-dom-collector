@@ -1980,6 +1980,492 @@ app.get('/api/wordpress-finalize-jobs/:id', { preHandler: requireApiKey }, async
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
+// ---------------------------------------------------------------------------
+// Unified product pipeline.
+//
+// capture → bundle judgement → split (category + image assignment + placeholder
+// drop) → variant normalization (unusable variants and fully unusable products
+// are dropped) → image dedupe (gallery + detail images merged) → copy (English
+// title/description generated AFTER dedupe, grounded in the option texts) →
+// WordPress publish → Feishu summary. Every step persists its outcome, so a
+// rerun is idempotent and the /products review layer can inspect it.
+// ---------------------------------------------------------------------------
+const pipelineJobs = new Map();
+
+function pipelineModelConfig() {
+  return {
+    apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+    model: config.complexModel, reasoningEffort: config.reasoningEffort,
+  };
+}
+
+/** Image dedupe for a regular product's publish image set (gallery + main). */
+async function runRegularDedupeStep(detail) {
+  const candidates = (detail.images ?? [])
+    .filter((image) => image.image_type === 'main' || image.image_type === 'gallery')
+    .sort((left, right) => (left.image_type !== right.image_type
+      ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)))
+    .map((image) => ({
+      id: String(image.id), type: image.image_type, sortOrder: Number(image.sort_order) || 0,
+      sourceUrl: image.source_url ?? null, storagePath: image.storage_path ?? null,
+      contentSha256: image.content_sha256 ?? null,
+      url: (/^https:\/\//i.test(image.source_url || '') ? String(image.source_url) : null)
+        || (imagePublicPath(image.storage_path) ? `${config.publicBaseUrl}${imagePublicPath(image.storage_path)}` : null),
+    }));
+  const hashResult = await dedupeImagesByHash(candidates);
+  let llm = { removed: [], skipped: true };
+  try {
+    llm = await dedupeImagesWithLlm({
+      images: hashResult.kept, title: detail.title ?? '', config: pipelineModelConfig(),
+    });
+  } catch { /* keep the hash-only result */ }
+  const removed = [...hashResult.removed, ...(llm.removed ?? [])];
+  const result = {
+    version: 2, mode: 'hash+llm', model: config.complexModel ?? null, total: candidates.length,
+    keptIds: hashResult.kept
+      .filter((image) => !(llm.removed ?? []).some((entry) => entry.imageId === String(image.id)))
+      .map((image) => String(image.id)),
+    removed,
+    counts: {
+      exact: hashResult.removed.filter((entry) => entry.reason === 'exact').length,
+      near: hashResult.removed.filter((entry) => entry.reason === 'near').length,
+      'source-url': hashResult.removed.filter((entry) => entry.reason === 'source-url').length,
+      llm: (llm.removed ?? []).length,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  await db.updateProductRawData(detail.id, { imageDedupe: result });
+  return result;
+}
+
+/**
+ * Regular products: variant normalization, then the drop policy — a variant
+ * without a usable name (or a placeholder) is discarded; when nothing usable
+ * remains the product itself is dropped. SKUs are recomposed afterwards.
+ */
+async function runRegularVariantStep(detail) {
+  const ensured = await ensureSkuSwatchImages(detail).catch(() => ({ downloaded: 0, failed: 0 }));
+  const freshDetail = ensured.downloaded ? await db.getProductDetail(detail.id) : detail;
+  const { result } = await normalizeVariants({
+    detail: freshDetail, config: pipelineModelConfig(), baseUrl: config.publicBaseUrl,
+  });
+  const keptColours = [];
+  const droppedColours = [];
+  for (const colour of result.colours ?? []) {
+    const text = String(colour?.text ?? '').trim();
+    if (!text || colour?.placeholder === true) {
+      droppedColours.push({
+        source: colour?.source ?? null, text: text || null,
+        placeholder: colour?.placeholder === true,
+        reason: colour?.placeholder === true ? 'placeholder_variant' : 'no_usable_variant_name',
+      });
+      continue;
+    }
+    keptColours.push(colour);
+  }
+  const saved = await db.saveVariantNormalization(
+    detail.id, { ...result, colours: keptColours }, config.complexModel ?? null,
+  );
+  await db.updateProductRawData(detail.id, {
+    variantDrops: {
+      colours: droppedColours, policy: 'pipeline', droppedAt: new Date().toISOString(),
+    },
+  });
+  let skus = 0;
+  if (keptColours.length) {
+    const publication = await db.getWordPressPublication(detail.id);
+    const composed = await saveComposedSkus(await db.getProductDetail(detail.id), saved, publication?.style_no ?? null);
+    skus = composed?.rows?.length ?? 0;
+  }
+  return {
+    dropped: keptColours.length === 0,
+    colours: keptColours.length, droppedColours, skus,
+  };
+}
+
+/** Bundle products: split first, then continue as regular split products. */
+async function runBundlePipelineStep({ detail, status, publish, refreshSplit = false, run }) {
+  const planRecord = await db.getProductSplitPlan(detail.id);
+  let plan = !refreshSplit && planRecord?.plan?.products?.length ? planRecord.plan : null;
+  if (plan) {
+    run.steps.split = { products: plan.products.length, source: 'stored' };
+  } else {
+    const analyzed = await analyzeBundleSplit({
+      detail, config: pipelineModelConfig(), baseUrl: config.publicBaseUrl,
+    });
+    plan = analyzed.plan;
+    await db.saveProductSplitPlan(detail.id, plan);
+    run.steps.split = {
+      products: plan.products.length,
+      ignoredOptions: (plan.ignoredOptions ?? []).length,
+      source: 'llm',
+    };
+  }
+  // Detail images assigned to the split products must exist locally before
+  // dedupe/upload; only the assigned URLs are downloaded.
+  const assignedUrls = [];
+  for (const product of plan.products ?? []) {
+    for (const url of product.imageUrls ?? []) assignedUrls.push(String(url));
+  }
+  if (assignedUrls.length) {
+    const downloaded = await ensureDescriptionImages(detail, assignedUrls)
+      .catch(() => ({ downloaded: 0, failed: 0 }));
+    if (downloaded.downloaded) detail = await db.getProductDetail(detail.id);
+  }
+  // Split products are regular products: normalization (with the drop policy),
+  // dedupe and copy all happen inside the splitter, in that exact order.
+  const publication = await db.getWordPressPublication(detail.id);
+  const { contents } = await generateSplitContents({
+    detail, plan, styleNo: publication?.style_no ?? null,
+    config: pipelineModelConfig(), baseUrl: config.publicBaseUrl,
+  });
+  await db.saveSplitContents(detail.id, contents, config.complexModel ?? null);
+  run.steps.normalize = { products: contents.products.length, dropped: contents.dropped ?? [] };
+  run.dropped = contents.dropped ?? [];
+  if (!contents.products.length) {
+    await db.upsertPipelineRun(detail.id, {
+      status: 'dropped', step: 'split', result: run, lastError: null,
+    });
+    return { status: 'dropped', run };
+  }
+  if (!publish) {
+    await db.upsertPipelineRun(detail.id, {
+      status: 'ready', step: 'publish', result: run, lastError: null,
+    });
+    return { status: 'ready', run };
+  }
+  const result = await publishSplitProductsToWordPress({
+    detail, contents, publication, plan, config,
+  });
+  if (result.keeper) {
+    const keeperPayload = result.keeper.payload;
+    const syncHash = crypto.createHash('sha256').update(JSON.stringify(keeperPayload)).digest('hex');
+    await db.saveWordPressPublication(detail.id, {
+      translationId: publication?.translation_id ?? null,
+      externalId: publication?.external_id ?? keeperPayload.external_id,
+      styleNo: result.keeper.styleNo ?? publication?.style_no ?? null,
+      wpPostId: result.keeper.postId,
+      wpUrl: result.keeper.url,
+      wpEditUrl: publication?.wp_edit_url ?? null,
+      wpStatus: 'publish',
+      syncHash, payload: keeperPayload,
+      result: { ...(publication?.result ?? {}), split_publish: true },
+      lastError: null,
+    });
+    if (result.keeper.renumbered) {
+      try { await scheduleProductRagSync(detail.id, { trigger: 'wordpress_split_renumber' }); } catch { /* keep going */ }
+    }
+  }
+  const publicationDate = detail.publication_date ? new Date(detail.publication_date).toISOString() : null;
+  const publishedCreates = [];
+  for (const created of result.created ?? []) {
+    if (!created.postId) continue;
+    try {
+      await setWordPressProductStatus({ postId: created.postId, status: 'publish', config });
+      if (publicationDate) {
+        await setWordPressProductPublicationDate({ postId: created.postId, publicationDate, config }).catch(() => {});
+      }
+      publishedCreates.push({ ...created, status: 'publish' });
+    } catch (error) {
+      publishedCreates.push(created);
+      run.errors.push({ productId: created.productId, message: `publish failed for ${created.styleNo}: ${String(error?.message || error).slice(0, 120)}` });
+    }
+  }
+  const wpEntries = [
+    ...(result.keeper ? [{
+      productId: result.keeper.productId,
+      wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' },
+      fields: { title: result.keeper.title, description: result.keeper.description },
+    }] : []),
+    ...publishedCreates.map((item) => ({
+      productId: item.productId,
+      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: 'publish', categoryId: item.categoryId, role: 'split' },
+      fields: { title: item.title, description: item.description },
+    })),
+  ];
+  if (wpEntries.length) await db.mergeSplitContentWpResults(detail.id, wpEntries);
+  run.published = {
+    keeper: result.keeper
+      ? { styleNo: result.keeper.styleNo, title: result.keeper.title, url: result.keeper.url } : null,
+    created: publishedCreates.map((item) => ({
+      styleNo: item.styleNo, title: item.title, url: item.url, category: item.categoryName,
+    })),
+  };
+  run.steps.publish = {
+    keeper: Boolean(result.keeper),
+    created: publishedCreates.length,
+    errors: result.errors ?? [],
+  };
+  await db.upsertPipelineRun(detail.id, {
+    status: 'completed', step: 'publish', result: run, publish: true, lastError: null,
+  });
+  return { status: 'completed', run };
+}
+
+/** Regular products: normalization → dedupe → copy → publish. */
+async function runRegularPipelineStep({ detail, status, publish, run }) {
+  const normalized = await runRegularVariantStep(detail);
+  run.steps.normalize = {
+    colours: normalized.colours,
+    droppedVariants: normalized.droppedColours,
+    skus: normalized.skus,
+  };
+  if (normalized.dropped) {
+    await db.upsertPipelineRun(detail.id, {
+      status: 'dropped', step: 'normalize', result: run, lastError: null,
+    });
+    return { status: 'dropped', run };
+  }
+  const dedupe = await runRegularDedupeStep(detail);
+  run.steps.dedupe = dedupe.counts;
+  let translation = await db.getLatestProductTranslation(detail.id, 'en');
+  if (!translation) {
+    const fresh = await db.getProductDetail(detail.id);
+    const translated = await translateProductDetail({
+      detail: fresh, targetLanguage: 'en',
+      config: {
+        apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+        complexModel: config.complexModel, storagePath: config.storagePath,
+        reasoningEffort: config.reasoningEffort,
+        maxTranslationImages: config.translationImageLimit,
+        modelImageTransport: config.modelImageTransport,
+      },
+    });
+    translation = await db.saveProductTranslation(detail.id, translated);
+    await scheduleProductRagSync(detail.id, { trigger: 'pipeline_translation' }).catch(() => {});
+  }
+  run.steps.copy = { translationId: translation?.id ?? null, title: translation?.title ?? null };
+  if (!publish) {
+    await db.upsertPipelineRun(detail.id, {
+      status: 'ready', step: 'publish', result: run, lastError: null,
+    });
+    return { status: 'ready', run };
+  }
+  const sourceListings = await db.listShopProductSources(detail.offer_id);
+  const policy = evaluateShopProductPolicy(sourceListings);
+  if (!policy.allowed) {
+    await db.upsertPipelineRun(detail.id, {
+      status: 'waiting_review', step: 'publish',
+      result: { ...run, policy }, lastError: 'shop_product_policy_rejected',
+    });
+    return { status: 'waiting_review', run };
+  }
+  const fresh = await db.getProductDetail(detail.id);
+  const published = await publishProductToWordPress({
+    detail: fresh, translation, config,
+    optionOverrides: await db.listProductOptionOverrides(detail.id),
+    options: {
+      status, categoryMode: 'auto', tagMode: 'auto', imageMode: 'full',
+      allowUnverifiedGallery: fresh.raw_data?.gallery?.source === 'linkfox'
+        || fresh.raw_data?.gallery?.complete === false,
+    },
+  });
+  const wp = published.wordpress;
+  const syncHash = crypto.createHash('sha256').update(JSON.stringify(published.payload)).digest('hex');
+  await db.saveWordPressPublication(detail.id, {
+    translationId: translation.id, externalId: published.draft.externalId, styleNo: published.draft.styleNo,
+    wpPostId: wp.post_id ?? null, wpUrl: wp.permalink ?? null, wpEditUrl: wp.edit_link ?? null,
+    wpStatus: wp.status ?? status, syncHash, payload: published.payload, result: wp, lastError: null,
+  });
+  await scheduleProductRagSync(detail.id, { trigger: 'pipeline_publish' }).catch(() => {});
+  run.published = {
+    styleNo: published.draft.styleNo, title: translation?.title ?? null,
+    url: wp.permalink ?? null, status: wp.status ?? status,
+  };
+  run.steps.publish = { postId: wp.post_id ?? null, styleNo: published.draft.styleNo };
+  await db.upsertPipelineRun(detail.id, {
+    status: 'completed', step: 'publish', result: run, publish: true, lastError: null,
+  });
+  return { status: 'completed', run };
+}
+
+/**
+ * One product through the whole pipeline. A manual bundle verdict always wins;
+ * a failed bundle model call never guesses (the product waits for review).
+ */
+async function runProductPipeline({ productDetailId, status = 'publish', publish = true, refreshSplit = false }) {
+  const run = {
+    productDetailId, startedAt: new Date().toISOString(),
+    steps: {}, dropped: [], published: null, errors: [],
+  };
+  await db.upsertPipelineRun(productDetailId, {
+    status: 'running', step: 'bundle', publish, startedAt: new Date().toISOString(), lastError: null,
+  });
+  const detail = await db.getProductDetail(productDetailId);
+  if (!detail) throw new Error('product_detail_not_found');
+  let verdict = detail.bundle_manual_status || null;
+  let verdictSource = detail.bundle_manual_status ? 'manual' : null;
+  if (!verdict) {
+    const stored = detail.bundle_status && detail.bundle_analysis?.detector
+      && detail.bundle_analysis.detector !== 'llm_error';
+    if (stored) {
+      verdict = detail.bundle_status;
+      verdictSource = 'stored';
+    } else {
+      try {
+        const detection = await classifyBundleSemantically({
+          data: detail.raw_data ?? {}, title: detail.title ?? '', config: bundleClassifierConfig(config),
+        });
+        const saved = await db.saveProductBundleStatus(detail.id, detection);
+        verdict = saved?.bundle_status ?? detection?.status ?? null;
+        verdictSource = 'llm';
+        if (verdict === 'bundle' && feishuConfigured(config)) {
+          await notifyBundleCapture({
+            detailId: detail.id,
+            title: detail.title,
+            options: (detail.raw_data?.skuOptions ?? [])
+              .filter((option) => /(颜色|color|colour)/i.test(String(option?.dimensionName ?? '')))
+              .map((option) => option?.text)
+              .filter(Boolean),
+            reason: detection?.analysis?.reason ?? null,
+            config,
+          }).catch(() => {});
+        }
+      } catch (error) {
+        await db.upsertPipelineRun(productDetailId, {
+          status: 'waiting_review', step: 'bundle',
+          result: { ...run, bundleError: String(error?.message || error).slice(0, 300) },
+          lastError: 'bundle_classification_failed',
+        });
+        return { status: 'waiting_review', run };
+      }
+    }
+  }
+  run.steps.bundle = { status: verdict, source: verdictSource };
+  if (!verdict) {
+    await db.upsertPipelineRun(productDetailId, {
+      status: 'waiting_review', step: 'bundle', result: run, lastError: 'bundle_verdict_missing',
+    });
+    return { status: 'waiting_review', run };
+  }
+  return verdict === 'bundle'
+    ? runBundlePipelineStep({ detail, status, publish, refreshSplit, run })
+    : runRegularPipelineStep({ detail, status, publish, run });
+}
+
+async function notifyPipelineRunSummary(job) {
+  if (!feishuConfigured(config)) return { sent: false, reason: 'not_configured' };
+  const lines = [
+    `🐠 1688 采集流水线完成：${job.total} 个产品｜完成 ${job.completed}｜放弃 ${job.dropped}｜待复核 ${job.waitingReview}｜失败 ${job.failed}`,
+  ];
+  for (const entry of (job.results ?? []).slice(0, 20)) {
+    const pub = entry.published;
+    if (entry.status === 'completed' && pub?.keeper) {
+      lines.push(`✅ ${pub.keeper.styleNo ?? ''} ${String(pub.keeper.title ?? '').slice(0, 56)} → ${pub.keeper.url ?? ''}`.trim());
+      for (const created of pub.created ?? []) {
+        lines.push(`　└ ${created.styleNo ?? ''} ${String(created.title ?? '').slice(0, 56)}${created.category ? `（${created.category}）` : ''}`);
+      }
+    } else if (entry.status === 'completed' && pub) {
+      lines.push(`✅ ${pub.styleNo ?? ''} ${String(pub.title ?? '').slice(0, 56)} → ${pub.url ?? ''}`.trim());
+    } else if (entry.status === 'dropped') {
+      const reasons = [...new Set((entry.dropped ?? []).map((item) => item.reason).filter(Boolean))].join(',');
+      lines.push(`⚪️ 放弃 #${entry.productDetailId}${reasons ? `（${reasons}）` : ''}`);
+    } else if (entry.status === 'waiting_review') {
+      lines.push(`🟡 待复核 #${entry.productDetailId}`);
+    }
+    const firstError = (entry.errors ?? [])[0];
+    if (firstError) lines.push(`⚠️ #${entry.productDetailId}: ${String(firstError.message ?? '').slice(0, 80)}`);
+  }
+  if ((job.results ?? []).length > 20) lines.push(`…另有 ${job.results.length - 20} 个产品`);
+  for (const error of (job.errors ?? []).slice(0, 5)) {
+    lines.push(`❌ #${error.productDetailId}: ${String(error.message ?? '').slice(0, 80)}`);
+  }
+  const result = await sendFeishuText({ text: lines.join('\n'), config });
+  return { sent: true, messageId: result.messageId };
+}
+
+// Run the pipeline for explicit captures (ids) or for the latest capture of
+// each offer (offerIds) — the daily capture task uses offerIds.
+app.post('/api/pipelines/run', { preHandler: requireApiKey }, async (request, reply) => {
+  const ids = Array.isArray(request.body?.ids)
+    ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 200)
+    : [];
+  const offerIds = Array.isArray(request.body?.offerIds)
+    ? request.body.offerIds.map((value) => String(value).trim()).filter(Boolean).slice(0, 200)
+    : [];
+  if (!ids.length && !offerIds.length) {
+    return reply.code(400).send({ error: 'ids_or_offerIds_required' });
+  }
+  const status = request.body?.status === 'draft' ? 'draft' : 'publish';
+  const publish = request.body?.publish !== false;
+  const refreshSplit = request.body?.refreshSplit === true;
+  const job = {
+    id: crypto.randomUUID(), status: 'running', statusTarget: status, publish, refreshSplit,
+    total: 0, processed: 0, completed: 0, dropped: 0, waitingReview: 0, failed: 0,
+    results: [], errors: [], createdAt: new Date().toISOString(),
+    startedAt: new Date().toISOString(), completedAt: null,
+  };
+  pipelineJobs.set(job.id, job);
+  trimTerminalJobs(pipelineJobs);
+  (async () => {
+    try {
+      const targets = [...ids];
+      for (const offerId of offerIds) {
+        const rows = await db.listProductDetails({ offerId, limit: 1 }).catch(() => []);
+        const id = Number(rows?.[0]?.id ?? rows?.[0]?.product_detail_id ?? 0);
+        if (id) targets.push(id);
+      }
+      job.total = targets.length;
+      let next = 0;
+      const workers = Array.from({ length: Math.min(3, targets.length) }, async () => {
+        while (true) {
+          const index = next++;
+          if (index >= targets.length) return;
+          const productDetailId = targets[index];
+          job.processed += 1;
+          try {
+            const result = await runProductPipeline({ productDetailId, status, publish, refreshSplit });
+            job.results.push({
+              productDetailId, status: result.status, steps: result.run.steps,
+              dropped: result.run.dropped ?? [], published: result.run.published ?? null,
+              errors: result.run.errors ?? [],
+            });
+            if (result.status === 'completed') job.completed += 1;
+            else if (result.status === 'dropped') job.dropped += 1;
+            else if (result.status === 'waiting_review') job.waitingReview += 1;
+          } catch (error) {
+            job.failed += 1;
+            if (job.errors.length < 100) {
+              job.errors.push({ productDetailId, message: String(error?.message || error).slice(0, 220) });
+            }
+            await db.upsertPipelineRun(productDetailId, {
+              status: 'failed', lastError: String(error?.message || error).slice(0, 300),
+            }).catch(() => {});
+          }
+        }
+      });
+      await Promise.all(workers);
+      job.status = job.failed ? 'completed_with_errors' : 'completed';
+      await notifyPipelineRunSummary(job).catch((error) => {
+        app.log.error({ err: error, jobId: job.id }, 'pipeline Feishu summary failed');
+      });
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+      app.log.error({ err: error, jobId: job.id }, 'pipeline job failed');
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/pipeline-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = pipelineJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.get('/api/product-details/:id/pipeline', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const run = await db.getPipelineRun(id);
+  return { productDetailId: id, run };
+});
+
+app.get('/api/pipelines', { preHandler: requireApiKey }, async (request) => db.listPipelineRuns({
+  limit: request.query?.limit, status: request.query?.status ?? null,
+}));
+
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({
   ...(await db.getDashboardStats()),
   runtime: {

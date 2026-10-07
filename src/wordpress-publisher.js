@@ -176,10 +176,17 @@ function selectPublishingImages(detail, translation, imageMode = 'translated', a
 }
 
 function buildSkuMatrix(detail, translation, overrideIndex = null) {
+  const droppedColours = droppedVariantColours(detail);
   const translatedRows = new Map(
     (translation?.sku_rows ?? []).map((row) => [clean(row.skuKey), row]),
   );
-  return (detail.skus ?? []).map((sku, index) => {
+  return (detail.skus ?? [])
+    .filter((sku) => {
+      if (!droppedColours.size) return true;
+      return !Object.values(sku.option_data ?? {})
+        .some((value) => droppedColours.has(clean(value)));
+    })
+    .map((sku, index) => {
     const translated = translatedRows.get(clean(sku.sku_key)) ?? {};
     const sourceOptions = sku.option_data ?? {};
     const translatedOptions = translated.options ?? {};
@@ -227,6 +234,16 @@ function buildNormalizedTranslatedMap(translation, entries, dimensionNames) {
     if (translatedText && hit) map.set(translatedText, hit);
   }
   return map.size ? map : null;
+}
+
+/**
+ * Source colour texts dropped by the pipeline's variant drop policy; they are
+ * excluded from the published colours and SKU rows everywhere.
+ */
+function droppedVariantColours(detail) {
+  const colours = detail?.raw_data?.variantDrops?.colours;
+  return new Set((Array.isArray(colours) ? colours : [])
+    .map((entry) => clean(typeof entry === 'string' ? entry : entry?.source)).filter(Boolean));
 }
 
 function buildColorOptions(detail, translation, overrideIndex = null, normalizedColours = null) {
@@ -309,7 +326,9 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   const normalizedColours = buildNormalizedTranslatedMap(translation, options.normalizedVariants?.colours, ['color', '颜色']);
   const normalizedSizes = buildNormalizedTranslatedMap(translation, options.normalizedVariants?.sizes, ['size', '尺码']);
   const sizeLabel = (value) => clean(normalizedSizes?.get(clean(value))?.text) || value;
-  const colorOptions = buildColorOptions(detail, translation, overrideIndex, normalizedColours);
+  const droppedColours = droppedVariantColours(detail);
+  const colorOptions = buildColorOptions(detail, translation, overrideIndex, normalizedColours)
+    .filter((color) => !droppedColours.size || !droppedColours.has(clean(color.source_label ?? color.label)));
   const swatchImageIds = new Set(colorOptions.map((color) => color.image_source_id).filter(Boolean));
   const swatchImages = options.imageMode === 'main_only' ? []
     : (detail.images ?? []).filter((image) => swatchImageIds.has(String(image.id)));

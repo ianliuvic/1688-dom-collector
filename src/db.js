@@ -304,6 +304,16 @@ export function createDatabase(databaseUrl) {
         model text,
         updated_at timestamptz NOT NULL DEFAULT now()
       );
+      CREATE TABLE IF NOT EXISTS product_pipeline_runs (
+        product_detail_id bigint PRIMARY KEY REFERENCES product_details(id) ON DELETE CASCADE,
+        status text NOT NULL DEFAULT 'pending',
+        step text,
+        publish boolean NOT NULL DEFAULT false,
+        result jsonb,
+        last_error text,
+        started_at timestamptz,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE TABLE IF NOT EXISTS product_detail_translations (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -2382,6 +2392,45 @@ export function createDatabase(databaseUrl) {
     return result.rows[0];
   }
 
+  /** Per-product pipeline state (steps run in a fixed order; resumable). */
+  async function getPipelineRun(productDetailId) {
+    const result = await pool.query(
+      'SELECT * FROM product_pipeline_runs WHERE product_detail_id=$1', [productDetailId]);
+    return result.rows[0] ?? null;
+  }
+
+  async function upsertPipelineRun(productDetailId, patch = {}) {
+    const current = await getPipelineRun(productDetailId);
+    const next = {
+      status: patch.status ?? current?.status ?? 'pending',
+      step: patch.step !== undefined ? patch.step : (current?.step ?? null),
+      publish: patch.publish !== undefined ? patch.publish === true : (current?.publish === true),
+      result: patch.result !== undefined ? patch.result : (current?.result ?? null),
+      lastError: patch.lastError !== undefined ? patch.lastError : (current?.last_error ?? null),
+      startedAt: patch.startedAt !== undefined ? patch.startedAt : (current?.started_at ?? null),
+    };
+    const saved = await pool.query(`INSERT INTO product_pipeline_runs
+      (product_detail_id, status, step, publish, result, last_error, started_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+      ON CONFLICT (product_detail_id) DO UPDATE SET
+        status=EXCLUDED.status, step=EXCLUDED.step, publish=EXCLUDED.publish, result=EXCLUDED.result,
+        last_error=EXCLUDED.last_error, started_at=EXCLUDED.started_at, updated_at=now()
+      RETURNING *`, [
+      productDetailId, next.status, next.step, next.publish,
+      next.result === null || next.result === undefined ? null : JSON.stringify(next.result),
+      next.lastError, next.startedAt]);
+    return saved.rows[0];
+  }
+
+  async function listPipelineRuns({ limit = 100, status = null } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+    const result = status
+      ? await pool.query(`SELECT * FROM product_pipeline_runs WHERE status=$2
+          ORDER BY updated_at DESC LIMIT $1`, [safeLimit, status])
+      : await pool.query('SELECT * FROM product_pipeline_runs ORDER BY updated_at DESC LIMIT $1', [safeLimit]);
+    return result.rows;
+  }
+
   /** Saved variant normalization (swatch text/code/image + standardized sizes). */
   async function getVariantNormalization(productDetailId) {    const result = await pool.query(
       'SELECT * FROM product_variant_normalizations WHERE product_detail_id=$1', [productDetailId]);
@@ -2645,6 +2694,7 @@ export function createDatabase(databaseUrl) {
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     getProductSplitPlan, saveProductSplitPlan,
+    getPipelineRun, upsertPipelineRun, listPipelineRuns,
     getVariantNormalization, saveVariantNormalization, addProductImage, updateSkuVariantSkus,
     getSplitContents, saveSplitContents, updateProductRawData,
     listRefreshablePublications, listSplitPublishableBundles, mergeSplitContentWpResults,

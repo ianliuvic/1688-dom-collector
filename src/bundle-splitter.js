@@ -1,4 +1,4 @@
-// LLM bundle-split analysis.
+﻿// LLM bundle-split analysis.
 //
 // Given a captured bundle product, the model reads the variant option texts
 // AND the product images, then groups the options into the independent products
@@ -9,6 +9,7 @@
 
 import { applyReasoning } from './model-request.js';
 import { normalizeVariantScope } from './variant-normalizer.js';
+import { dedupeImagesByHash, dedupeImagesWithLlm } from './image-dedupe.js';
 
 const SIZE_RE = /(尺码|尺寸|码数|size)/i;
 const COLOR_RE = /(颜色|color|colour)/i;
@@ -350,33 +351,104 @@ export function splitProductImages(detail, input, product, { baseUrl } = {}) {
 
 const UPPER_SEGMENT = (value) => String(value).toUpperCase().replace(/[^A-Z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
 
-/** colour x size SKU rows for one split product, from the stored matrix. */
-export function splitSkusForProduct(raw, product, codes, sizeTexts, prefix) {
-  const colourSet = new Set((product?.options ?? []).map(cleanText));
+function imageUrlKey(value) {
+  return cleanText(value).replace(/^http:/i, 'https:').replace(/[?#].*$/, '')
+    .replace(/(\.(?:jpe?g|png|webp|avif|gif))_(\.(?:jpe?g|png|webp|avif|gif))$/, '$1');
+}
+
+/** Publishable image rows for one split product (no swatch images). */
+function splitProductImageRows(detail, product, { baseUrl }) {
+  const byId = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
   const rows = [];
-  const used = new Map();
-  for (const row of (Array.isArray(raw?.skuMatrix?.rows) ? raw.skuMatrix.rows : [])) {
-    const options = row?.options ?? {};
-    const colour = Object.values(options).map(cleanText).find((value) => colourSet.has(value));
-    if (!colour) continue;
-    const sizeEntry = Object.entries(options).find(([name]) => SIZE_RE.test(String(name)));
-    const sizeSource = sizeEntry ? cleanText(sizeEntry[1]) : null;
-    const code = codes.get(colour) ?? null;
-    const sizeText = sizeSource ? (sizeTexts.get(sizeSource) ?? sizeSource) : null;
-    const segments = [code, sizeText].filter(Boolean).map(UPPER_SEGMENT).filter(Boolean);
-    if (!segments.length) continue;
-    let sku = `${prefix}-${segments.join('-')}`;
-    const count = (used.get(sku) ?? 0) + 1;
-    used.set(sku, count);
-    if (count > 1) sku = `${sku}-${count}`;
-    rows.push({
-      sku, colour, code, size: sizeSource, sizeText,
-      price: Number.isFinite(Number(row?.price)) ? Number(row.price) : null,
-      stock: Number.isFinite(Number(row?.stock)) ? Number(row.stock) : null,
-      skuId: row?.skuId != null ? String(row.skuId) : null,
+  const seen = new Set();
+  const push = (row) => {
+    const key = row.dbId ? `img:${row.dbId}` : `url:${imageUrlKey(row.sourceUrl)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    rows.push({ ...row, key });
+  };
+  for (const id of product?.imageIds ?? []) {
+    const image = byId.get(String(id));
+    if (!image) continue;
+    push({
+      dbId: String(image.id),
+      sourceUrl: cleanText(image.source_url) || null,
+      storagePath: image.storage_path ?? null,
+      sha: image.content_sha256 ?? null,
+      url: publicImageUrl(image.storage_path, baseUrl)
+        || (/^https:\/\//i.test(image.source_url || '') ? cleanText(image.source_url) : null),
+      label: imageLabelForRow(image),
     });
   }
+  for (const url of product?.imageUrls ?? []) {
+    const match = (detail?.images ?? [])
+      .find((image) => imageUrlKey(image.source_url) === imageUrlKey(url));
+    if (match) {
+      push({
+        dbId: String(match.id),
+        sourceUrl: cleanText(match.source_url) || cleanText(url),
+        storagePath: match.storage_path ?? null,
+        sha: match.content_sha256 ?? null,
+        url: publicImageUrl(match.storage_path, baseUrl)
+          || (/^https:\/\//i.test(match.source_url || '') ? cleanText(match.source_url) : null),
+        label: imageLabelForRow(match),
+      });
+    } else {
+      push({ dbId: null, sourceUrl: cleanText(url), storagePath: null, sha: null, url: cleanText(url), label: '详情图' });
+    }
+  }
   return rows;
+}
+
+/**
+ * Drop policy for normalized variants: seller chatter / placeholders and
+ * variants without any usable name are discarded instead of being published.
+ */
+function applyVariantDropPolicy(colours) {
+  const kept = [];
+  const dropped = [];
+  for (const colour of colours ?? []) {
+    const text = cleanText(colour?.text);
+    if (!text || colour?.placeholder === true) {
+      dropped.push({
+        source: cleanText(colour?.source) || null,
+        text: text || null,
+        placeholder: colour?.placeholder === true,
+        reason: colour?.placeholder === true ? 'placeholder_variant' : 'no_usable_variant_name',
+      });
+      continue;
+    }
+    kept.push(colour);
+  }
+  return { kept, dropped };
+}
+
+/** Per-product image dedupe: exact/near hash first, then a vision pass. */
+async function dedupeScopeImages({ rows, title, config }) {
+  const hashResult = await dedupeImagesByHash(rows.map((row) => ({
+    id: row.key, sourceUrl: row.sourceUrl, contentSha256: row.sha, storagePath: row.storagePath,
+  }))).catch(() => null);
+  let kept = rows;
+  const removed = [];
+  if (hashResult) {
+    const keptKeys = new Set(hashResult.kept.map((entry) => String(entry.id)));
+    kept = rows.filter((row) => keptKeys.has(row.key));
+    removed.push(...hashResult.removed.map((entry) => ({ ...entry, reason: entry.reason ?? 'hash' })));
+  }
+  const withUrls = kept.filter((row) => row.url);
+  if (withUrls.length >= 2 && withUrls.length <= 16) {
+    const llm = await dedupeImagesWithLlm({
+      images: withUrls.map((row) => ({ id: row.key, url: row.url })),
+      title: cleanText(title),
+      config,
+    }).catch(() => null);
+    if (llm && !llm.skipped) {
+      const removedKeys = new Set((llm.removed ?? []).map((entry) => String(entry.imageId)));
+      kept = kept.filter((row) => !removedKeys.has(row.key));
+      removed.push(...(llm.removed ?? []).map((entry) => ({ ...entry, reason: 'llm' })));
+    }
+  }
+  return { kept, removed };
 }
 
 /** One content call per split product: title, description, variant names/codes, sizes. */
@@ -386,20 +458,65 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
   const products = (Array.isArray(plan?.products) ? plan.products : []).slice(0, MAX_PRODUCTS);
   if (!products.length) throw new Error('A saved split plan is required before generating content.');
   const contents = [];
+  const dropped = [];
   for (const [index, product] of products.entries()) {
-    const images = splitProductImages(detail, input, product, { baseUrl });
-    if (!images.length) {
-      contents.push({
-        id: product.id ?? `p${index + 1}`, name: product.name ?? null,
-        title: null, description: null, colours: [], sizes: [], skus: [],
-        images: { imageIds: product.imageIds ?? [], imageUrls: product.imageUrls ?? [] },
-        needsReview: true, error: 'no_images_for_split_product',
+    const productId = product.id ?? `p${index + 1}`;
+    const label = cleanText(product.name) || productId;
+    // 1) Variant normalization first: it is the authority for names, swatches,
+    //    sizes and SKUs, and unusable variants are dropped before anything else.
+    let normalized = null;
+    try {
+      normalized = await normalizeVariantScope({
+        detail,
+        options: product.options ?? [],
+        sizes: product.sizes ?? [],
+        imageIds: product.imageIds ?? [],
+        imageUrls: product.imageUrls ?? [],
+        title: input.title,
+        config,
+        baseUrl,
       });
+    } catch {
+      normalized = null;
+    }
+    const allColours = normalized
+      ? normalized.result.colours.map((colour) => ({
+        source: colour.source, text: colour.text, code: colour.code, thumb: colour.thumb ?? null,
+        placeholder: colour.placeholder === true, needsReview: colour.needsReview === true,
+      }))
+      : (product.options ?? []).map((option) => ({
+        source: cleanText(option), text: null, code: null, thumb: null, placeholder: false, needsReview: true,
+      }));
+    const { kept: colours, dropped: droppedVariants } = applyVariantDropPolicy(allColours);
+    if (droppedVariants.length) dropped.push({ productId, name: label, stage: 'variants', variants: droppedVariants });
+    if (!colours.length) {
+      dropped.push({ productId, name: label, stage: 'product', reason: 'no_usable_variants' });
       continue;
     }
+    // 2) Image dedupe on this product's publish image set (gallery + details).
+    const imageRows = splitProductImageRows(detail, product, { baseUrl });
+    if (!imageRows.length) {
+      dropped.push({ productId, name: label, stage: 'product', reason: 'no_images_for_split_product' });
+      continue;
+    }
+    const { kept: keptImageRows, removed: removedImages } = await dedupeScopeImages({
+      rows: imageRows, title: input.title, config,
+    });
+    if (!keptImageRows.length) {
+      dropped.push({ productId, name: label, stage: 'product', reason: 'no_images_after_dedupe' });
+      continue;
+    }
+    // 3) Copy generation AFTER normalization + dedupe: title/description are
+    //    grounded in the option texts and the final image set.
+    const keptOptions = colours.map((colour) => cleanText(colour.source)).filter(Boolean);
+    const variantNote = [
+      keptOptions.length ? `原选项原文：${JSON.stringify(keptOptions)}` : null,
+      colours.filter((colour) => colour.text).length
+        ? `规范化变体名：${JSON.stringify(colours.map((colour) => colour.text).filter(Boolean))}` : null,
+    ].filter(Boolean).join('；');
     const prompt = `你是电商B2B商品内容编辑，只输出严格JSON，不要输出解释。
-下面是一个"拆分后的独立商品"（来自一个捆绑 listing），并已按顺序提供它自己的图片（图片1 到 图片${images.length}）。
-这个独立商品对应原 listing 的选项原文（品类与内容范围以此为准）：${JSON.stringify(product.options ?? [])}
+下面是一个"拆分后的独立商品"（来自一个捆绑 listing），并已按顺序提供它自己的最终图片（图片1 到 图片${keptImageRows.length}）。
+${variantNote}
 输出内容：
 - title：2–15 个英文单词的稳定产品名称；品类必须与上面的选项原文一致；不得包含年份、平台名（Amazon/AliExpress/TikTok 等）、Hot Sale、Cross-Border、颜色、印花或图案词；只有选项原文本身包含多个部件时才写套装/组合表述，不得把原 listing 的其它部件写进来（例如选项只有比基尼时，不得写 with matching skirt / three-piece set / wrap skirt）。
 - description：35–120 个英文单词的单段产品级描述；只写多张图片共同体现的稳定可见特点（品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁、套装组成）；范围同样以选项原文为准，图片或原 listing 中属于其它部件的部分不要写；不得写颜色、印花、图案、单个 SKU、促销、年份、平台、SEO 关键词、穿着效果、材质、功能或不可见信息。
@@ -408,7 +525,7 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
 拆分商品参考名（中文）：${JSON.stringify(cleanText(product.name))}`;
     const content = [
       { type: 'text', text: prompt },
-      ...images.map((image) => ({ type: 'image_url', image_url: { url: image.url } })),
+      ...keptImageRows.map((row) => ({ type: 'image_url', image_url: { url: row.url } })),
     ];
     let parsed = null;
     let lastRaw = '';
@@ -416,7 +533,7 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
     for (let attempt = 1; attempt <= 2 && !parsed; attempt += 1) {
       const messages = attempt === 1 ? [{ role: 'user', content }] : [{ role: 'user', content: [...content, {
         type: 'text',
-        text: `上一次输出无法使用（${lastProblem}）。片段：${String(lastRaw).slice(0, 240)}。请重新输出严格 JSON，colours/sizes 必须逐一覆盖给定选项。`,
+        text: `上一次输出无法使用（${lastProblem}）。片段：${String(lastRaw).slice(0, 240)}。请重新输出严格 JSON，title/description 必须只描述这一个商品。`,
       }] }];
       const response = await fetch(endpointFrom(config.baseUrl), {
         method: 'POST',
@@ -448,64 +565,85 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
       }
       if (!parsed) lastProblem = lastProblem === 'no usable content' ? 'JSON 无法解析' : lastProblem;
     }
-    if (!parsed) throw new Error(`Split content for ${product.id ?? index + 1} returned no usable result.`);
-    // Variant naming/sizes now go through the dedicated normalization pipeline
-    // (own-swatch fallback, placeholder flags, 1:1 validation, size ordering).
-    let normalized = null;
-    try {
-      normalized = await normalizeVariantScope({
-        detail,
-        options: product.options ?? [],
-        sizes: product.sizes ?? [],
-        imageIds: product.imageIds ?? [],
-        imageUrls: product.imageUrls ?? [],
-        title: input.title,
-        config,
-        baseUrl,
-      });
-    } catch {
-      normalized = null;
-    }
-    const colours = normalized
-      ? normalized.result.colours.map((colour) => ({
-        source: colour.source, text: colour.text, code: colour.code, thumb: colour.thumb ?? null,
-        placeholder: colour.placeholder === true, needsReview: colour.needsReview === true,
-      }))
-      : (product.options ?? []).map((option) => {
-        const swatch = images.find((image) => image.label === `变体色卡：${cleanText(option)}`);
-        return { source: cleanText(option), text: null, code: null, thumb: swatch?.url ?? null, placeholder: false, needsReview: true };
-      });
+    if (!parsed) throw new Error(`Split content for ${productId} returned no usable result.`);
     const sizes = normalized
       ? normalized.result.sizes.map((size) => ({ source: size.source, text: size.text, placeholder: size.placeholder === true }))
       : (product.sizes ?? []).map((size) => ({ source: cleanText(size), text: cleanText(size), placeholder: false }));
     const sizeTexts = new Map(sizes.map((size) => [size.source, size.text || size.source]));
     const codeMap = new Map(colours.filter((colour) => colour.code).map((colour) => [colour.source, colour.code]));
     const prefix = styleNo ? `${styleNo}S${index + 1}` : `S${index + 1}`;
-    const skus = splitSkusForProduct(raw, product, codeMap, sizeTexts, prefix);
+    const keptProduct = { ...product, options: keptOptions };
+    const skus = splitSkusForProduct(raw, keptProduct, codeMap, sizeTexts, prefix);
+    // Sizes actually present in the surviving SKU rows (drops can remove sizes).
+    const keptSizeSources = new Set(skus.map((sku) => sku.size).filter(Boolean));
+    const keptSizes = sizes.filter((size) => !keptSizeSources.size || keptSizeSources.has(size.source));
+    const imageRefs = {
+      imageIds: keptImageRows.filter((row) => row.dbId).map((row) => row.dbId),
+      imageUrls: keptImageRows.filter((row) => !row.dbId).map((row) => row.sourceUrl).filter(Boolean),
+    };
     contents.push({
-      id: product.id ?? `p${index + 1}`,
+      id: productId,
       name: cleanText(product.name) || null,
       title: cleanText(parsed.title).slice(0, 160) || null,
       description: cleanText(parsed.description).slice(0, 1200) || null,
       colours,
-      sizes,
+      sizes: keptSizes,
       skus,
-      imageRefs: { imageIds: product.imageIds ?? [], imageUrls: product.imageUrls ?? [] },
-      imageCount: images.length,
-      needsReview: colours.some((colour) => !colour.text || !colour.code || colour.needsReview === true),
+      imageRefs,
+      imageCount: keptImageRows.length,
+      dedupe: {
+        total: imageRows.length,
+        removed: removedImages.length,
+        counts: {
+          exact: removedImages.filter((entry) => entry.reason === 'exact').length,
+          near: removedImages.filter((entry) => entry.reason === 'near').length,
+          'source-url': removedImages.filter((entry) => entry.reason === 'source-url').length,
+          llm: removedImages.filter((entry) => entry.reason === 'llm').length,
+        },
+      },
+      needsReview: colours.some((colour) => !colour.code || colour.needsReview === true),
     });
   }
   return {
     input: { title: input.title, imageCount: input.images.length },
     contents: {
-      version: 1,
+      version: 2,
       model: config.model ?? null,
       styleNo: styleNo ?? null,
       products: contents,
+      dropped,
       updatedAt: new Date().toISOString(),
     },
   };
 }
+export function splitSkusForProduct(raw, product, codes, sizeTexts, prefix) {
+  const colourSet = new Set((product?.options ?? []).map(cleanText));
+  const rows = [];
+  const used = new Map();
+  for (const row of (Array.isArray(raw?.skuMatrix?.rows) ? raw.skuMatrix.rows : [])) {
+    const options = row?.options ?? {};
+    const colour = Object.values(options).map(cleanText).find((value) => colourSet.has(value));
+    if (!colour) continue;
+    const sizeEntry = Object.entries(options).find(([name]) => SIZE_RE.test(String(name)));
+    const sizeSource = sizeEntry ? cleanText(sizeEntry[1]) : null;
+    const code = codes.get(colour) ?? null;
+    const sizeText = sizeSource ? (sizeTexts.get(sizeSource) ?? sizeSource) : null;
+    const segments = [code, sizeText].filter(Boolean).map(UPPER_SEGMENT).filter(Boolean);
+    if (!segments.length) continue;
+    let sku = `${prefix}-${segments.join('-')}`;
+    const count = (used.get(sku) ?? 0) + 1;
+    used.set(sku, count);
+    if (count > 1) sku = `${sku}-${count}`;
+    rows.push({
+      sku, colour, code, size: sizeSource, sizeText,
+      price: Number.isFinite(Number(row?.price)) ? Number(row.price) : null,
+      stock: Number.isFinite(Number(row?.stock)) ? Number(row.stock) : null,
+      skuId: row?.skuId != null ? String(row.skuId) : null,
+    });
+  }
+  return rows;
+}
+
 
 /** Refresh variant naming/sizes/SKUs of stored split contents via the
  * normalization pipeline, keeping the already generated titles/descriptions. */
