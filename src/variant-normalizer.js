@@ -14,8 +14,10 @@
 import { applyReasoning } from './model-request.js';
 
 const FALLBACK_BASE_URL = 'https://api.deepseek.com';
-const MAX_GALLERY = 10;
-const MAX_SWATCH = 12;
+// Generous bounds only as a safety net against pathological listings; the
+// provider itself accepts up to 600 images per request.
+const MAX_GALLERY = 50;
+const MAX_SWATCH = 120;
 const SIZE_RE = /(尺码|尺寸|码数|size)/i;
 const COLOR_RE = /(颜色|color|colour)/i;
 const SIZE_ORDER = ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '2XL', '3XL', '4XL', '5XL'];
@@ -82,11 +84,17 @@ export function buildNormalizeInput(detail, { baseUrl } = {}) {
     const value = cleanText(option?.text);
     const source = cleanText(option?.image);
     const matched = source ? skuImageByKey.get(normalizeImageKey(source)) : null;
-    return { value, ownImageId: matched ? String(matched.id) : null, ownImageUrl: source || null };
+    return {
+      value,
+      ownImageId: matched ? String(matched.id) : null,
+      ownImageUrl: source || null,
+      // Fallback map entry so a variant's own swatch image can always be used,
+      // even when the image was not pushed to the model.
+      ownImage: matched ?? null,
+    };
   }).filter((colour) => colour.value);
   for (const colour of colours.slice(0, MAX_SWATCH)) {
-    const image = colour.ownImageId
-      ? (detail.images ?? []).find((item) => String(item.id) === colour.ownImageId) : null;
+    const image = colour.ownImage;
     if (image) push(image, 'swatch', `变体色卡：${colour.value}`);
   }
   const sizeDimension = (Array.isArray(raw.skuDimensions) ? raw.skuDimensions : [])
@@ -118,6 +126,8 @@ function naturalSizeRank(label) {
 export function normalizeVariantResult(parsed, input) {
   const imageById = new Map(input.images.map((image) => [String(image.id), image]));
   const imageByNumber = new Map(input.images.map((image) => [image.number, image]));
+  const ownImageById = new Map(input.colours.filter((colour) => colour.ownImage)
+    .map((colour) => [colour.ownImageId, colour.ownImage]));
   const bySource = new Map((Array.isArray(parsed?.colours) ? parsed.colours : [])
     .map((colour) => [cleanText(colour?.source), colour]));
   const usedCodes = new Set();
@@ -134,7 +144,11 @@ export function normalizeVariantResult(parsed, input) {
     }
     const evidenceNumber = Number(proposal.imageNumber);
     const evidence = imageByNumber.get(evidenceNumber) ?? null;
-    const ownImage = colour.ownImageId && imageById.get(String(colour.ownImageId));
+    // The variant's own swatch image is the default whenever the model could
+    // not point at a gallery image (or was never shown the swatch).
+    const ownImage = colour.ownImageId
+      ? (imageById.get(String(colour.ownImageId)) ?? ownImageById.get(String(colour.ownImageId)) ?? null)
+      : null;
     const chosen = evidence ?? ownImage ?? null;
     colours.push({
       source: colour.value,
@@ -144,7 +158,7 @@ export function normalizeVariantResult(parsed, input) {
       imageRole: chosen ? (evidence ? evidence.role : 'swatch') : null,
       confidence: Number.isFinite(Number(proposal.confidence)) ? Number(proposal.confidence) : null,
       placeholder: proposal.placeholder === true,
-      needsReview: !cleanText(proposal.text) || (!chosen && !colour.ownImageId),
+      needsReview: !cleanText(proposal.text) || !chosen,
     });
   }
   const sizeBySource = new Map((Array.isArray(parsed?.sizes) ? parsed.sizes : [])
