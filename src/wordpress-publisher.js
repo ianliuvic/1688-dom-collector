@@ -1070,6 +1070,17 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       categoryId: pickedCategory?.id ?? null,
     });
     const keeperStyleNo = keeperStyle.styleNo || publication.style_no;
+  const usedStyles = new Set([clean(keeperStyleNo).toUpperCase()].filter(Boolean));
+  // Siblings follow the post they already own: reverse-map the candidate
+  // external ids once so a product's identity never travels to another post.
+  const postToExternalId = new Map();
+  for (let slot = 0; slot < siblings.length; slot += 1) {
+    const candidate = `${template.external_id}S${slot + 2}`;
+    const record = await wp(`/wp-json/hx/v1/products/by-external-id/${encodeURIComponent(candidate)}`, { timeoutMs: 30000 })
+      .catch(() => null);
+    const postId = Number(record?.post_id);
+    if (postId) postToExternalId.set(postId, candidate);
+  }
     const { images, skipped, deduped } = await buildImages(keeper, {
       externalId: template.external_id, styleNo: keeperStyleNo, altText: keeperTitle,
     });
@@ -1118,7 +1129,10 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   for (const [index, content] of siblings.entries()) {
     try {
       const previousWp = storedWp.get(String(content.id)) ?? null;
-      const externalId = clean(previousWp?.externalId) || `${template.external_id}S${index + 2}`;
+      const storedPostId = Number(previousWp?.postId) || null;
+      const externalId = clean(previousWp?.externalId)
+        || (storedPostId ? postToExternalId.get(storedPostId) : null)
+        || `${template.external_id}S${index + 2}`;
       const review = await reviewSplitProduct({
         content,
         options: optionsFor(content),
@@ -1136,6 +1150,13 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         currentStyle: storedStyle, externalId, categoryId,
       }).catch(() => null);
       let styleNo = clean(resolvedStyle?.styleNo) || storedStyle || null;
+      if (styleNo && usedStyles.has(styleNo.toUpperCase())) {
+        // A number already used by the keeper (or an earlier sibling) would
+        // duplicate the reservation — take a fresh one from this category.
+        const reallocated = await reserveStyleNumber(categoryId).catch(() => null);
+        if (reallocated) styleNo = reallocated;
+      }
+      if (styleNo) usedStyles.add(styleNo.toUpperCase());
       if (!styleNo) {
         const allocate = (primaryCategoryId) => wp('/wp-json/hx/v1/products/style-number', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
