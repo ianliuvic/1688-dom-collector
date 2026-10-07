@@ -1117,8 +1117,8 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   // 2) Create the remaining split products as drafts.
   for (const [index, content] of siblings.entries()) {
     try {
-      const externalId = clean(previousWp?.externalId) || `${template.external_id}S${index + 2}`;
       const previousWp = storedWp.get(String(content.id)) ?? null;
+      const externalId = clean(previousWp?.externalId) || `${template.external_id}S${index + 2}`;
       const review = await reviewSplitProduct({
         content,
         options: optionsFor(content),
