@@ -2392,6 +2392,56 @@ export function createDatabase(databaseUrl) {
     return result.rows[0];
   }
 
+  /** Stock audit for published products: what their live pages claim vs their payload SKUs. */
+  async function auditPublicationStock() {
+    const result = await pool.query(`
+      SELECT
+        count(*)::int AS published,
+        count(*) FILTER (WHERE skus.total > 0 AND skus.not_positive = 0)::int AS all_in_stock,
+        count(*) FILTER (WHERE skus.total > 0 AND skus.not_positive > 0)::int AS has_zero_or_unknown,
+        count(*) FILTER (WHERE skus.total = 0)::int AS no_skus,
+        count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') = '1')::int AS page_sample_available,
+        count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') = '1'
+          AND (skus.total = 0 OR skus.not_positive > 0))::int AS sample_available_but_not_in_stock,
+        count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') <> '1'
+          AND skus.total > 0 AND skus.not_positive = 0)::int AS not_available_but_in_stock,
+        count(*) FILTER (WHERE skus.total > 0 AND skus.not_positive > 0
+          AND coalesce(d.raw_data->'gallery'->>'source', '') = 'linkfox')::int AS linkfox_with_zero_or_unknown,
+        count(*) FILTER (WHERE coalesce(d.raw_data->'gallery'->>'source', '') = 'linkfox')::int AS linkfox_published
+      FROM product_wordpress_publications pubs
+      JOIN product_details d ON d.id = pubs.product_detail_id
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE NOT ((row->>'source_stock') ~ '^[0-9]+(\\.[0-9]+)?$'
+                 AND (row->>'source_stock')::numeric > 0))::int AS not_positive
+        FROM jsonb_array_elements(coalesce(pubs.payload->'sku_matrix'->'rows', '[]'::jsonb)) AS row
+      ) skus ON TRUE
+      WHERE pubs.wp_status = 'publish'
+    `);
+    return result.rows[0] ?? {};
+  }
+
+  /** A few published products per stock situation, for spot checks. */
+  async function samplePublicationStocks(limit = 8) {
+    const result = await pool.query(`
+      SELECT pubs.style_no, pubs.wp_url, d.id AS product_detail_id,
+        coalesce(d.raw_data->'gallery'->>'source', '') AS gallery_source,
+        skus.total, skus.not_positive,
+        coalesce(pubs.payload->'meta'->>'sample_available', '') AS page_sample_available
+      FROM product_wordpress_publications pubs
+      JOIN product_details d ON d.id = pubs.product_detail_id
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE NOT ((row->>'source_stock') ~ '^[0-9]+(\\.[0-9]+)?$'
+                 AND (row->>'source_stock')::numeric > 0))::int AS not_positive
+        FROM jsonb_array_elements(coalesce(pubs.payload->'sku_matrix'->'rows', '[]'::jsonb)) AS row
+      ) skus ON TRUE
+      WHERE pubs.wp_status = 'publish'
+      ORDER BY random()
+      LIMIT $1`, [Math.min(Math.max(Number(limit) || 8, 1), 50)]);
+    return result.rows;
+  }
+
   /** Per-product pipeline state (steps run in a fixed order; resumable). */
   async function getPipelineRun(productDetailId) {
     const result = await pool.query(
@@ -2680,6 +2730,7 @@ export function createDatabase(databaseUrl) {
     setProductBundleManual, listBundleRecheckRows,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     summarizeWordPressPublications, listWordPressPublications,
+    auditPublicationStock, samplePublicationStocks,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
     getPerceptualHashSummary, backfillPerceptualHashOffers,

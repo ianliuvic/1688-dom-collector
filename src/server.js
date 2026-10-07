@@ -3124,6 +3124,13 @@ app.get('/api/product-details/:id/wordpress', { preHandler: requireApiKey }, asy
 // plus a filterable listing. Bearer or dashboard Basic auth.
 app.get('/api/wordpress/publications/summary', { preHandler: requireDashboardOrApiKey }, async () => db.summarizeWordPressPublications());
 
+// Stock audit across published products: what each page claims (sample
+// available vs made to order) against the SKU stock stored in its payload.
+app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboardOrApiKey }, async (request) => ({
+  counts: await db.auditPublicationStock(),
+  samples: await db.samplePublicationStocks(request.query?.limit),
+}));
+
 app.get('/api/wordpress/publications', { preHandler: requireDashboardOrApiKey }, async (request) => db.listWordPressPublications({
   status: request.query?.status ?? '',
   search: request.query?.search ?? '',
