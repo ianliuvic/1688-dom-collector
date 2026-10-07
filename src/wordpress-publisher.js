@@ -150,12 +150,27 @@ function selectPublishingImages(detail, translation, imageMode = 'translated', a
   // image from the verified product Gallery after the prioritized subset.
   const source = selected.length ? [...selected, ...fallback] : fallback;
   const seen = new Set();
-  return source.filter((image) => {
+  let kept = source.filter((image) => {
     const key = clean(image.source_url);
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+  // Duplicate removal for publishing: stored dedupe decisions (exact / near /
+  // LLM-confirmed) plus a live exact-content-hash guard. Files stay on disk.
+  const removedIds = new Set((Array.isArray(detail?.raw_data?.imageDedupe?.removed)
+    ? detail.raw_data.imageDedupe.removed : [])
+    .map((entry) => String(entry?.imageId ?? ''))
+    .filter(Boolean));
+  if (removedIds.size) kept = kept.filter((image) => !removedIds.has(String(image.id)));
+  const seenSha = new Set();
+  kept = kept.filter((image) => {
+    const sha = clean(image.content_sha256);
+    if (sha && seenSha.has(sha)) return false;
+    if (sha) seenSha.add(sha);
+    return true;
+  });
+  return kept;
 }
 
 function buildSkuMatrix(detail, translation, overrideIndex = null) {

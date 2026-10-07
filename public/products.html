@@ -727,7 +727,13 @@ function renderPublishPreview(id, data){
     + '<div class="pp-thumbs">' + (data.images.gallery || []).map((image) => '<img src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">').join('') + '</div>'
     + '<div class="pp-muted" style="margin-top:6px">主图+图库 ' + (data.images.gallery || []).length + ' 张 · 详情图 ' + data.images.descriptionCount + ' 张'
     + (data.images.publishedImageCount !== null ? ' · 已发布 ' + data.images.publishedImageCount + ' 张 / 色卡 ' + (data.images.publishedColorCount || 0) + ' / 尺码 ' + (data.images.publishedSizeCount || 0) : '')
-    + '</div></div>';
+    + '</div>'
+    + (data.images.dedupe
+      ? '<div class="pp-muted" style="margin-top:4px">图片去重：将移除 <b>' + (data.images.dedupe.removed || []).length + '</b> 张（精确 '
+        + ((data.images.dedupe.counts || {}).exact || 0) + ' / 近似 ' + ((data.images.dedupe.counts || {}).near || 0)
+        + ' / 模型 ' + ((data.images.dedupe.counts || {}).llm || 0) + '）· ' + esc(new Date(data.images.dedupe.updatedAt).toLocaleString()) + '</div>'
+      : '<div class="pp-muted" style="margin-top:4px">图片去重：未运行（发布时仍会做精确哈希去重）</div>')
+    + '</div>';
 
   const rows = (data.variants.rows || []).slice(0, 20).map((row) => '<tr><td>' + esc(row.skuKey) + '</td>'
     + '<td>' + fmtMoney(row.price, data.price.currency) + '</td><td>' + (row.stock === null ? '—' : row.stock) + '</td><td class="pp-muted">' + esc(row.skuId || '') + '</td></tr>').join('');
@@ -774,11 +780,30 @@ function renderPublishPreview(id, data){
 
   panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 发布前预览</b>'
     + '<button type="button" data-pp-normalize="' + id + '">运行变体规范化（LLM）</button>'
+    + '<button type="button" data-pp-dedupe="' + id + '">图片去重（hash+LLM）</button>'
     + '<button type="button" data-pp-reload="' + id + '">刷新</button>'
     + '<button type="button" data-pp-close="' + id + '">收起</button>'
     + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（只读）</span></div>'
     + '<div class="pp-chips">' + chips.join('') + '</div>'
     + '<div class="pp-grid">' + normCard + translationCard + pricingCard + merch + imagesCard + variantsCard + '</div>';
+}
+
+async function runImageDedupe(id, button){
+  if (button) { button.disabled = true; button.textContent = '去重中…约 20–60 秒'; }
+  try {
+    const res = await fetch('/api/product-details/' + id + '/image-dedupe', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'hash+llm' }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 100));
+    const existing = document.getElementById('pp-panel-' + id);
+    if (existing) existing.remove();
+    await togglePublishPreview(id);
+  } catch (e) {
+    if (button) button.textContent = '失败：' + String((e && e.message) || e).slice(0, 50);
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 async function runVariantNormalization(id, button){
@@ -855,6 +880,8 @@ document.addEventListener('click', (e) => {
   }
   const ppNorm = e.target.closest('button[data-pp-normalize]');
   if (ppNorm) { void runVariantNormalization(String(ppNorm.dataset.ppNormalize), ppNorm); return; }
+  const ppDedupe = e.target.closest('button[data-pp-dedupe]');
+  if (ppDedupe) { void runImageDedupe(String(ppDedupe.dataset.ppDedupe), ppDedupe); return; }
   const splitContentBtn = e.target.closest('button[data-split-content]');
   if (splitContentBtn) { void runSplitContent(String(splitContentBtn.dataset.splitContent), splitContentBtn); return; }
   const addGroup = e.target.closest('button[data-split-addgroup]');

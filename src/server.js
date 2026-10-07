@@ -27,6 +27,7 @@ import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
 import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
+import { dedupeImagesByHash, dedupeImagesWithLlm } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
@@ -1190,6 +1191,74 @@ app.get('/api/split-normalize-jobs/:id', { preHandler: requireDashboardOrApiKey 
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
+// Image deduplication for publishing: hash-based (exact + near) with an
+// optional vision-model review. Nothing is deleted from storage; the result is
+// stored in raw_data.imageDedupe and applied when the WordPress payload is
+// built (and shown in the publish preview).
+app.post('/api/product-details/:id/image-dedupe', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const mode = request.body?.mode === 'hash' ? 'hash' : 'hash+llm';
+  const candidates = (detail.images ?? [])
+    .filter((image) => image.image_type === 'main' || image.image_type === 'gallery')
+    .sort((left, right) => (left.image_type !== right.image_type
+      ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)))
+    .map((image) => {
+      const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? String(image.source_url) : null;
+      const base = imagePublicPath(image.storage_path);
+      return {
+        id: String(image.id), type: image.image_type, sortOrder: Number(image.sort_order) || 0,
+        sourceUrl: image.source_url ?? null, storagePath: image.storage_path ?? null,
+        contentSha256: image.content_sha256 ?? null,
+        url: sourceUrl || (base ? `${config.publicBaseUrl}${base}` : null),
+      };
+    });
+  const hashResult = await dedupeImagesByHash(candidates);
+  let llm = { removed: [], skipped: true };
+  if (mode === 'hash+llm') {
+    try {
+      llm = await dedupeImagesWithLlm({
+        images: hashResult.kept, title: detail.title ?? '',
+        config: {
+          apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+          model: config.complexModel, reasoningEffort: config.reasoningEffort,
+        },
+      });
+    } catch (error) {
+      request.log.warn({ err: error, productDetailId: id }, 'LLM image dedupe pass failed');
+      llm = { removed: [], error: String(error?.message || error).slice(0, 200) };
+    }
+  }
+  const removed = [...hashResult.removed, ...(llm.removed ?? [])];
+  const result = {
+    version: 1,
+    mode,
+    model: config.complexModel ?? null,
+    total: candidates.length,
+    keptIds: hashResult.kept.filter((image) => !(llm.removed ?? []).some((entry) => entry.imageId === String(image.id)))
+      .map((image) => String(image.id)),
+    removed,
+    counts: {
+      exact: hashResult.removed.filter((entry) => entry.reason === 'exact').length,
+      near: hashResult.removed.filter((entry) => entry.reason === 'near').length,
+      llm: (llm.removed ?? []).length,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  await db.updateProductRawData(id, { imageDedupe: result });
+  return { productDetailId: id, ...result };
+});
+
+app.get('/api/product-details/:id/image-dedupe', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  return { productDetailId: id, result: detail.raw_data?.imageDedupe ?? null };
+});
+
 // Variant normalization: the model proposes a swatch text/code/image for every
 // existing colour option plus standardized size labels; the server validates
 // the one-to-one mapping and stores the result for the publisher and the UI.
@@ -1398,6 +1467,7 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       swatches,
       sizes,
       variantsTranslated: sizesTranslated,
+      dedupe: raw.imageDedupe ?? null,
       descriptionCount: (detail.images ?? []).filter((image) => image.image_type === 'description').length,
       publishedImageCount: Array.isArray(publication?.payload?.images) ? publication.payload.images.length : null,
       publishedColorCount: payloadColors.length || null,

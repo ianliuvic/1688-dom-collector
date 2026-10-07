@@ -1000,6 +1000,15 @@ export function createDatabase(databaseUrl) {
     }
   }
 
+  /** Merge arbitrary fields into a product detail's raw_data (jsonb). */
+  async function updateProductRawData(productDetailId, patch) {
+    if (!productDetailId || !patch || typeof patch !== 'object') return false;
+    const result = await pool.query(`UPDATE product_details
+      SET raw_data = coalesce(raw_data, '{}'::jsonb) || $2::jsonb
+      WHERE id = $1`, [productDetailId, JSON.stringify(patch)]);
+    return result.rowCount > 0;
+  }
+
   /** Merge LinkFox enrichment fields into an existing detail's raw_data.
    * Only raw_data is touched; images, SKU rows and the publish gates keep the
    * original browser capture values. */
@@ -2594,7 +2603,7 @@ export function createDatabase(databaseUrl) {
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     getProductSplitPlan, saveProductSplitPlan,
     getVariantNormalization, saveVariantNormalization, addProductImage, updateSkuVariantSkus,
-    getSplitContents, saveSplitContents,
+    getSplitContents, saveSplitContents, updateProductRawData,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };
