@@ -1106,7 +1106,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     });
     results.keeper = {
       productId: keeper.id, title: keeperTitle, description: keeperDescription, styleNo: keeperStyleNo,
-      renumbered: keeperStyle.renumbered === true,
+      renumbered: keeperStyle.renumbered === true, externalId: template.external_id,
       postId: synced.post_id ?? publication.wp_post_id, url: synced.permalink ?? publication.wp_url,
       status: synced.status ?? 'publish', imageCount: images.length, skippedImages: skipped.length,
       dedupedImages: deduped,
@@ -1117,7 +1117,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   // 2) Create the remaining split products as drafts.
   for (const [index, content] of siblings.entries()) {
     try {
-      const externalId = `${template.external_id}S${index + 2}`;
+      const externalId = clean(previousWp?.externalId) || `${template.external_id}S${index + 2}`;
       const previousWp = storedWp.get(String(content.id)) ?? null;
       const review = await reviewSplitProduct({
         content,
@@ -1196,7 +1196,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
       });
       results.created.push({
-        productId: content.id, title, description, styleNo, categoryId, categoryName,
+        productId: content.id, title, description, styleNo, externalId, categoryId, categoryName,
         postId: synced.post_id ?? null, url: synced.permalink ?? null, status: synced.status ?? 'draft',
         imageCount: images.length, skippedImages: skipped.length, dedupedImages: deduped,
       });

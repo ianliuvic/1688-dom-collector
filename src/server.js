@@ -1796,12 +1796,12 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
             const wpEntries = [
               ...(result.keeper ? [{
                 productId: result.keeper.productId,
-                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' },
+                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper', externalId: result.keeper.externalId },
                 fields: { title: result.keeper.title, description: result.keeper.description },
               }] : []),
               ...result.created.map((item) => ({
                 productId: item.productId,
-                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status, categoryId: item.categoryId, role: 'split' },
+                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status, categoryId: item.categoryId, role: 'split', externalId: item.externalId },
                 fields: { title: item.title, description: item.description },
               })),
             ];
@@ -1943,12 +1943,12 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
             const wpEntries = [
               ...(result.keeper ? [{
                 productId: result.keeper.productId,
-                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' },
+                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper', externalId: result.keeper.externalId },
                 fields: { title: result.keeper.title, description: result.keeper.description },
               }] : []),
               ...publishedCreates.map((item) => ({
                 productId: item.productId,
-                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split' },
+                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId },
                 fields: { title: item.title, description: item.description },
               })),
             ];
@@ -2222,12 +2222,12 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
   const wpEntries = [
     ...(result.keeper ? [{
       productId: result.keeper.productId,
-      wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' },
+      wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper', externalId: result.keeper.externalId },
       fields: { title: result.keeper.title, description: result.keeper.description },
     }] : []),
     ...publishedCreates.map((item) => ({
       productId: item.productId,
-      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: 'publish', categoryId: item.categoryId, role: 'split' },
+      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId },
       fields: { title: item.title, description: item.description },
     })),
   ];
