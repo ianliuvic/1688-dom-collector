@@ -44,7 +44,7 @@ export function allocateBestSellerSlots(groups, target) {
   return rows;
 }
 
-export function selectBestSellers(candidates, target = 48, { random = Math.random } = {}) {
+export function selectBestSellers(candidates, target = 48, { random = Math.random, girlsSwimMax = 5 } = {}) {
   const unique = new Map();
   for (const candidate of candidates ?? []) {
     const postId = numeric(candidate.wp_post_id);
@@ -72,12 +72,26 @@ export function selectBestSellers(candidates, target = 48, { random = Math.rando
   const bySales = (left, right) => numeric(right.sale_quantity, -1) - numeric(left.sale_quantity, -1)
     || timestamp(right.listing_time) - timestamp(left.listing_time)
     || numeric(left.wp_post_id) - numeric(right.wp_post_id);
+  const isGirlsSwim = (item) => /^SKG/i.test(String(item?.style_no ?? '').trim());
+
+  // Girl's Swim (SKG styles) never occupy more than five slots overall.
+  let girlsUsed = 0;
+  const admits = (item) => {
+    if (!isGirlsSwim(item)) return true;
+    if (girlsUsed >= Math.max(0, Math.floor(numeric(girlsSwimMax)))) return false;
+    girlsUsed += 1;
+    return true;
+  };
 
   // 1) Global merit ranking by 1688 sales (from the official plugin shop scans).
   const ranking = [...unique.values()].sort(bySales);
   const topCount = safeTarget > 32 ? 32 : safeTarget;
   const tailCount = safeTarget - topCount;
-  const keptTop = ranking.slice(0, topCount);
+  const keptTop = [];
+  for (const item of ranking) {
+    if (keptTop.length >= topCount) break;
+    if (admits(item)) keptTop.push(item);
+  }
   const keptIds = new Set(keptTop.map((item) => item.wp_post_id));
 
   // 2) Shop-proportional selection (every shop with published products gets a
@@ -94,13 +108,21 @@ export function selectBestSellers(candidates, target = 48, { random = Math.rando
     const swap = Math.floor(random() * (index + 1));
     [shuffled[index], shuffled[swap]] = [shuffled[swap], shuffled[index]];
   }
-  const randomTail = shuffled.slice(0, tailCount);
+  const randomTail = [];
+  for (const item of shuffled) {
+    if (randomTail.length >= tailCount) break;
+    if (admits(item)) randomTail.push(item);
+  }
 
   // 3) Any tail slots the random draw could not fill fall back to the global
-  //    ranking order.
+  //    ranking order (still respecting the Girl's Swim cap).
   const chosenIds = new Set(randomTail.map((item) => item.wp_post_id));
-  const fallbackTail = ranking.slice(topCount, safeTarget)
-    .filter((item) => !chosenIds.has(item.wp_post_id));
+  const fallbackTail = [];
+  for (const item of ranking.slice(topCount)) {
+    if (keptTop.length + randomTail.length + fallbackTail.length >= safeTarget) break;
+    if (chosenIds.has(item.wp_post_id) || keptIds.has(item.wp_post_id)) continue;
+    if (admits(item)) fallbackTail.push(item);
+  }
   const selected = [...keptTop, ...randomTail, ...fallbackTail].slice(0, safeTarget);
 
   return {
@@ -109,6 +131,7 @@ export function selectBestSellers(candidates, target = 48, { random = Math.rando
     allocations: allocations.map(({ candidates: ignored, remainder: ignoredRemainder, ...row }) => row),
     keptTop: keptTop.length,
     randomTail: randomTail.length,
+    girlsSwim: selected.filter(isGirlsSwim).length,
     selected,
   };
 }
