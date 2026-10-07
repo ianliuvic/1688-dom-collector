@@ -2726,6 +2726,18 @@ app.get('/api/wordpress/split-swatch-repair-jobs/:id', { preHandler: requireApiK
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
+// Diagnostic: show what the vision pass would strip for one bundle.
+app.post('/api/product-details/:id/classify-detail-images', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const contents = await db.getSplitContents(detail.id);
+  if (!contents?.result?.products?.length) return reply.code(409).send({ error: 'split_contents_required' });
+  const before = JSON.stringify(contents.result);
+  const result = await stripNonProductDetailImages({ detail, contents: contents.result, config })
+    .catch((error) => ({ error: String(error?.message || error).slice(0, 200) }));
+  return { productDetailId: detail.id, ...result, changed: JSON.stringify(contents.result) !== before };
+});
+
 app.get('/api/dashboard/stats', { preHandler: requireDashboardAuth }, async () => ({
   ...(await db.getDashboardStats()),
   runtime: {
