@@ -1,9 +1,12 @@
 // Publishing-time image deduplication.
 //
-// Exact duplicates are detected by content hash; near duplicates by dHash/pHash
-// Hamming distance; and (optionally) a vision model reviews the survivors for
-// visually redundant images that hashes cannot catch (slight crops, re-shots).
-// Nothing on disk is deleted — the result only filters what gets published.
+// Exact duplicates are detected by content hash and by normalized source URL
+// (1688 serves one image as `x.jpg` and `x.jpg_.webp`); near duplicates by
+// dHash/pHash distance — identical structure with matching colours counts as
+// the same photo re-cropped or re-encoded; and (optionally) a vision model
+// reviews the survivors for visually redundant images that hashes cannot catch
+// (slight crops, re-shots). Nothing on disk is deleted — the result only
+// filters what gets published.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -20,6 +23,17 @@ const LLM_IMAGE_LIMIT = 16;
 
 function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+/**
+ * Normalized source-image key. 1688 serves one image under several URLs
+ * (`x.jpg`, `x.jpg_.webp`), so identical sources must collapse before hashing.
+ */
+export function normalizedSourceImageKey(value) {
+  return String(value ?? '').trim().toLowerCase()
+    .replace(/^http:/, 'https:')
+    .replace(/[?#].*$/, '')
+    .replace(/(\.(?:jpe?g|png|webp|avif|gif))_(\.(?:jpe?g|png|webp|avif|gif))$/, '$1');
 }
 
 /** 4x4 RGB grid (48 bytes) — cheap colour fingerprint for near-dup checks. */
@@ -83,6 +97,7 @@ export async function dedupeImagesByHash(images) {
   const kept = [];
   const removed = [];
   const bySha = new Map();
+  const byUrl = new Map();
   const withHashes = [];
   for (const image of images) {
     let sha = image.contentSha256 || null;
@@ -96,6 +111,11 @@ export async function dedupeImagesByHash(images) {
     }
     if (sha && bySha.has(sha)) {
       removed.push({ imageId: String(image.id), keptImageId: String(bySha.get(sha).id), reason: 'exact' });
+      continue;
+    }
+    const urlKey = image.sourceUrl ? normalizedSourceImageKey(image.sourceUrl) : null;
+    if (urlKey && byUrl.has(urlKey)) {
+      removed.push({ imageId: String(image.id), keptImageId: String(byUrl.get(urlKey).id), reason: 'source-url' });
       continue;
     }
     let near = null;
@@ -116,6 +136,7 @@ export async function dedupeImagesByHash(images) {
       continue;
     }
     if (sha) bySha.set(sha, image);
+    if (urlKey) byUrl.set(urlKey, image);
     if (hash) withHashes.push({ image, hash });
     kept.push(image);
   }

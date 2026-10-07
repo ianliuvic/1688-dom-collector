@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { analyzeProductMerchandising } from './product-merchandiser.js';
 import { applyReasoning } from './model-request.js';
-import { dedupeImagesByHash } from './image-dedupe.js';
+import { dedupeImagesByHash, normalizedSourceImageKey } from './image-dedupe.js';
 import { applyOptionMapOverrides, buildOptionOverrideIndex,
   resolveOptionDisplayLabel } from './option-overrides.js';
 
@@ -153,7 +153,7 @@ function selectPublishingImages(detail, translation, imageMode = 'translated', a
   const source = selected.length ? [...selected, ...fallback] : fallback;
   const seen = new Set();
   let kept = source.filter((image) => {
-    const key = clean(image.source_url);
+    const key = normalizedSourceImageKey(image.source_url);
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -746,6 +746,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     try {
       const outcome = await dedupeImagesByHash(rows.map((image) => ({
         id: String(image.id),
+        sourceUrl: image.source_url ?? null,
         contentSha256: image.content_sha256 ?? null,
         storagePath: image.storage_path ?? null,
       })));
