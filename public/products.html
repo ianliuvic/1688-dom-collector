@@ -425,6 +425,7 @@ async function setBundleStatus(id, value, stateEl){
 
 // --- bundle split editor -----------------------------------------------------
 const SPLITS = new Map();
+const SPLIT_CONTENTS = new Map();
 
 function splitItem(id){ return DATA.find((x) => String(x.id) === String(id)); }
 
@@ -452,8 +453,17 @@ async function toggleSplit(id){
     const res = await fetch('/api/product-details/' + id + '/split-plan', { headers: { accept: 'application/json' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const body = await res.json();
-    if (body.plan) { SPLITS.set(String(id), body.plan); renderSplitPanel(id); }
-    else renderSplitPanel(id, null);
+    if (body.plan) {
+      SPLITS.set(String(id), body.plan);
+      try {
+        const contentRes = await fetch('/api/product-details/' + id + '/split-content', { headers: { accept: 'application/json' } });
+        if (contentRes.ok) {
+          const contentBody = await contentRes.json();
+          if (contentBody.result) SPLIT_CONTENTS.set(String(id), contentBody.result);
+        }
+      } catch { /* content is optional */ }
+      renderSplitPanel(id);
+    } else renderSplitPanel(id, null);
   } catch (e) {
     panel.innerHTML = '<div class="sp-status">加载失败：' + esc(String((e && e.message) || e)) + '</div>';
   }
@@ -495,11 +505,30 @@ function renderSplitPanel(id, plan){
     const optionChips = (product.options || []).length
       ? product.options.map((text) => chip(text, index)).join('')
       : '<span class="muted">（无选项，可在下方未采用里分配）</span>';
+    const content = (SPLIT_CONTENTS.get(String(id))?.products ?? []).find((item) => item.id === product.id);
+    const contentBlock = content
+      ? '<div class="sp-row"><span class="sp-label">内容</span><span style="flex:1;min-width:0">'
+        + (content.title ? '<div class="pp-title">' + esc(content.title) + '</div>' : '<span class="pp-muted">（无标题）</span>')
+        + (content.description ? '<div class="pp-desc">' + esc(content.description) + '</div>' : '')
+        + ((content.colours || []).length
+          ? '<div class="pp-swatches" style="margin-top:4px">' + content.colours.map((colour) => '<span class="pp-swatch">'
+            + (colour.thumb ? '<img src="' + esc(colour.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">' : '')
+            + '<span>' + esc(colour.text || colour.source) + ' <span class="pp-muted">' + esc(colour.code || '') + '</span></span></span>').join('') + '</div>'
+          : '')
+        + ((content.skus || []).length
+          ? '<table class="pp-table" style="margin-top:4px"><thead><tr><th>SKU</th><th>尺码</th><th>源价</th><th>库存</th></tr></thead><tbody>'
+            + content.skus.slice(0, 30).map((sku) => '<tr><td><code>' + esc(sku.sku) + '</code></td><td>' + esc(sku.sizeText || sku.size || '') + '</td>'
+              + '<td>' + (sku.price === null || sku.price === undefined ? '—' : '¥' + sku.price) + '</td><td>' + (sku.stock === null ? '—' : sku.stock) + '</td></tr>').join('')
+            + '</tbody></table>'
+          : '')
+        + '</span></div>'
+      : '';
     return '<div class="sp-product"><div class="sp-title"><b>产品' + (index + 1) + '</b>'
       + '<input type="text" value="' + esc(product.name || '') + '" data-split-name="' + id + '" data-idx="' + index + '" placeholder="拆分后产品名称">'
       + '<span class="muted">参考价 ' + price + (product.reason ? ' · ' + esc(product.reason) : '') + '</span></div>'
       + '<div class="sp-row"><span class="sp-label">选项</span><span class="sp-opts">' + optionChips + '</span></div>'
       + '<div class="sp-row"><span class="sp-label">尺码</span><span class="sp-opts">' + (sizes || '<span class="muted">（保存后按矩阵重算）</span>') + '</span></div>'
+      + contentBlock
       + '</div>';
   }).join('');
   const ignored = (plan.ignoredOptions || []).length
@@ -519,6 +548,7 @@ function renderSplitPanel(id, plan){
     : (plan.source === 'manual' ? '手动方案' : '方案');
   panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 捆绑拆分</b>'
     + '<button type="button" data-split-run="' + id + '">重新分析（LLM）</button>'
+    + '<button type="button" data-split-content="' + id + '">生成内容（LLM）</button>'
     + '<button type="button" data-split-save="' + id + '">保存</button>'
     + '<button type="button" data-split-close="' + id + '">收起</button>'
     + '<span class="sp-status" id="split-status-' + id + '">' + sourceLabel + (plan.updatedAt ? ' · ' + esc(new Date(plan.updatedAt).toLocaleString()) : '') + '</span></div>'
@@ -751,6 +781,31 @@ async function runVariantNormalization(id, button){
   }
 }
 
+async function runSplitContent(id, button){
+  if (button) { button.disabled = true; button.textContent = '生成中…约 1–3 分钟'; }
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-content', { method: 'POST' });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 100));
+    const job = await res.json();
+    let state = job;
+    for (let attempt = 0; attempt < 60 && state.status === 'running'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      const poll = await fetch('/api/split-content-jobs/' + job.id, { headers: { accept: 'application/json' } });
+      state = await poll.json();
+    }
+    if (state.status !== 'completed') throw new Error(state.error || state.status);
+    const contentRes = await fetch('/api/product-details/' + id + '/split-content', { headers: { accept: 'application/json' } });
+    const body = await contentRes.json();
+    if (body.result) SPLIT_CONTENTS.set(String(id), body.result);
+    if (button) button.textContent = '生成内容（LLM）';
+    renderSplitPanel(id);
+  } catch (e) {
+    if (button) button.textContent = '失败：' + String((e && e.message) || e).slice(0, 50);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 document.addEventListener('click', (e) => {
   const bundleBtn = e.target.closest('button[data-bundle-value]');
   if (bundleBtn) {
@@ -760,6 +815,8 @@ document.addEventListener('click', (e) => {
   }
   const ppNorm = e.target.closest('button[data-pp-normalize]');
   if (ppNorm) { void runVariantNormalization(String(ppNorm.dataset.ppNormalize), ppNorm); return; }
+  const splitContentBtn = e.target.closest('button[data-split-content]');
+  if (splitContentBtn) { void runSplitContent(String(splitContentBtn.dataset.splitContent), splitContentBtn); return; }
   const ppToggle = e.target.closest('button[data-pp-id]');
   if (ppToggle) { void togglePublishPreview(String(ppToggle.dataset.ppId)); return; }
   const ppReload = e.target.closest('button[data-pp-reload]');

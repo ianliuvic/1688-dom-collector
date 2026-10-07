@@ -25,7 +25,7 @@ import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
-import { analyzeBundleSplit, recomputePlan } from './bundle-splitter.js';
+import { analyzeBundleSplit, recomputePlan, generateSplitContents } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
@@ -1060,6 +1060,76 @@ app.post('/api/product-details/:id/compose-skus', { preHandler: requireDashboard
   return {
     productDetailId: id, styleNo, pendingStyleNumber: !styleNo,
     count: composed.rows.length, rows: composed.rows,
+  };
+});
+
+// Content generation for the split products of a bundle: one vision call per
+// split product (title, description, variant names/codes, sizes) plus the
+// composed {STYLE}S{n}-{CODE}-{SIZE} SKUs. Runs as a background job (up to six
+// model calls per bundle); nothing is published.
+const splitContentJobs = new Map();
+
+app.post('/api/product-details/:id/split-content', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  if ([...splitContentJobs.values()].some((job) => job.status === 'running')) {
+    return reply.code(409).send({ error: 'split_content_already_running' });
+  }
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const planRecord = await db.getProductSplitPlan(id);
+  if (!planRecord?.plan?.products?.length) {
+    return reply.code(409).send({ error: 'split_plan_required' });
+  }
+  const publication = await db.getWordPressPublication(id);
+  const job = {
+    id: crypto.randomUUID(), productDetailId: id, status: 'running',
+    startedAt: new Date().toISOString(), completedAt: null, error: null, productCount: 0,
+  };
+  splitContentJobs.set(job.id, job);
+  trimTerminalJobs(splitContentJobs);
+  (async () => {
+    try {
+      const { contents } = await generateSplitContents({
+        detail,
+        plan: planRecord.plan,
+        styleNo: publication?.style_no ?? null,
+        config: {
+          apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+          model: config.complexModel, reasoningEffort: config.reasoningEffort,
+        },
+        baseUrl: config.publicBaseUrl,
+      });
+      const saved = await db.saveSplitContents(id, contents, config.complexModel ?? null);
+      job.productCount = contents.products.length;
+      job.result = { productCount: contents.products.length, styleNo: contents.styleNo };
+      job.updatedAt = saved.updated_at;
+      job.status = 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+      app.log.error({ err: error, productDetailId: id }, 'split content generation failed');
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/split-content-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const job = splitContentJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+app.get('/api/product-details/:id/split-content', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const record = await db.getSplitContents(id);
+  return {
+    productDetailId: id,
+    result: record?.result ?? null,
+    model: record?.model ?? null,
+    updatedAt: record?.updated_at ?? null,
   };
 });
 

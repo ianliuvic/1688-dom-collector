@@ -298,6 +298,12 @@ export function createDatabase(databaseUrl) {
         model text,
         updated_at timestamptz NOT NULL DEFAULT now()
       );
+      CREATE TABLE IF NOT EXISTS product_split_contents (
+        product_detail_id bigint PRIMARY KEY REFERENCES product_details(id) ON DELETE CASCADE,
+        result jsonb NOT NULL DEFAULT '{}'::jsonb,
+        model text,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE TABLE IF NOT EXISTS product_detail_translations (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -2381,6 +2387,21 @@ export function createDatabase(databaseUrl) {
     return saved.rows[0];
   }
 
+  /** Saved split-product contents (title/description/variants/SKUs per split product). */
+  async function getSplitContents(productDetailId) {
+    const result = await pool.query(
+      'SELECT * FROM product_split_contents WHERE product_detail_id=$1', [productDetailId]);
+    return result.rows[0] ?? null;
+  }
+
+  async function saveSplitContents(productDetailId, result, model) {
+    const saved = await pool.query(`INSERT INTO product_split_contents
+      (product_detail_id, result, model, updated_at) VALUES ($1,$2,$3,now())
+      ON CONFLICT (product_detail_id) DO UPDATE SET result=EXCLUDED.result, model=EXCLUDED.model, updated_at=now()
+      RETURNING *`, [productDetailId, JSON.stringify(result), model ?? null]);
+    return saved.rows[0];
+  }
+
   /** Append one downloaded image row (used when a missing swatch image is fetched later). */
   async function addProductImage(productDetailId, image) {    const result = await pool.query(`INSERT INTO product_detail_images
       (product_detail_id, image_type, sort_order, source_url, storage_path, mime_type,
@@ -2573,6 +2594,7 @@ export function createDatabase(databaseUrl) {
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     getProductSplitPlan, saveProductSplitPlan,
     getVariantNormalization, saveVariantNormalization, addProductImage, updateSkuVariantSkus,
+    getSplitContents, saveSplitContents,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };
