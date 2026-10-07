@@ -1758,8 +1758,10 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
               job.errors.push({ productDetailId, message: 'missing plan/contents/publication' });
               continue;
             }
+            let plan = null;
+            try { plan = (await db.getProductSplitPlan(productDetailId))?.plan ?? null; } catch { plan = null; }
             const result = await publishSplitProductsToWordPress({
-              detail, contents: contents.result, publication, config,
+              detail, contents: contents.result, publication, plan, config,
             });
             if (result.keeper) {
               const keeperPayload = result.keeper.payload;
@@ -1859,6 +1861,8 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
             let detail = await db.getProductDetail(productDetailId);
             const publication = await db.getWordPressPublication(productDetailId);
             const contents = await db.getSplitContents(productDetailId);
+            let plan = null;
+            try { plan = (await db.getProductSplitPlan(productDetailId))?.plan ?? null; } catch { plan = null; }
             if (!detail || !publication?.payload || !contents?.result?.products?.length) {
               job.failed += 1;
               job.errors.push({ productDetailId, message: 'missing plan/contents/publication' });
@@ -1875,7 +1879,7 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
               detail = await db.getProductDetail(productDetailId);
             }
             const result = await publishSplitProductsToWordPress({
-              detail, contents: contents.result, publication, config,
+              detail, contents: contents.result, publication, plan, config,
             });
             if (result.keeper) {
               const keeperPayload = result.keeper.payload;

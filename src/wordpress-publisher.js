@@ -697,6 +697,80 @@ ${list}
   return categories.some((item) => Number(item.id) === categoryId) ? categoryId : null;
 }
 
+function normalizeReviewTitle(value) {
+  const title = clean(value).replace(/\s+/g, ' ').slice(0, 160);
+  if (!title) return null;
+  const words = title.split(' ').filter(Boolean).length;
+  return words >= 2 && words <= 20 ? title : null;
+}
+
+function normalizeReviewDescription(value) {
+  const description = clean(value).replace(/\s+/g, ' ').slice(0, 1200);
+  if (!description) return null;
+  const words = description.split(' ').filter(Boolean).length;
+  return words >= 20 && words <= 200 ? description : null;
+}
+
+/**
+ * Grounds one split product in the original listing's option texts: picks the
+ * category of this product's own item (never the bundle) and, when the
+ * generated title/description describe pieces that belong to sibling products,
+ * returns corrected copy. Text-only, validated.
+ */
+async function reviewSplitProduct({ content, options, categories, currentCategoryId, config }) {
+  const list = categories.map((item) => `${item.id}: ${item.name}`).join('\n');
+  if (!list) return null;
+  const base = clean(config.modelBaseUrl).replace(/\/+$/, '') || 'https://api.deepseek.com';
+  const endpoint = base.endsWith('/chat/completions') ? base : `${base}${base.endsWith('/v1') ? '' : '/v1'}/chat/completions`;
+  const current = categories.find((item) => Number(item.id) === Number(currentCategoryId)) ?? null;
+  const optionTexts = (Array.isArray(options) ? options : []).map((value) => clean(value)).filter(Boolean);
+  const prompt = `你是电商选品助手，只输出严格JSON。
+一个 1688 捆绑 listing 被拆成多个独立商品，下面是其中一个拆分商品：
+- 它在原 listing 中对应的选项原文（判断品类的唯一权威依据）：${JSON.stringify(optionTexts)}
+- 计划中的中文参考名：${JSON.stringify(clean(content?.name))}
+- 当前英文标题：${JSON.stringify(clean(content?.title))}
+- 当前英文描述：${JSON.stringify(clean(content?.description).slice(0, 600))}
+- 当前主类目：${JSON.stringify(current?.name ?? '')}
+
+任务：
+1. 根据"选项原文"判断这件商品实际卖的是什么（如比基尼、泳衣上衣、泳裤、沙滩裙/罩衫、三件套等），从类目列表选一个最合适的主类目（必须是列表中的 id）。不要被标题里提到的其它部件误导。
+2. 检查当前标题和描述是否只写了"选项原文"代表的这件商品：
+   - 若写进了原 listing 的其它部件（例如选项只有"比基尼"却写了 with matching skirt / three-piece set / wrap skirt），或品类判断错误，给出修正版；
+   - 标题规则：2–15 个英文单词的稳定产品名，不含年份、平台名、颜色/印花/图案词、促销词，只描述这件商品；
+   - 描述规则：35–120 个英文单词的单段产品级描述，只保留属于这件商品的可见特征（品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁）；不得写颜色、印花、图案、单个 SKU、促销、年份、平台、材质、功能或不可见信息；可参考当前描述中属于这件商品的部分；
+   - 若当前标题/描述已经只描述这件商品，对应字段返回 null。
+输出：{"categoryId": 数字, "title": "修正标题" 或 null, "description": "修正描述" 或 null, "reason": "一句话"}
+
+类目列表：
+${list}`;
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${config.modelApiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify(applyReasoning({
+      model: config.complexModel,
+      messages: [{ role: 'user', content: prompt }],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 384000,
+    }, config.reasoningEffort)),
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!response.ok) return null;
+  const payload = await response.json().catch(() => null);
+  const text = contentTextOf(payload?.choices?.[0]?.message?.content);
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { parsed = null; }
+  if (!parsed) return null;
+  const categoryId = Number(parsed?.categoryId);
+  const category = categories.find((item) => Number(item.id) === categoryId) ?? null;
+  return {
+    categoryId: category ? category.id : null,
+    title: normalizeReviewTitle(parsed?.title),
+    description: normalizeReviewDescription(parsed?.description),
+    reason: clean(parsed?.reason),
+  };
+}
+
 function contentTextOf(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map((part) => (typeof part === 'string' ? part : part?.text ?? '')).join('');
@@ -714,7 +788,7 @@ function normalizedUrlKey(value) {
  * style numbers from their own category, external ids suffixed `S{n}`).
  * Existing attachments are reused; only genuinely new images are uploaded.
  */
-export async function publishSplitProductsToWordPress({ detail, contents, publication, config }) {
+export async function publishSplitProductsToWordPress({ detail, contents, publication, plan = null, config }) {
   const wp = wordpressClient(config);
   const template = publication?.payload ?? null;
   if (!template) throw new Error('A stored publication payload is required.');
@@ -725,6 +799,18 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   const detailImages = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
   const previousImages = new Map((template.images ?? [])
     .map((image) => [normalizedUrlKey(image?.source_url), image]));
+
+  // Original option texts per split product (authoritative for the item type)
+  // plus what a previous publish already recorded for the product.
+  const planProducts = new Map((Array.isArray(plan?.products) ? plan.products : [])
+    .map((item) => [String(item?.id ?? ''), item]));
+  const optionsFor = (content) => {
+    const fromPlan = planProducts.get(String(content?.id ?? ''))?.options;
+    if (Array.isArray(fromPlan) && fromPlan.length) return fromPlan.map((value) => clean(value)).filter(Boolean);
+    return (content?.colours ?? []).map((colour) => clean(colour?.source)).filter(Boolean);
+  };
+  const storedWp = new Map((Array.isArray(contents?.products) ? contents.products : [])
+    .map((item) => [String(item?.id ?? ''), item?.wp ?? null]));
 
   const attachmentFor = (url) => previousImages.get(normalizedUrlKey(url)) ?? null;
 
@@ -829,8 +915,23 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   // 1) Update the original post with the keeper product.
   {
+    const review = await reviewSplitProduct({
+      content: keeper,
+      options: optionsFor(keeper),
+      currentCategoryId: template.meta?.primary_category_id ?? (template.category_ids ?? [])[0] ?? null,
+      categories: allCategories,
+      config,
+    }).catch(() => null);
+    const keeperTitle = clean(review?.title) || clean(keeper.title);
+    const keeperDescription = clean(review?.description) || clean(keeper.description);
+    const pickedCategory = allCategories
+      .find((item) => Number(item.id) === Number(review?.categoryId)) ?? null;
+    const keeperCategories = [...new Set([
+      ...(pickedCategory ? [pickedCategory.id] : []),
+      ...(Array.isArray(template.category_ids) ? template.category_ids : []),
+    ].map(Number).filter((value) => Number.isInteger(value) && value > 0))];
     const { images, skipped, deduped } = await buildImages(keeper, {
-      externalId: template.external_id, styleNo: publication.style_no, altText: clean(keeper.title),
+      externalId: template.external_id, styleNo: publication.style_no, altText: keeperTitle,
     });
     const colours = buildColours(keeper);
     const prices = buildWearHongxiuPricing(detail);
@@ -838,22 +939,27 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       ...template,
       external_id: template.external_id,
       style_no: publication.style_no,
-      title: clean(keeper.title),
-      description: clean(keeper.description),
+      title: keeperTitle,
+      description: keeperDescription,
       status: 'publish',
+      category_ids: keeperCategories.length ? keeperCategories : (template.category_ids ?? []),
       images,
       colors: colours.length ? { default: colours[0].value, colors: colours } : null,
       sizes: (keeper.sizes ?? []).length ? { default: buildSizes(keeper)[0].label, sizes: buildSizes(keeper) } : null,
       sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(keeper) },
       bulk_pricing: prices,
-      meta: { ...(template.meta ?? {}), sku: publication.style_no, title: clean(keeper.title), description: clean(keeper.description) },
+      meta: {
+        ...(template.meta ?? {}),
+        ...(pickedCategory ? { primary_category_id: String(pickedCategory.id), primary_category: pickedCategory.name } : {}),
+        sku: publication.style_no, title: keeperTitle, description: keeperDescription,
+      },
       source: { ...(template.source ?? {}), split_product_id: keeper.id ?? null, split_product_name: keeper.name ?? null },
     };
     const synced = await wp('/wp-json/hx/v1/products/sync', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
     });
     results.keeper = {
-      productId: keeper.id, title: clean(keeper.title), styleNo: publication.style_no,
+      productId: keeper.id, title: keeperTitle, styleNo: publication.style_no,
       postId: synced.post_id ?? publication.wp_post_id, url: synced.permalink ?? publication.wp_url,
       status: synced.status ?? 'publish', imageCount: images.length, skippedImages: skipped.length,
       dedupedImages: deduped,
@@ -864,31 +970,45 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   // 2) Create the remaining split products as drafts.
   for (const [index, content] of siblings.entries()) {
     try {
-      let categoryId = await pickSplitCategory({ content, categories: allCategories, config });
       const externalId = `${template.external_id}S${index + 2}`;
-      const allocate = (primaryCategoryId) => wp('/wp-json/hx/v1/products/style-number', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          external_id: externalId,
-          primary_category_id: primaryCategoryId ?? 0,
-          reserve: true,
-        }),
-      });
-      let allocated;
-      try {
-        allocated = await allocate(categoryId);
-      } catch (error) {
-        // Some merchandising categories have no approved style-number prefix:
-        // fall back to the category the original (published) product uses.
-        const fallbackId = Number(template.meta?.primary_category_id) || 0;
-        if (!fallbackId || Number(categoryId) === fallbackId) throw error;
-        allocated = await allocate(fallbackId);
-        categoryId = fallbackId;
+      const previousWp = storedWp.get(String(content.id)) ?? null;
+      const review = await reviewSplitProduct({
+        content,
+        options: optionsFor(content),
+        currentCategoryId: previousWp?.categoryId ?? null,
+        categories: allCategories,
+        config,
+      }).catch(() => null);
+      const title = clean(review?.title) || clean(content.title);
+      const description = clean(review?.description) || clean(content.description);
+      let categoryId = Number(review?.categoryId) || await pickSplitCategory({ content, categories: allCategories, config });
+      // A product already published keeps its reserved style number.
+      let styleNo = clean(previousWp?.styleNo) || null;
+      if (!styleNo) {
+        const allocate = (primaryCategoryId) => wp('/wp-json/hx/v1/products/style-number', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            external_id: externalId,
+            primary_category_id: primaryCategoryId ?? 0,
+            reserve: true,
+          }),
+        });
+        let allocated;
+        try {
+          allocated = await allocate(categoryId);
+        } catch (error) {
+          // Some merchandising categories have no approved style-number prefix:
+          // fall back to the category the original (published) product uses.
+          const fallbackId = Number(template.meta?.primary_category_id) || 0;
+          if (!fallbackId || Number(categoryId) === fallbackId) throw error;
+          allocated = await allocate(fallbackId);
+          categoryId = fallbackId;
+        }
+        styleNo = clean(allocated.style_no);
+        if (!styleNo) throw new Error('Style number allocation returned nothing.');
       }
-      const styleNo = clean(allocated.style_no);
-      if (!styleNo) throw new Error('Style number allocation returned nothing.');
       const { images, skipped, deduped } = await buildImages(content, {
-        externalId, styleNo, altText: clean(content.title),
+        externalId, styleNo, altText: title,
       });
       const colours = buildColours(content);
       const sizes = buildSizes(content);
@@ -898,8 +1018,8 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         ...template,
         external_id: externalId,
         style_no: styleNo,
-        title: clean(content.title),
-        description: clean(content.description),
+        title,
+        description,
         status: 'draft',
         category_ids: categoryId ? [categoryId] : (template.category_ids ?? []),
         images,
@@ -908,7 +1028,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(content) },
         bulk_pricing: prices,
         meta: {
-          ...(template.meta ?? {}), sku: styleNo, title: clean(content.title), description: clean(content.description),
+          ...(template.meta ?? {}), sku: styleNo, title, description,
           primary_category_id: categoryId ? String(categoryId) : (template.meta?.primary_category_id ?? ''),
           primary_category: categoryName ?? template.meta?.primary_category ?? '',
         },
@@ -918,7 +1038,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
       });
       results.created.push({
-        productId: content.id, title: clean(content.title), styleNo, categoryId, categoryName,
+        productId: content.id, title, styleNo, categoryId, categoryName,
         postId: synced.post_id ?? null, url: synced.permalink ?? null, status: synced.status ?? 'draft',
         imageCount: images.length, skippedImages: skipped.length, dedupedImages: deduped,
       });
