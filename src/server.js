@@ -988,6 +988,81 @@ async function ensureSkuSwatchImages(detail) {
   return results;
 }
 
+// Compose each variant's SKU from the normalized code + size: {STYLE}-{CODE}-{SIZE}
+// (published products carry their real style number; others get the suffix now
+// and are prefixed after the style number is allocated at publish time).
+function composeVariantSkus(detail, normalizationRecord, styleNo) {
+  const result = normalizationRecord?.result ?? normalizationRecord ?? null;
+  if (!result) return null;
+  const colourCode = new Map((result.colours ?? []).map((colour) => [String(colour.source ?? ''), colour.code || null]));
+  const sizeText = new Map((result.sizes ?? []).map((size) => [String(size.source ?? ''), size.text || size.source]));
+  const used = new Map();
+  const rows = [];
+  for (const row of detail.skus ?? []) {
+    const options = row.option_data ?? {};
+    const colourSource = options.Color ?? options['颜色'] ?? null;
+    const sizeSource = options.Size ?? options['尺码'] ?? null;
+    const code = colourSource ? (colourCode.get(String(colourSource)) ?? null) : null;
+    const size = sizeSource ? (sizeText.get(String(sizeSource)) ?? String(sizeSource)) : null;
+    const segments = [code, size]
+      .filter(Boolean)
+      .map((value) => String(value).toUpperCase().replace(/[^A-Z0-9-]+/g, '-').replace(/^-+|-+$/g, ''))
+      .filter(Boolean);
+    if (!segments.length) continue;
+    const suffix = segments.join('-');
+    let sku = styleNo ? `${styleNo}-${suffix}` : suffix;
+    const count = (used.get(sku) ?? 0) + 1;
+    used.set(sku, count);
+    if (count > 1) sku = `${sku}-${count}`;
+    rows.push({
+      skuKey: row.sku_key,
+      skuId: row.sku_id ?? null,
+      sku,
+      colour: colourSource,
+      code,
+      size: sizeSource,
+      sizeText: size,
+      price: row.price === null ? null : Number(row.price),
+      stock: row.stock === null ? null : Number(row.stock),
+      pendingStyleNumber: !styleNo,
+    });
+  }
+  return rows;
+}
+
+async function saveComposedSkus(detail, normalizationRecord, styleNo) {
+  const rows = composeVariantSkus(detail, normalizationRecord, styleNo);
+  if (!rows || !rows.length) return null;
+  await db.updateSkuVariantSkus(detail.id, rows);
+  const result = {
+    ...(normalizationRecord.result ?? {}),
+    variantSkus: rows,
+    styleNo: styleNo ?? null,
+    skusUpdatedAt: new Date().toISOString(),
+  };
+  await db.saveVariantNormalization(detail.id, result, normalizationRecord.model ?? null);
+  return { rows, result };
+}
+
+// Recompute the composed variant SKUs for a product from its stored
+// normalization (also refreshes the SKU table rows).
+app.post('/api/product-details/:id/compose-skus', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const normalization = await db.getVariantNormalization(id);
+  if (!normalization) return reply.code(409).send({ error: 'normalization_required' });
+  const publication = await db.getWordPressPublication(id);
+  const styleNo = publication?.style_no ?? null;
+  const composed = await saveComposedSkus(detail, normalization, styleNo);
+  if (!composed) return reply.code(422).send({ error: 'no_sku_rows' });
+  return {
+    productDetailId: id, styleNo, pendingStyleNumber: !styleNo,
+    count: composed.rows.length, rows: composed.rows,
+  };
+});
+
 // Variant normalization: the model proposes a swatch text/code/image for every
 // existing colour option plus standardized size labels; the server validates
 // the one-to-one mapping and stores the result for the publisher and the UI.
@@ -1010,10 +1085,18 @@ app.post('/api/product-details/:id/normalize-variants', { preHandler: requireDas
       baseUrl: config.publicBaseUrl,
     });
     const saved = await db.saveVariantNormalization(id, result, config.complexModel ?? null);
+    const publication = await db.getWordPressPublication(id);
+    const composed = await saveComposedSkus(await db.getProductDetail(id), saved, publication?.style_no ?? null);
     return {
-      productDetailId: id, result: saved.result, model: saved.model,
-      updatedAt: saved.updated_at, imageCount: input.images.length,
+      productDetailId: id,
+      result: composed?.result ?? saved.result,
+      model: saved.model,
+      updatedAt: saved.updated_at,
+      imageCount: input.images.length,
       swatchImagesDownloaded: ensured.downloaded,
+      variantSkuCount: composed?.rows.length ?? 0,
+      styleNo: publication?.style_no ?? null,
+      pendingStyleNumber: !publication?.style_no,
     };
   } catch (error) {
     request.log.error({ err: error, productDetailId: id }, 'variant normalization failed');
@@ -1209,6 +1292,8 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
         result: decorateNormalization(normalization.result, detail),
         model: normalization.model ?? null,
         updatedAt: normalization.updated_at ?? null,
+        variantSkus: Array.isArray(normalization.result?.variantSkus) ? normalization.result.variantSkus : null,
+        styleNo: normalization.result?.styleNo ?? null,
       }
       : null,
     gates: {

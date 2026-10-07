@@ -205,6 +205,7 @@ export function createDatabase(databaseUrl) {
         UNIQUE (product_detail_id, sku_key)
       );
       ALTER TABLE product_detail_skus ADD COLUMN IF NOT EXISTS sku_id text;
+      ALTER TABLE product_detail_skus ADD COLUMN IF NOT EXISTS variant_sku text;
       CREATE TABLE IF NOT EXISTS product_detail_attributes (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -2381,8 +2382,7 @@ export function createDatabase(databaseUrl) {
   }
 
   /** Append one downloaded image row (used when a missing swatch image is fetched later). */
-  async function addProductImage(productDetailId, image) {
-    const result = await pool.query(`INSERT INTO product_detail_images
+  async function addProductImage(productDetailId, image) {    const result = await pool.query(`INSERT INTO product_detail_images
       (product_detail_id, image_type, sort_order, source_url, storage_path, mime_type,
        downloaded_at, content_sha256, byte_size)
       VALUES ($1,$2,$3,$4,$5,$6,now(),$7,$8) RETURNING *`, [
@@ -2474,6 +2474,28 @@ export function createDatabase(databaseUrl) {
     }
   }
 
+  /** Persist the composed per-variant SKUs (normalized code + size) on the SKU rows. */
+  async function updateSkuVariantSkus(productDetailId, entries) {
+    if (!Array.isArray(entries) || !entries.length) return { updated: 0 };
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      let updated = 0;
+      for (const entry of entries) {
+        const result = await client.query(`UPDATE product_detail_skus SET variant_sku=$3
+          WHERE product_detail_id=$1 AND sku_key=$2`, [productDetailId, entry.skuKey, entry.sku]);
+        updated += result.rowCount;
+      }
+      await client.query('COMMIT');
+      return { updated };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async function summarizeWordPressPublications() {
     const statusRows = await pool.query(`SELECT coalesce(publications.wp_status,'none') AS status, count(*)::int AS products
       FROM product_details details
@@ -2550,7 +2572,7 @@ export function createDatabase(databaseUrl) {
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     getProductSplitPlan, saveProductSplitPlan,
-    getVariantNormalization, saveVariantNormalization, addProductImage,
+    getVariantNormalization, saveVariantNormalization, addProductImage, updateSkuVariantSkus,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };

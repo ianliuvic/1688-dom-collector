@@ -711,6 +711,17 @@ function renderPublishPreview(id, data){
           + norm.sizes.map((size) => '<span class="pp-tag">' + esc(size.text || size.source) + (size.placeholder ? '（占位）' : '') + '</span>').join('')
           + '</span></div>'
         : '')
+      + ((data.normalization.variantSkus || []).length
+        ? '<div class="pp-card-title" style="margin-top:8px">组合 SKU（'
+          + esc(data.normalization.styleNo || '待分配款号') + '）</div>'
+          + '<table class="pp-table"><thead><tr><th>SKU</th><th>颜色</th><th>尺码</th><th>源价</th><th>库存</th></tr></thead><tbody>'
+          + data.normalization.variantSkus.slice(0, 40).map((row) => '<tr>'
+            + '<td><code>' + esc(row.sku) + '</code>' + (row.pendingStyleNumber ? ' <span class="pp-chip gray">待款号</span>' : '') + '</td>'
+            + '<td>' + esc(row.colour || '') + ' <span class="pp-muted">' + esc(row.code || '') + '</span></td>'
+            + '<td>' + esc(row.sizeText || row.size || '') + '</td>'
+            + '<td>' + fmtMoney(row.price, 'CNY') + '</td><td>' + (row.stock === null ? '—' : row.stock) + '</td></tr>').join('')
+          + '</tbody></table>'
+        : '')
       + (norm.notes ? '<div class="pp-muted" style="margin-top:4px">备注：' + esc(norm.notes) + '</div>' : '')
       + '</div>'
     : '';
