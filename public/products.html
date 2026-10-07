@@ -506,7 +506,21 @@ function renderSplitPanel(id, plan){
       ? product.options.map((text) => chip(text, index)).join('')
       : '<span class="muted">（无选项，可在下方未采用里分配）</span>';
     const content = (SPLIT_CONTENTS.get(String(id))?.products ?? []).find((item) => item.id === product.id);
-    const contentBlock = content
+    const assignedImages = [
+      ...(product.imageIds || []).map((imageId) => {
+        const galleryImage = (item.gallery || []).find((image) => String(image.id) === String(imageId));
+        return { kind: 'id', ref: String(imageId), thumb: galleryImage?.thumb ?? null };
+      }),
+      ...(product.imageUrls || []).map((url) => ({ kind: 'url', ref: String(url), thumb: String(url) })),
+    ];
+    const assignedBlock = '<div class="sp-row"><span class="sp-label">已分配图</span><span class="sp-imgs">'
+      + (assignedImages.length
+        ? assignedImages.map((image) => '<div class="sp-img" style="width:66px">'
+          + '<img src="' + esc(image.thumb || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt="">'
+          + '<div class="sp-assign"><button type="button" title="从此产品移除" data-split-unassign="' + id + '" data-kind="' + image.kind + '" data-ref="' + esc(image.ref) + '" data-idx="' + index + '">×</button></div>'
+          + '</div>').join('')
+        : '<span class="muted">（无，可在下方图片区勾选）</span>')
+      + '</span></div>';    const contentBlock = content
       ? '<div class="sp-row"><span class="sp-label">内容</span><span style="flex:1;min-width:0">'
         + (content.title ? '<div class="pp-title">' + esc(content.title) + '</div>' : '<span class="pp-muted">（无标题）</span>')
         + (content.description ? '<div class="pp-desc">' + esc(content.description) + '</div>' : '')
@@ -528,6 +542,7 @@ function renderSplitPanel(id, plan){
       + '<span class="muted">参考价 ' + price + (product.reason ? ' · ' + esc(product.reason) : '') + '</span></div>'
       + '<div class="sp-row"><span class="sp-label">选项</span><span class="sp-opts">' + optionChips + '</span></div>'
       + '<div class="sp-row"><span class="sp-label">尺码</span><span class="sp-opts">' + (sizes || '<span class="muted">（保存后按矩阵重算）</span>') + '</span></div>'
+      + assignedBlock
       + contentBlock
       + '</div>';
   }).join('');
@@ -781,6 +796,19 @@ async function runVariantNormalization(id, button){
   }
 }
 
+function unassignSplitImage(id, kind, ref, index){
+  const plan = SPLITS.get(String(id));
+  const product = plan && (plan.products || [])[index];
+  if (!product) return;
+  if (kind === 'id') {
+    product.imageIds = (product.imageIds || []).map(String).filter((value) => value !== String(ref));
+  } else {
+    product.imageUrls = (product.imageUrls || []).map(String).filter((value) => value !== String(ref));
+  }
+  plan.source = 'manual';
+  renderSplitPanel(id, plan);
+}
+
 async function runSplitContent(id, button){
   if (button) { button.disabled = true; button.textContent = '生成中…约 1–3 分钟'; }
   try {
@@ -817,6 +845,12 @@ document.addEventListener('click', (e) => {
   if (ppNorm) { void runVariantNormalization(String(ppNorm.dataset.ppNormalize), ppNorm); return; }
   const splitContentBtn = e.target.closest('button[data-split-content]');
   if (splitContentBtn) { void runSplitContent(String(splitContentBtn.dataset.splitContent), splitContentBtn); return; }
+  const unassign = e.target.closest('button[data-split-unassign]');
+  if (unassign) {
+    unassignSplitImage(String(unassign.dataset.splitUnassign), unassign.dataset.kind,
+      unassign.dataset.ref, Number(unassign.dataset.idx));
+    return;
+  }
   const ppToggle = e.target.closest('button[data-pp-id]');
   if (ppToggle) { void togglePublishPreview(String(ppToggle.dataset.ppId)); return; }
   const ppReload = e.target.closest('button[data-pp-reload]');
