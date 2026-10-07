@@ -1023,6 +1023,8 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     });
     const colours = buildColours(keeper);
     const prices = buildWearHongxiuPricing(detail);
+    const keeperSkuRows = buildSkuRows(keeper, keeperStyleNo);
+    const keeperInStock = keeperSkuRows.length > 0 && keeperSkuRows.every((row) => row.available === true);
     const payload = {
       ...template,
       external_id: template.external_id,
@@ -1034,12 +1036,15 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       images,
       colors: colours.length ? { default: colours[0].value, colors: colours } : null,
       sizes: (keeper.sizes ?? []).length ? { default: buildSizes(keeper)[0].label, sizes: buildSizes(keeper) } : null,
-      sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(keeper, keeperStyleNo) },
+      sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: keeperSkuRows },
       bulk_pricing: prices,
       meta: {
         ...(template.meta ?? {}),
         ...(pickedCategory ? { primary_category_id: String(pickedCategory.id), primary_category: pickedCategory.name } : {}),
         style: pickedCategory?.name ?? template.meta?.style ?? '',
+        sample_available: keeperInStock,
+        sample_lead_time: keeperInStock ? '3 working days' : '7 to 14 working days',
+        lead_time: keeperInStock ? '3 working days' : '7 to 14 working days',
         sku: keeperStyleNo, title: keeperTitle, description: keeperDescription,
       },
       source: { ...(template.source ?? {}), split_product_id: keeper.id ?? null, split_product_name: keeper.name ?? null },
@@ -1109,6 +1114,8 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       const sizes = buildSizes(content);
       const prices = buildWearHongxiuPricing(detail);
       const categoryName = allCategories.find((item) => Number(item.id) === Number(categoryId))?.name ?? clean(template.meta?.primary_category);
+      const siblingSkuRows = buildSkuRows(content, styleNo);
+      const siblingInStock = siblingSkuRows.length > 0 && siblingSkuRows.every((row) => row.available === true);
       const payload = {
         ...template,
         external_id: externalId,
@@ -1120,13 +1127,16 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         images,
         colors: colours.length ? { default: colours[0].value, colors: colours } : null,
         sizes: sizes.length ? { default: sizes[0].label, sizes } : null,
-        sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(content, styleNo) },
+        sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: siblingSkuRows },
         bulk_pricing: prices,
         meta: {
           ...(template.meta ?? {}), sku: styleNo, title, description,
           primary_category_id: categoryId ? String(categoryId) : (template.meta?.primary_category_id ?? ''),
           primary_category: categoryName ?? template.meta?.primary_category ?? '',
           style: categoryName ?? template.meta?.style ?? '',
+          sample_available: siblingInStock,
+          sample_lead_time: siblingInStock ? '3 working days' : '7 to 14 working days',
+          lead_time: siblingInStock ? '3 working days' : '7 to 14 working days',
         },
         source: { ...(template.source ?? {}), split_product_id: content.id ?? null, split_product_name: content.name ?? null },
       };

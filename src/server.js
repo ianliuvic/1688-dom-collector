@@ -3132,6 +3132,73 @@ app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboar
   samples: await db.samplePublicationStocks(request.query?.limit),
 }));
 
+// Recompute the sample-availability meta for published pages whose payload stock
+// changed after the last sync (split/renumber runs). Deterministic, no model.
+const stockRepairJobs = new Map();
+
+app.post('/api/wordpress/publications/stock-audit/repair', { preHandler: requireApiKey }, async (_request, reply) => {
+  if ([...stockRepairJobs.values()].some((job) => job.status === 'running')) {
+    return reply.code(409).send({ error: 'stock_repair_already_running' });
+  }
+  const job = {
+    id: crypto.randomUUID(), status: 'running', total: 0, repaired: 0, failed: 0,
+    createdAt: new Date().toISOString(), completedAt: null, errors: [],
+  };
+  stockRepairJobs.set(job.id, job);
+  trimTerminalJobs(stockRepairJobs);
+  (async () => {
+    try {
+      const rows = await db.listSampleAvailabilityMismatches(500);
+      job.total = rows.length;
+      for (const row of rows) {
+        try {
+          const publication = await db.getWordPressPublication(row.product_detail_id);
+          const payload = publication?.payload;
+          if (!publication || !payload) { job.failed += 1; continue; }
+          const skuRows = Array.isArray(payload.sku_matrix?.rows) ? payload.sku_matrix.rows : [];
+          const inStock = skuRows.length > 0 && skuRows.every((sku) => {
+            const value = sku?.source_stock;
+            return value !== null && value !== undefined && value !== '' && Number(value) > 0;
+          });
+          payload.meta = {
+            ...(payload.meta ?? {}),
+            sample_available: inStock,
+            sample_lead_time: inStock ? '3 working days' : '7 to 14 working days',
+            lead_time: inStock ? '3 working days' : '7 to 14 working days',
+          };
+          await updateWordPressProductStyleNumber({
+            publication, styleNo: publication.style_no, config,
+            optionOverrides: await db.listProductOptionOverrides(row.product_detail_id),
+          });
+          const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+          await db.saveWordPressPublication(row.product_detail_id, {
+            translationId: publication.translation_id, externalId: publication.external_id,
+            styleNo: publication.style_no, wpPostId: publication.wp_post_id, wpUrl: publication.wp_url,
+            wpEditUrl: publication.wp_edit_url, wpStatus: publication.wp_status ?? 'publish',
+            syncHash, payload, result: publication.result ?? {}, lastError: null,
+          });
+          job.repaired += 1;
+        } catch (error) {
+          job.failed += 1;
+          job.errors.push({ productDetailId: row.product_detail_id, message: String(error?.message || error).slice(0, 160) });
+        }
+      }
+      job.status = job.failed ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 200);
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress/stock-repair-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = stockRepairJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
 app.get('/api/wordpress/publications', { preHandler: requireDashboardOrApiKey }, async (request) => db.listWordPressPublications({
   status: request.query?.status ?? '',
   search: request.query?.search ?? '',
