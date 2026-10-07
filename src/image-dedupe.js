@@ -7,6 +7,7 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import sharp from 'sharp';
 
 import { computeImageHashes } from './image-hash.js';
 import { applyReasoning } from './model-request.js';
@@ -14,10 +15,41 @@ import { applyReasoning } from './model-request.js';
 const FALLBACK_BASE_URL = 'https://api.deepseek.com';
 const DHASH_MAX = 3;
 const PHASH_MAX = 6;
+const COLOR_TOLERANCE = 14;
 const LLM_IMAGE_LIMIT = 16;
 
 function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+/** 4x4 RGB grid (48 bytes) — cheap colour fingerprint for near-dup checks. */
+async function colorSignature(buffer) {
+  try {
+    const { data } = await sharp(buffer, { failOn: 'none' })
+      .resize(4, 4, { fit: 'fill' }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    return [...data];
+  } catch {
+    return null;
+  }
+}
+
+function colorDistance(left, right) {
+  if (!left || !right || left.length !== right.length) return 255;
+  let sum = 0;
+  for (let index = 0; index < left.length; index += 1) sum += Math.abs(left[index] - right[index]);
+  return sum / left.length;
+}
+
+function nearDuplicateDistances(left, right) {
+  const dh = hammingHex(left.dhashHex, right.dhashHex);
+  const ph = hammingHex(left.phashHex, right.phashHex);
+  if (dh <= DHASH_MAX && ph <= PHASH_MAX) return { dh, ph, colour: null };
+  const colour = colorDistance(left.color, right.color);
+  // Identical structure with matching colours = the same photo re-cropped or
+  // re-encoded; different colours of the same pose stay untouched.
+  if (ph <= 4 && colour <= COLOR_TOLERANCE) return { dh, ph, colour };
+  if (ph <= 3 && dh <= 8 && colour <= COLOR_TOLERANCE) return { dh, ph, colour };
+  return null;
 }
 
 export function hammingHex(left, right) {
@@ -59,7 +91,7 @@ export async function dedupeImagesByHash(images) {
       try {
         const bytes = await fs.readFile(image.storagePath);
         if (!sha) sha = sha256(bytes);
-        hash = await computeImageHashes(bytes);
+        hash = { ...await computeImageHashes(bytes), color: await colorSignature(bytes) };
       } catch { /* keep going without hashes */ }
     }
     if (sha && bySha.has(sha)) {
@@ -69,10 +101,9 @@ export async function dedupeImagesByHash(images) {
     let near = null;
     if (hash) {
       for (const entry of withHashes) {
-        const dhashDistance = hammingHex(entry.hash.dhashHex, hash.dhashHex);
-        const phashDistance = hammingHex(entry.hash.phashHex, hash.phashHex);
-        if (dhashDistance <= DHASH_MAX && phashDistance <= PHASH_MAX) {
-          near = { entry, dhashDistance, phashDistance };
+        const match = nearDuplicateDistances(entry.hash, hash);
+        if (match) {
+          near = { entry, ...match };
           break;
         }
       }
@@ -80,7 +111,7 @@ export async function dedupeImagesByHash(images) {
     if (near) {
       removed.push({
         imageId: String(image.id), keptImageId: String(near.entry.image.id), reason: 'near',
-        dhashDistance: near.dhashDistance, phashDistance: near.phashDistance,
+        dhashDistance: near.dh, phashDistance: near.ph, colorDistance: near.colour,
       });
       continue;
     }
