@@ -208,24 +208,23 @@ export function normalizeVariantResult(parsed, input) {
   };
 }
 
-export async function normalizeVariants({ detail, config = {}, baseUrl }) {
-  const input = buildNormalizeInput(detail, { baseUrl });
-  const colourLines = input.colours.map((colour) => `- ${colour.value}`).join('\n') || '（无颜色选项）';
-  const sizeLines = input.sizes.map((size) => `- ${size}`).join('\n') || '（无尺码选项）';
-  const imageLines = input.images.map((image) => `${image.number}. ${image.label}`).join('\n');
+async function runNormalizeModel({ title, colourValues, sizeValues, images, config }) {
+  const colourLines = colourValues.map((value) => `- ${value}`).join('\n') || '（无颜色选项）';
+  const sizeLines = sizeValues.map((value) => `- ${value}`).join('\n') || '（无尺码选项）';
+  const imageLines = images.map((image) => `${image.number}. ${image.label}`).join('\n');
   const prompt = `你是电商商品变体规范化助手，只输出严格JSON。
-下面是一个 1688 商品的标题、图片（按编号顺序提供）、以及当前的颜色选项文本和尺码选项文本。
+下面是一个商品的标题、图片（按编号顺序提供）、以及当前的颜色选项文本和尺码选项文本。
 请完成两件事：
 一、颜色/花色变体规范化。看图片判断这个商品实际有几款颜色/印花，并把它和下面的颜色选项一一对应：
 - 为每个颜色选项输出：简洁准确的英文名称（≤4 个单词，如 Black and White、Leopard、Sky Blue）、一个用于构建 SKU 的短缩写（大写字母/数字/连字符，≤8 字符，如 BW、LEOP、SKYBLU）、最能代表该变体的图片编号。
-- 图片编号优先选"变体色卡"图；没有色卡图时，从商品图里选出能看清该颜色的那张；都看不出来时 imageNumber 用 null，confidence 给低分。
+- 图片编号优先选"变体色卡"图；没有色卡图时，从商品图/详情图里选出能看清该颜色的那张；都看不出来时 imageNumber 用 null，confidence 给低分。
 - 如果某个颜色文本没有意义（如"现货放心拍""包邮""图片色"这类占位或卖家文案），仍要输出一行，但 placeholder 设为 true，同时根据图片给出正确的英文名称（如果确实能从图片看出颜色）。
 - 绝不能编造不存在的颜色，也不能遗漏或多出任何选项，source 必须逐字使用给出的原文。
 二、尺码规范化。为每个尺码选项输出标准英文标签（如 均码→One Size、加大码→XL），去掉占位/无意义项（placeholder=true），不要合并不同尺码。
 输出格式：
 {"colours":[{"source":"原文","text":"英文名","code":"缩写","imageNumber":3,"confidence":0.9,"placeholder":false}],"sizes":[{"source":"原文","text":"标准英文","placeholder":false}],"notes":"一句话备注"}
 
-标题：${JSON.stringify(input.title)}
+标题：${JSON.stringify(title)}
 颜色选项：
 ${colourLines}
 尺码选项：
@@ -235,7 +234,7 @@ ${imageLines}`;
 
   const content = [
     { type: 'text', text: prompt },
-    ...input.images.map((image) => ({ type: 'image_url', image_url: { url: image.url } })),
+    ...images.map((image) => ({ type: 'image_url', image_url: { url: image.url } })),
   ];
   let lastRaw = '';
   let lastProblem = 'no usable result';
@@ -274,8 +273,78 @@ ${imageLines}`;
       lastProblem = 'JSON 无法解析或缺少 colours';
       continue;
     }
-    const result = normalizeVariantResult(parsed, input);
-    return { input, result };
+    return parsed;
   }
   throw new Error(`Variant normalization returned no usable result: ${String(lastRaw).slice(0, 300)}`);
+}
+
+export async function normalizeVariants({ detail, config = {}, baseUrl }) {
+  const input = buildNormalizeInput(detail, { baseUrl });
+  const parsed = await runNormalizeModel({
+    title: input.title,
+    colourValues: input.colours.map((colour) => colour.value),
+    sizeValues: input.sizes,
+    images: input.images,
+    config,
+  });
+  return { input, result: normalizeVariantResult(parsed, input) };
+}
+
+/**
+ * Normalize a scoped variant set (one split product): its own option values,
+ * its own sizes and the images assigned to it (plus each option's own swatch).
+ */
+export async function normalizeVariantScope({
+  detail, options = [], sizes = [], imageIds = [], imageUrls = [], title = '', config = {}, baseUrl,
+}) {
+  const raw = detail?.raw_data ?? {};
+  const colourOptions = (Array.isArray(raw.skuOptions) ? raw.skuOptions : [])
+    .filter((option) => /(颜色|color|colour)/i.test(String(option?.dimensionName ?? '')));
+  const skuImageByKey = new Map((detail?.images ?? []).filter((image) => image.image_type === 'sku')
+    .map((image) => [normalizeImageKey(image.source_url), image]));
+  const byId = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
+  const images = [];
+  const seen = new Set();
+  const push = (url, label, image = null) => {
+    if (!url || seen.has(url) || images.length >= MAX_IMAGES) return;
+    seen.add(url);
+    images.push({
+      id: image?.id != null ? String(image.id) : null, url, label,
+      role: image?.image_type ?? 'assigned', number: images.length + 1,
+    });
+  };
+  for (const id of imageIds) {
+    const image = byId.get(String(id));
+    if (!image) continue;
+    const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? cleanText(image.source_url) : null;
+    push(sourceUrl || publicImageUrl(image.storage_path, baseUrl), image.image_type === 'main' ? '主图' : '商品图', image);
+  }
+  for (const url of imageUrls) push(cleanText(url), '详情图');
+  const colours = [];
+  for (const option of options) {
+    const value = cleanText(option);
+    if (!value) continue;
+    const sourceEntry = colourOptions.find((entry) => cleanText(entry?.text) === value);
+    const sourceImage = cleanText(sourceEntry?.image);
+    const matched = sourceImage ? skuImageByKey.get(normalizeImageKey(sourceImage)) : null;
+    colours.push({
+      value,
+      ownImageId: matched ? String(matched.id) : null,
+      ownImageUrl: sourceImage || null,
+      ownImage: matched ?? null,
+    });
+    const swatchUrl = matched
+      ? (/^https:\/\//i.test(matched.source_url || '') ? cleanText(matched.source_url) : publicImageUrl(matched.storage_path, baseUrl))
+      : (sourceImage || null);
+    push(swatchUrl, `变体色卡：${value}`, matched);
+  }
+  const sizeList = sizes.map(cleanText).filter(Boolean);
+  const parsed = await runNormalizeModel({ title, colourValues: colours.map((colour) => colour.value), sizeValues: sizeList, images, config });
+  const result = normalizeVariantResult(parsed, { colours, sizes: sizeList, images });
+  const thumbById = new Map(images.map((image) => [String(image.id), image.url]));
+  result.colours = result.colours.map((colour) => ({
+    ...colour,
+    thumb: colour.imageId ? (thumbById.get(String(colour.imageId)) ?? null) : null,
+  }));
+  return { input: { title, imageCount: images.length }, result };
 }

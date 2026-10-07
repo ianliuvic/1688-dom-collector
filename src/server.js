@@ -25,7 +25,7 @@ import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
-import { analyzeBundleSplit, recomputePlan, generateSplitContents } from './bundle-splitter.js';
+import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
@@ -1132,6 +1132,62 @@ app.get('/api/product-details/:id/split-content', { preHandler: requireDashboard
     model: record?.model ?? null,
     updatedAt: record?.updated_at ?? null,
   };
+});
+
+// Re-run ONLY the variant normalization for every split product (keeps the
+// generated titles/descriptions, refreshes swatch text/code/image, sizes and
+// the composed SKUs). Background job, up to four concurrent.
+const splitNormalizeJobs = new Map();
+
+app.post('/api/product-details/:id/split-normalize', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const running = [...splitNormalizeJobs.values()].filter((job) => job.status === 'running').length;
+  if (running >= 4) return reply.code(409).send({ error: 'split_normalize_busy', running });
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const planRecord = await db.getProductSplitPlan(id);
+  if (!planRecord?.plan?.products?.length) return reply.code(409).send({ error: 'split_plan_required' });
+  const contentRecord = await db.getSplitContents(id);
+  if (!contentRecord?.result?.products?.length) return reply.code(409).send({ error: 'split_content_required' });
+  const publication = await db.getWordPressPublication(id);
+  const job = {
+    id: crypto.randomUUID(), productDetailId: id, status: 'running',
+    startedAt: new Date().toISOString(), completedAt: null, error: null, productCount: 0,
+  };
+  splitNormalizeJobs.set(job.id, job);
+  trimTerminalJobs(splitNormalizeJobs);
+  (async () => {
+    try {
+      const contents = await normalizeSplitContents({
+        detail,
+        plan: planRecord.plan,
+        contents: contentRecord.result,
+        styleNo: publication?.style_no ?? null,
+        config: {
+          apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+          model: config.complexModel, reasoningEffort: config.reasoningEffort,
+        },
+        baseUrl: config.publicBaseUrl,
+      });
+      const saved = await db.saveSplitContents(id, contents, config.complexModel ?? null);
+      job.productCount = contents.products.length;
+      job.status = 'completed';
+      job.updatedAt = saved.updated_at;
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+      request.log.error({ err: error, productDetailId: id }, 'split variant normalization failed');
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/split-normalize-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const job = splitNormalizeJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
 // Variant normalization: the model proposes a swatch text/code/image for every

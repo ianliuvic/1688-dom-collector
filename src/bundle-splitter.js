@@ -8,6 +8,7 @@
 // derived from the stored SKU matrix, never from the model.
 
 import { applyReasoning } from './model-request.js';
+import { normalizeVariantScope } from './variant-normalizer.js';
 
 const SIZE_RE = /(尺码|尺寸|码数|size)/i;
 const COLOR_RE = /(颜色|color|colour)/i;
@@ -401,13 +402,9 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
 输出内容：
 - title：2–15 个英文单词的稳定产品名称；不得包含年份、平台名（Amazon/AliExpress/TikTok 等）、Hot Sale、Cross-Border、颜色、印花或图案词。
 - description：35–120 个英文单词的单段产品级描述；只写多张图片共同体现的稳定可见特点（品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁、套装组成）；不得写颜色、印花、图案、单个 SKU、促销、年份、平台、SEO 关键词、穿着效果、材质、功能或不可见信息。
-- colours：该商品的每个颜色/花色选项逐一输出（source 必须逐字使用给出的原文），给出简洁英文名 text（≤4 个单词）和 SKU 缩写 code（大写字母/数字/连字符，≤8 字符）。
-- sizes：每个尺码逐一输出（source 逐字使用原文），给出标准英文标签 text（如 均码→One Size）。
-输出格式：{"title":"","description":"","colours":[{"source":"原文","text":"英文名","code":"缩写"}],"sizes":[{"source":"原文","text":"标准英文"}]}
+输出格式：{"title":"","description":""}
 
-拆分商品参考名（中文）：${JSON.stringify(cleanText(product.name))}
-颜色/花色选项（必须逐一覆盖）：${(product.options ?? []).map(cleanText).join(' | ') || '（无）'}
-尺码（必须逐一覆盖）：${(product.sizes ?? []).map(cleanText).join(' / ') || '（无）'}`;
+拆分商品参考名（中文）：${JSON.stringify(cleanText(product.name))}`;
     const content = [
       { type: 'text', text: prompt },
       ...images.map((image) => ({ type: 'image_url', image_url: { url: image.url } })),
@@ -451,24 +448,36 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
       if (!parsed) lastProblem = lastProblem === 'no usable content' ? 'JSON 无法解析' : lastProblem;
     }
     if (!parsed) throw new Error(`Split content for ${product.id ?? index + 1} returned no usable result.`);
-    const colourProposals = new Map((Array.isArray(parsed.colours) ? parsed.colours : [])
-      .map((colour) => [cleanText(colour?.source), colour]));
-    const usedCodes = new Set();
-    const colours = (product.options ?? []).map((option) => {
-      const proposal = colourProposals.get(cleanText(option)) ?? {};
-      let code = UPPER_SEGMENT(cleanText(proposal.code)).slice(0, 12) || null;
-      if (code) {
-        const base = code;
-        let suffix = 2;
-        while (usedCodes.has(code)) { code = `${base}-${suffix}`; suffix += 1; }
-        usedCodes.add(code);
-      }
-      const swatch = images.find((image) => image.label === `变体色卡：${cleanText(option)}`);
-      return { source: cleanText(option), text: cleanText(proposal.text).slice(0, 60) || null, code, thumb: swatch?.url ?? null };
-    });
-    const sizeProposals = new Map((Array.isArray(parsed.sizes) ? parsed.sizes : [])
-      .map((size) => [cleanText(size?.source), size]));
-    const sizeTexts = new Map((product.sizes ?? []).map((size) => [cleanText(size), cleanText(sizeProposals.get(cleanText(size))?.text) || cleanText(size)]));
+    // Variant naming/sizes now go through the dedicated normalization pipeline
+    // (own-swatch fallback, placeholder flags, 1:1 validation, size ordering).
+    let normalized = null;
+    try {
+      normalized = await normalizeVariantScope({
+        detail,
+        options: product.options ?? [],
+        sizes: product.sizes ?? [],
+        imageIds: product.imageIds ?? [],
+        imageUrls: product.imageUrls ?? [],
+        title: input.title,
+        config,
+        baseUrl,
+      });
+    } catch {
+      normalized = null;
+    }
+    const colours = normalized
+      ? normalized.result.colours.map((colour) => ({
+        source: colour.source, text: colour.text, code: colour.code, thumb: colour.thumb ?? null,
+        placeholder: colour.placeholder === true, needsReview: colour.needsReview === true,
+      }))
+      : (product.options ?? []).map((option) => {
+        const swatch = images.find((image) => image.label === `变体色卡：${cleanText(option)}`);
+        return { source: cleanText(option), text: null, code: null, thumb: swatch?.url ?? null, placeholder: false, needsReview: true };
+      });
+    const sizes = normalized
+      ? normalized.result.sizes.map((size) => ({ source: size.source, text: size.text, placeholder: size.placeholder === true }))
+      : (product.sizes ?? []).map((size) => ({ source: cleanText(size), text: cleanText(size), placeholder: false }));
+    const sizeTexts = new Map(sizes.map((size) => [size.source, size.text || size.source]));
     const codeMap = new Map(colours.filter((colour) => colour.code).map((colour) => [colour.source, colour.code]));
     const prefix = styleNo ? `${styleNo}S${index + 1}` : `S${index + 1}`;
     const skus = splitSkusForProduct(raw, product, codeMap, sizeTexts, prefix);
@@ -478,13 +487,11 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
       title: cleanText(parsed.title).slice(0, 160) || null,
       description: cleanText(parsed.description).slice(0, 1200) || null,
       colours,
-      sizes: (product.sizes ?? []).map((size) => ({
-        source: cleanText(size), text: sizeTexts.get(cleanText(size)) ?? cleanText(size),
-      })),
+      sizes,
       skus,
       imageRefs: { imageIds: product.imageIds ?? [], imageUrls: product.imageUrls ?? [] },
       imageCount: images.length,
-      needsReview: colours.some((colour) => !colour.text || !colour.code),
+      needsReview: colours.some((colour) => !colour.text || !colour.code || colour.needsReview === true),
     });
   }
   return {
@@ -496,5 +503,63 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
       products: contents,
       updatedAt: new Date().toISOString(),
     },
+  };
+}
+
+/** Refresh variant naming/sizes/SKUs of stored split contents via the
+ * normalization pipeline, keeping the already generated titles/descriptions. */
+export async function normalizeSplitContents({ detail, plan, contents, styleNo = null, config = {}, baseUrl }) {
+  const raw = detail?.raw_data ?? {};
+  const products = (Array.isArray(plan?.products) ? plan.products : []).slice(0, MAX_PRODUCTS);
+  const stored = Array.isArray(contents?.products) ? contents.products : [];
+  const updated = [];
+  for (const [index, product] of products.entries()) {
+    const prior = stored.find((item) => item.id === product.id) ?? stored[index] ?? {};
+    let normalized = null;
+    try {
+      normalized = await normalizeVariantScope({
+        detail,
+        options: product.options ?? [],
+        sizes: product.sizes ?? [],
+        imageIds: product.imageIds ?? [],
+        imageUrls: product.imageUrls ?? [],
+        title: cleanText(detail?.title),
+        config,
+        baseUrl,
+      });
+    } catch {
+      normalized = null;
+    }
+    const colours = normalized
+      ? normalized.result.colours.map((colour) => ({
+        source: colour.source, text: colour.text, code: colour.code, thumb: colour.thumb ?? null,
+        placeholder: colour.placeholder === true, needsReview: colour.needsReview === true,
+      }))
+      : (prior.colours ?? []);
+    const sizes = normalized
+      ? normalized.result.sizes.map((size) => ({ source: size.source, text: size.text, placeholder: size.placeholder === true }))
+      : (prior.sizes ?? []);
+    const sizeTexts = new Map(sizes.map((size) => [size.source, size.text || size.source]));
+    const codeMap = new Map(colours.filter((colour) => colour.code).map((colour) => [colour.source, colour.code]));
+    const prefix = styleNo ? `${styleNo}S${index + 1}` : `S${index + 1}`;
+    const skus = splitSkusForProduct(raw, product, codeMap, sizeTexts, prefix);
+    updated.push({
+      ...prior,
+      id: product.id ?? `p${index + 1}`,
+      name: cleanText(product.name) || prior.name || null,
+      colours,
+      sizes,
+      skus,
+      imageRefs: { imageIds: product.imageIds ?? [], imageUrls: product.imageUrls ?? [] },
+      normalizedAt: new Date().toISOString(),
+      needsReview: colours.some((colour) => !colour.text || !colour.code || colour.needsReview === true),
+    });
+  }
+  return {
+    version: 1,
+    model: config.model ?? null,
+    styleNo: styleNo ?? null,
+    products: updated,
+    updatedAt: new Date().toISOString(),
   };
 }
