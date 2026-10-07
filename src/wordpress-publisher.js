@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { analyzeProductMerchandising } from './product-merchandiser.js';
+import { applyReasoning } from './model-request.js';
 import { applyOptionMapOverrides, buildOptionOverrideIndex,
   resolveOptionDisplayLabel } from './option-overrides.js';
 
@@ -418,8 +419,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   return { externalId, styleNo, publishingImages, swatchImages, uploadImages, payload };
 }
 
-export async function setWordPressProductPublicationDate({ postId, publicationDate, config }) {
-  const normalized = normalizePublicationDate(publicationDate);
+export async function setWordPressProductPublicationDate({ postId, publicationDate, config }) {  const normalized = normalizePublicationDate(publicationDate);
   if (!Number(postId) || !normalized) throw new Error('A WordPress post ID and valid publication date are required.');
   const wp = wordpressClient(config);
   return wp(`/wp-json/wp/v2/product/${Number(postId)}`, {
@@ -659,6 +659,211 @@ export async function resolveWordPressProduct(identifier, config) {
   const wp = wordpressClient(config);
   const query = new URLSearchParams(identifier).toString();
   return wp(`/wp-json/hx/v1/products/resolve?${query}`, { timeoutMs: 30000 });
+}
+
+// --- split-product publishing -------------------------------------------------
+
+async function pickSplitCategory({ content, categories, config }) {
+  const list = categories.map((item) => `${item.id}: ${item.name}`).join('\n');
+  if (!list) return null;
+  const base = clean(config.modelBaseUrl).replace(/\/+$/, '') || 'https://api.deepseek.com';
+  const endpoint = base.endsWith('/chat/completions') ? base : `${base}${base.endsWith('/v1') ? '' : '/v1'}/chat/completions`;
+  const prompt = `你是电商选品助手，只输出严格JSON。
+从下面的类目列表里，为这个商品选择最合适的一个主类目（必须是列表中的 id）：
+${list}
+
+商品标题：${JSON.stringify(clean(content?.title))}
+商品描述：${JSON.stringify(clean(content?.description).slice(0, 400))}
+输出：{"categoryId": 数字, "reason": "一句话"}`;
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${config.modelApiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify(applyReasoning({
+      model: config.complexModel,
+      messages: [{ role: 'user', content: prompt }],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 384000,
+    }, config.reasoningEffort)),
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!response.ok) return null;
+  const payload = await response.json().catch(() => null);
+  const text = contentTextOf(payload?.choices?.[0]?.message?.content);
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { parsed = null; }
+  const categoryId = Number(parsed?.categoryId);
+  return categories.some((item) => Number(item.id) === categoryId) ? categoryId : null;
+}
+
+function contentTextOf(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((part) => (typeof part === 'string' ? part : part?.text ?? '')).join('');
+  return '';
+}
+
+function normalizedUrlKey(value) {
+  return clean(value).replace(/^http:/i, 'https:').replace(/[?#].*$/, '');
+}
+
+/**
+ * Publish the split products of one bundle: update the original WordPress post
+ * with the best-matching split product (keeping its URL, style number and
+ * taxonomies) and create the remaining split products as new drafts (fresh
+ * style numbers from their own category, external ids suffixed `S{n}`).
+ * Existing attachments are reused; only genuinely new images are uploaded.
+ */
+export async function publishSplitProductsToWordPress({ detail, contents, publication, config }) {
+  const wp = wordpressClient(config);
+  const template = publication?.payload ?? null;
+  if (!template) throw new Error('A stored publication payload is required.');
+  const products = (Array.isArray(contents?.products) ? contents.products : []).filter((item) => item?.title);
+  if (!products.length) throw new Error('Split contents with titles are required.');
+  const taxonomies = await wp('/wp-json/hx/v1/products/taxonomies');
+  const allCategories = (taxonomies?.categories ?? []).filter((item) => item?.id && item?.name);
+  const detailImages = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
+  const previousImages = new Map((template.images ?? [])
+    .map((image) => [normalizedUrlKey(image?.source_url), image]));
+
+  const attachmentFor = (url) => previousImages.get(normalizedUrlKey(url)) ?? null;
+
+  const buildImages = (content) => {
+    const images = [];
+    const skipped = [];
+    for (const imageId of content.imageRefs?.imageIds ?? []) {
+      const image = detailImages.get(String(imageId));
+      if (!image) continue;
+      const attachment = attachmentFor(image.source_url);
+      if (!attachment?.attachment_id) { skipped.push(String(imageId)); continue; }
+      images.push({
+        attachment_id: Number(attachment.attachment_id),
+        alt: clean(content.title),
+        source_url: clean(image.source_url),
+        url: clean(attachment.url),
+      });
+    }
+    return { images, skipped };
+  };
+
+  const buildColours = (content) => (content.colours ?? []).map((colour, index) => {
+    const attachment = colour.thumb ? attachmentFor(colour.thumb) : null;
+    return {
+      label: colour.text || colour.source,
+      value: `color-${index + 1}`,
+      ...(colour.code ? { code: colour.code } : {}),
+      ...(colour.source && colour.source !== (colour.text || colour.source) ? { source_label: colour.source } : {}),
+      ...(attachment?.attachment_id ? { image_id: Number(attachment.attachment_id) } : {}),
+    };
+  });
+
+  const buildSizes = (content) => (content.sizes ?? []).map((size) => ({ label: size.text || size.source, value: size.source || size.text }));
+
+  const buildSkuRows = (content) => (content.skus ?? []).map((sku, index) => ({
+    index,
+    source_sku_key: `${sku.colour ?? ''}|${sku.size ?? ''}`,
+    label: sku.sizeText ?? sku.size ?? '',
+    options: { Color: sku.colour ?? '', Size: sku.sizeText ?? sku.size ?? '' },
+    source_options: { Color: sku.colour ?? '', Size: sku.size ?? '' },
+    color: sku.colour ?? '',
+    size: sku.sizeText ?? sku.size ?? '',
+    source_price: sku.price ?? null,
+    source_currency: clean(template.source?.currency) || 'CNY',
+    source_stock: sku.stock ?? null,
+    supplier_sku: sku.sku ?? null,
+    available: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock) > 0,
+  }));
+
+  const sorted = [...products].sort((left, right) =>
+    (right.options?.length ?? 0) - (left.options?.length ?? 0)
+    || (right.imageRefs?.imageIds?.length ?? 0) - (left.imageRefs?.imageIds?.length ?? 0));
+  const keeper = sorted[0];
+  const siblings = sorted.slice(1);
+  const results = { keeper: null, created: [], errors: [] };
+
+  // 1) Update the original post with the keeper product.
+  {
+    const { images, skipped } = buildImages(keeper);
+    const colours = buildColours(keeper);
+    const prices = buildWearHongxiuPricing(detail);
+    const payload = {
+      ...template,
+      external_id: template.external_id,
+      style_no: publication.style_no,
+      title: clean(keeper.title),
+      description: clean(keeper.description),
+      status: 'publish',
+      images,
+      colors: colours.length ? { default: colours[0].value, colors: colours } : null,
+      sizes: (keeper.sizes ?? []).length ? { default: buildSizes(keeper)[0].label, sizes: buildSizes(keeper) } : null,
+      sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(keeper) },
+      bulk_pricing: prices,
+      meta: { ...(template.meta ?? {}), sku: publication.style_no, title: clean(keeper.title), description: clean(keeper.description) },
+      source: { ...(template.source ?? {}), split_product_id: keeper.id ?? null, split_product_name: keeper.name ?? null },
+    };
+    const synced = await wp('/wp-json/hx/v1/products/sync', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
+    });
+    results.keeper = {
+      productId: keeper.id, title: clean(keeper.title), styleNo: publication.style_no,
+      postId: synced.post_id ?? publication.wp_post_id, url: synced.permalink ?? publication.wp_url,
+      status: synced.status ?? 'publish', imageCount: images.length, skippedImages: skipped.length,
+      payload,
+    };
+  }
+
+  // 2) Create the remaining split products as drafts.
+  for (const [index, content] of siblings.entries()) {
+    try {
+      const categoryId = await pickSplitCategory({ content, categories: allCategories, config });
+      const externalId = `${template.external_id}S${index + 2}`;
+      const allocated = await wp('/wp-json/hx/v1/products/style-number', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          external_id: externalId,
+          primary_category_id: categoryId ?? template.meta?.primary_category_id ?? 0,
+          reserve: true,
+        }),
+      });
+      const styleNo = clean(allocated.style_no);
+      if (!styleNo) throw new Error('Style number allocation returned nothing.');
+      const { images, skipped } = buildImages(content);
+      const colours = buildColours(content);
+      const sizes = buildSizes(content);
+      const prices = buildWearHongxiuPricing(detail);
+      const categoryName = allCategories.find((item) => Number(item.id) === Number(categoryId))?.name ?? clean(template.meta?.primary_category);
+      const payload = {
+        ...template,
+        external_id: externalId,
+        style_no: styleNo,
+        title: clean(content.title),
+        description: clean(content.description),
+        status: 'draft',
+        category_ids: categoryId ? [categoryId] : (template.category_ids ?? []),
+        images,
+        colors: colours.length ? { default: colours[0].value, colors: colours } : null,
+        sizes: sizes.length ? { default: sizes[0].label, sizes } : null,
+        sku_matrix: { schema_version: 1, source_currency: clean(template.source?.currency) || 'CNY', rows: buildSkuRows(content) },
+        bulk_pricing: prices,
+        meta: {
+          ...(template.meta ?? {}), sku: styleNo, title: clean(content.title), description: clean(content.description),
+          primary_category_id: categoryId ? String(categoryId) : (template.meta?.primary_category_id ?? ''),
+          primary_category: categoryName ?? template.meta?.primary_category ?? '',
+        },
+        source: { ...(template.source ?? {}), split_product_id: content.id ?? null, split_product_name: content.name ?? null },
+      };
+      const synced = await wp('/wp-json/hx/v1/products/sync', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
+      });
+      results.created.push({
+        productId: content.id, title: clean(content.title), styleNo, categoryId, categoryName,
+        postId: synced.post_id ?? null, url: synced.permalink ?? null, status: synced.status ?? 'draft',
+        imageCount: images.length, skippedImages: skipped.length,
+      });
+    } catch (error) {
+      results.errors.push({ productId: content.id, message: String(error?.message || error).slice(0, 200) });
+    }
+  }
+  return results;
 }
 
 export async function updateWordPressProductStyleNumber({ publication, styleNo, config, optionOverrides = [] }) {

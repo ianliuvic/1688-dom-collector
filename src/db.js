@@ -2408,6 +2408,29 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  /** Published bundles that have a split plan + generated contents. */
+  async function listSplitPublishableBundles({ limit = 2000, offset = 0 } = {}) {
+    const result = await pool.query(`SELECT details.id AS product_detail_id
+      FROM product_details details
+      JOIN product_wordpress_publications publications
+        ON publications.product_detail_id = details.id
+      JOIN product_split_plans plans ON plans.product_detail_id = details.id
+      JOIN product_split_contents contents ON contents.product_detail_id = details.id
+      WHERE publications.wp_status = 'publish' AND publications.wp_post_id IS NOT NULL
+      ORDER BY details.id LIMIT $1 OFFSET $2`, [limit, offset]);
+    return result.rows;
+  }
+
+  /** Merge per-split-product WordPress results into the stored contents. */
+  async function mergeSplitContentWpResults(productDetailId, entries) {
+    const record = await getSplitContents(productDetailId);
+    if (!record?.result?.products) return null;
+    const byId = new Map((entries ?? []).map((entry) => [String(entry.productId), entry.wp]));
+    const products = record.result.products.map((product) => (byId.has(String(product.id))
+      ? { ...product, wp: byId.get(String(product.id)) } : product));
+    return saveSplitContents(productDetailId, { ...record.result, products }, record.model);
+  }
+
   /** Saved split-product contents (title/description/variants/SKUs per split product). */
   async function getSplitContents(productDetailId) {
     const result = await pool.query(
@@ -2616,7 +2639,7 @@ export function createDatabase(databaseUrl) {
     getProductSplitPlan, saveProductSplitPlan,
     getVariantNormalization, saveVariantNormalization, addProductImage, updateSkuVariantSkus,
     getSplitContents, saveSplitContents, updateProductRawData,
-    listRefreshablePublications,
+    listRefreshablePublications, listSplitPublishableBundles, mergeSplitContentWpResults,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };

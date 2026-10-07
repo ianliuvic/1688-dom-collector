@@ -535,6 +535,13 @@ function renderSplitPanel(id, plan){
               + '<td>' + (sku.price === null || sku.price === undefined ? '—' : '¥' + sku.price) + '</td><td>' + (sku.stock === null ? '—' : sku.stock) + '</td></tr>').join('')
             + '</tbody></table>'
           : '')
+        + (content.wp
+          ? '<div class="pp-muted" style="margin-top:3px">WP：' + esc(content.wp.status || '')
+            + (content.wp.role === 'keeper' ? '（原页更新）' : content.wp.role === 'split' ? '（新建）' : '')
+            + ' · ' + esc(content.wp.styleNo || '')
+            + (content.wp.url ? ' · <a href="' + esc(content.wp.url) + '" target="_blank" rel="noopener">打开页面</a>' : '')
+            + '</div>'
+          : '')
         + '</span></div>'
       : '';
     return '<div class="sp-product"><div class="sp-title"><b>产品' + (index + 1) + '</b>'

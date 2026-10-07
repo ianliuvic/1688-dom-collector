@@ -14,7 +14,8 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   get1688ArrivalDate, setWordPressProductArrivalDate,
   setWordPressProductPublicationDate, setWordPressProductStatus,
   syncWordPressProductPricing, replaceWordPressBestSellers,
-  resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing } from './wordpress-publisher.js';
+  resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
+  publishSplitProductsToWordPress } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -1643,6 +1644,113 @@ app.post('/api/wordpress/refresh-published', { preHandler: requireApiKey }, asyn
 
 app.get('/api/wordpress-refresh-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = wordpressRefreshJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+// Publish the split products of published bundles: the original post is updated
+// with its best-matching split product (same URL/style number), the remaining
+// split products are created as NEW drafts with their own style numbers and
+// model-picked categories. Five-way concurrency; nothing is deleted.
+const splitPublishJobs = new Map();
+
+app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (request, reply) => {
+  if ([...splitPublishJobs.values()].some((job) => job.status === 'running')) {
+    return reply.code(409).send({ error: 'split_publish_already_running' });
+  }
+  const ids = Array.isArray(request.body?.ids)
+    ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 200)
+    : null;
+  const id = crypto.randomUUID();
+  const job = {
+    id, status: 'running', total: 0, processed: 0, bundles: 0, keeperUpdated: 0, created: 0, failed: 0,
+    createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), completedAt: null,
+    results: [], errors: [],
+  };
+  splitPublishJobs.set(id, job);
+  trimTerminalJobs(splitPublishJobs);
+  (async () => {
+    try {
+      const rows = ids ? ids.map((value) => ({ product_detail_id: value }))
+        : await db.listSplitPublishableBundles({ limit: 2000, offset: 0 });
+      job.total = rows.length;
+      let next = 0;
+      const workers = Array.from({ length: Math.min(5, rows.length) }, async () => {
+        while (true) {
+          const index = next++;
+          if (index >= rows.length) return;
+          const productDetailId = Number(rows[index].product_detail_id);
+          job.processed += 1;
+          try {
+            const detail = await db.getProductDetail(productDetailId);
+            const publication = await db.getWordPressPublication(productDetailId);
+            const contents = await db.getSplitContents(productDetailId);
+            if (!detail || !publication?.payload || !contents?.result?.products?.length) {
+              job.failed += 1;
+              job.errors.push({ productDetailId, message: 'missing plan/contents/publication' });
+              continue;
+            }
+            const result = await publishSplitProductsToWordPress({
+              detail, contents: contents.result, publication, config,
+            });
+            if (result.keeper) {
+              const keeperPayload = result.keeper.payload;
+              const syncHash = crypto.createHash('sha256').update(JSON.stringify(keeperPayload)).digest('hex');
+              await db.saveWordPressPublication(productDetailId, {
+                translationId: publication.translation_id,
+                externalId: publication.external_id,
+                styleNo: publication.style_no,
+                wpPostId: result.keeper.postId,
+                wpUrl: result.keeper.url,
+                wpEditUrl: publication.wp_edit_url,
+                wpStatus: 'publish',
+                syncHash,
+                payload: keeperPayload,
+                result: { ...(publication.result ?? {}), split_publish: true },
+                lastError: null,
+              });
+              job.keeperUpdated += 1;
+            }
+            const wpEntries = [
+              ...(result.keeper ? [{ productId: result.keeper.productId, wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper' } }] : []),
+              ...result.created.map((item) => ({ productId: item.productId, wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status, categoryId: item.categoryId, role: 'split' } })),
+            ];
+            if (wpEntries.length) await db.mergeSplitContentWpResults(productDetailId, wpEntries);
+            job.bundles += 1;
+            job.created += result.created.length;
+            if (result.errors.length) {
+              job.errors.push({ productDetailId, message: result.errors.map((entry) => entry.message).join(' | ').slice(0, 200) });
+            }
+            if (job.results.length < 300) {
+              job.results.push({
+                productDetailId, styleNo: publication.style_no,
+                keeper: result.keeper ? { title: result.keeper.title, images: result.keeper.imageCount, skippedImages: result.keeper.skippedImages } : null,
+                created: result.created.map((item) => ({ title: item.title, styleNo: item.styleNo, category: item.categoryName, postId: item.postId })),
+                errors: result.errors,
+              });
+            }
+          } catch (error) {
+            job.failed += 1;
+            if (job.errors.length < 200) {
+              job.errors.push({ productDetailId, message: String(error?.message || error).slice(0, 200) });
+            }
+          }
+        }
+      });
+      await Promise.all(workers);
+      job.status = (job.failed || job.errors.length) ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+      app.log.error({ err: error, jobId: id }, 'split publish job failed');
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress-split-publish-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = splitPublishJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
