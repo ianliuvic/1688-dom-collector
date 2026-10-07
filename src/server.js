@@ -26,7 +26,7 @@ import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
-import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy, classifyNonProductImages } from './bundle-splitter.js';
+import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy, classifyNonProductImages, regenerateSplitCopy } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
 import { dedupeImagesByHash, dedupeImagesWithLlm } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
@@ -54,7 +54,7 @@ const config = {
   visionModel: process.env.DEEPSEEK_VISION_MODEL || 'deepseek-flash',
   complexModel: process.env.DEEPSEEK_COMPLEX_MODEL || 'deepseek-flash',
   reasoningEffort: process.env.DEEPSEEK_REASONING_EFFORT || 'high',
-  translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 6, 1), 8),
+  translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 60, 1), 100),
   translationConcurrency: Math.min(Math.max(Number(process.env.TRANSLATION_CONCURRENCY) || 1, 1), 10),
   savedAuditConcurrency: Math.min(Math.max(Number(process.env.SAVED_AUDIT_CONCURRENCY) || 3, 1), 5),
   savedAuditsStartPaused: process.env.SAVED_AUDITS_START_PAUSED === 'true',
@@ -2820,6 +2820,83 @@ app.post('/api/wordpress/split-variants/repair', { preHandler: requireApiKey }, 
 
 app.get('/api/wordpress/split-variant-repair-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = splitVariantRepairJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+// Regenerate ONLY the title/description of every published split product from
+// its deduped images + variant set (single variant names its colour/print,
+// multiple variants stay colour-neutral), then re-sync the pages. 6-way parallel.
+const splitCopyRepairJobs = new Map();
+
+app.post('/api/wordpress/split-copy/repair', { preHandler: requireApiKey }, async (_request, reply) => {
+  if ([...splitCopyRepairJobs.values()].some((job) => job.status === 'running')) {
+    return reply.code(409).send({ error: 'split_copy_repair_already_running' });
+  }
+  const job = {
+    id: crypto.randomUUID(), status: 'running', total: 0, processed: 0, bundles: 0,
+    products: 0, failed: 0, createdAt: new Date().toISOString(), completedAt: null, errors: [],
+  };
+  splitCopyRepairJobs.set(job.id, job);
+  trimTerminalJobs(splitCopyRepairJobs);
+  (async () => {
+    try {
+      const rows = await db.listSplitPublishableBundles({ limit: 2000, offset: 0 });
+      job.total = rows.length;
+      let next = 0;
+      const workers = Array.from({ length: Math.min(6, rows.length) }, async () => {
+        while (true) {
+          const index = next++;
+          if (index >= rows.length) return;
+          const productDetailId = Number(rows[index].product_detail_id);
+          job.processed += 1;
+          try {
+            const detail = await db.getProductDetail(productDetailId);
+            const publication = await db.getWordPressPublication(productDetailId);
+            const contentsRecord = await db.getSplitContents(productDetailId);
+            const planRow = await db.getProductSplitPlan(productDetailId).catch(() => null);
+            if (!detail || !publication?.payload || !contentsRecord?.result?.products?.length) {
+              job.failed += 1;
+              job.errors.push({ productDetailId, message: 'missing contents/publication' });
+              continue;
+            }
+            const updated = await regenerateSplitCopy({
+              detail,
+              contents: contentsRecord.result,
+              config: {
+                apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+                model: config.complexModel, reasoningEffort: config.reasoningEffort,
+              },
+              baseUrl: config.publicBaseUrl,
+            });
+            await db.saveSplitContents(productDetailId, updated, config.complexModel ?? null);
+            const { publishedCreates } = await syncSplitBundle({
+              productDetailId, detail, publication, contents: updated, plan: planRow?.plan ?? null,
+            });
+            job.bundles += 1;
+            job.products += updated.products.length;
+            void publishedCreates;
+          } catch (error) {
+            job.failed += 1;
+            if (job.errors.length < 100) {
+              job.errors.push({ productDetailId, message: String(error?.message || error).slice(0, 180) });
+            }
+          }
+        }
+      });
+      await Promise.all(workers);
+      job.status = job.failed ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 200);
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress/split-copy-repair-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = splitCopyRepairJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 

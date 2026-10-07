@@ -743,6 +743,12 @@ async function reviewSplitProduct({ content, options, categories, currentCategor
   const endpoint = base.endsWith('/chat/completions') ? base : `${base}${base.endsWith('/v1') ? '' : '/v1'}/chat/completions`;
   const current = categories.find((item) => Number(item.id) === Number(currentCategoryId)) ?? null;
   const optionTexts = (Array.isArray(options) ? options : []).map((value) => clean(value)).filter(Boolean);
+  const colourCount = Array.isArray(content?.colours) ? content.colours.length : 0;
+  const singleVariant = colourCount === 1;
+  const variantName = singleVariant ? clean(content.colours[0]?.text) || clean(content.colours[0]?.source) : '';
+  const variantRule = singleVariant
+    ? `本商品只有一个颜色/印花变体（规范名：${JSON.stringify(variantName)}）：标题或描述中必须体现该颜色/印花。`
+    : `本商品有 ${colourCount} 个颜色/印花变体：标题和描述中都不得出现任何颜色、印花或图案词。`;
   const prompt = `你是电商选品助手，只输出严格JSON。
 一个 1688 捆绑 listing 被拆成多个独立商品，下面是其中一个拆分商品：
 - 它在原 listing 中对应的选项原文（判断品类的唯一权威依据）：${JSON.stringify(optionTexts)}
@@ -752,12 +758,13 @@ async function reviewSplitProduct({ content, options, categories, currentCategor
 - 当前主类目：${JSON.stringify(current?.name ?? '')}
 
 任务：
-1. 根据"选项原文"判断这件商品实际卖的是什么（如比基尼、泳衣上衣、泳裤、沙滩裙/罩衫、三件套等），从类目列表选一个最合适的主类目（必须是列表中的 id）。不要被标题里提到的其它部件误导。
+1. 根据"选项原文"判断这件商品实际卖的是什么（如比基尼、泳衣上衣、泳裤、沙滩裙/罩衫、三件套等），从类目列表选一个最合适的主类目（必须是列表中的 id）。不要被标题提到的其它部件误导。
 2. 检查当前标题和描述是否只写了"选项原文"代表的这件商品：
    - 若写进了原 listing 的其它部件（例如选项只有"比基尼"却写了 with matching skirt / three-piece set / wrap skirt），或品类判断错误，给出修正版；
-   - 标题规则：2–15 个英文单词的稳定产品名，不含年份、平台名、颜色/印花/图案词、尺码词（如 One Size、XL）、促销词，只描述这件商品；
-   - 描述规则：35–120 个英文单词的单段产品级描述，只保留属于这件商品的可见特征（品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁）；不得写颜色、印花、图案、单个 SKU、促销、年份、平台、材质、功能或不可见信息；可参考当前描述中属于这件商品的部分；
-   - 若当前标题/描述已经只描述这件商品，对应字段返回 null。
+   - ${variantRule}
+   - 标题规则：4–15 个英文单词的稳定产品名，必须清楚体现产品特点（品类、结构、剪裁、部件），不得过于笼统或过短；不含年份、平台名、尺码词（如 One Size、XL）、促销词，只描述这件商品；
+   - 描述规则：35–120 个英文单词的单段产品级描述，只保留属于这件商品的可见特征（品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁），颜色/印花规则同上；不得写单个 SKU、促销、年份、平台、材质、功能或不可见信息；可参考当前描述中属于这件商品的部分；
+   - 若当前标题/描述已经符合以上规则，对应字段返回 null。
 输出：{"categoryId": 数字, "title": "修正标题" 或 null, "description": "修正描述" 或 null, "reason": "一句话"}
 
 类目列表：

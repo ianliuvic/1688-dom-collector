@@ -58,8 +58,14 @@ export function translationSourceHash(source) {
   return crypto.createHash('sha256').update(stableJson(source)).digest('hex');
 }
 
-export function selectTranslationImages(detail, limit = 6) {
-  const selected = (detail.images || []).filter((item) => ['main', 'gallery'].includes(item.image_type))
+export function selectTranslationImages(detail, limit = 60) {
+  const removedIds = new Set((Array.isArray(detail?.raw_data?.imageDedupe?.removed)
+    ? detail.raw_data.imageDedupe.removed : [])
+    .map((entry) => String(entry?.imageId ?? ''))
+    .filter(Boolean));
+  const selected = (detail.images || [])
+    .filter((item) => ['main', 'gallery'].includes(item.image_type))
+    .filter((item) => !removedIds.has(String(item.id)))
     .sort((a, b) => {
       if (a.image_type === 'main' && b.image_type !== 'main') return -1;
       if (b.image_type === 'main' && a.image_type !== 'main') return 1;
@@ -71,28 +77,31 @@ export function selectTranslationImages(detail, limit = 6) {
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, Math.min(Math.max(Number(limit) || 6, 1), 8));
+  }).slice(0, Math.min(Math.max(Number(limit) || 60, 1), 100));
 }
 
 function englishWordCount(value) {
   return String(value || '').trim().split(/\s+/).filter(Boolean).length;
 }
 
-export function validateGeneratedCatalogCopy(translated) {
+export function validateGeneratedCatalogCopy(translated, { allowVariantTerms = false } = {}) {
   const title = String(translated.title || '').trim();
   const description = String(translated.description || '').trim();
   const titleWords = englishWordCount(title);
   const descriptionWords = englishWordCount(description);
-  if (/[\u3400-\u9fff]/.test(title) || titleWords < 2 || titleWords > 15 || title.length > 120) {
-    throw new Error('Generated English title is not a concise 2 to 15 word product name.');
+  if (/[\u3400-\u9fff]/.test(title) || titleWords < 4 || titleWords > 15 || title.length > 120) {
+    throw new Error('Generated English title must be a descriptive 4 to 15 word product name.');
   }
-  if (TITLE_NOISE_RE.test(title) || VARIANT_APPEARANCE_RE.test(title)) {
-    throw new Error('Generated English title contains year, marketplace, sales, color, or print keywords.');
+  if (TITLE_NOISE_RE.test(title)) {
+    throw new Error('Generated English title contains year, marketplace or sales keywords.');
+  }
+  if (!allowVariantTerms && VARIANT_APPEARANCE_RE.test(title)) {
+    throw new Error('Generated English title contains color or print keywords.');
   }
   if (/[\u3400-\u9fff]/.test(description) || descriptionWords < 35 || descriptionWords > 120) {
     throw new Error('Generated English description must be a 35 to 120 word English paragraph.');
   }
-  if (VARIANT_APPEARANCE_RE.test(description)) {
+  if (!allowVariantTerms && VARIANT_APPEARANCE_RE.test(description)) {
     throw new Error('Generated English description contains color or print-specific language.');
   }
 }
@@ -172,7 +181,7 @@ export function restoreTranslationIdentity(source, translated) {
 
 async function loadTranslationImages(detail, config) {
   const storageRoot = path.resolve(config.storagePath || '/app/storage');
-  const selected = selectTranslationImages(detail, config.maxTranslationImages || 6);
+  const selected = selectTranslationImages(detail, config.maxTranslationImages || 60);
   const loaded = [];
   for (const [index, item] of selected.entries()) {
     let url = null;
@@ -245,9 +254,17 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
     return { payload, raw };
   }
 
+  const colourValues = (Array.isArray(source.skuOptions) ? source.skuOptions : [])
+    .filter((option) => /(颜色|color|colour)/i.test(String(option?.dimensionName ?? '')))
+    .map((option) => String(option?.text ?? '').trim())
+    .filter(Boolean);
+  const singleVariant = colourValues.length === 1;
   const visualPrompt = `你是专业的泳装和服装B2B商品内容编辑。综合全部Gallery图片识别同一个产品，只返回严格JSON：{"title":"","description":""}。
-title必须根据图片重新命名，不能直译1688中文标题。使用2至15个英文单词的稳定产品名称；不得含年份、New Arrival、Hot Sale、Cross-Border、AliExpress、Amazon、Export、Wholesale、颜色、印花或图案。
-description必须是35至120个英文单词的单段产品级描述。只写多张图片共同体现的稳定可见特点，例如品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁和套装组成。不得描述颜色、印花、图案、单个SKU、促销、年份、平台、SEO关键词、穿着效果、材质、功能或不可见信息。
+title必须根据图片重新命名，不能直译1688中文标题。使用4至15个英文单词的稳定产品名称，必须清楚体现产品的核心特点（品类、轮廓、结构、剪裁、部件），不得过于笼统或过短；不得含年份、New Arrival、Hot Sale、Cross-Border、AliExpress、Amazon、Export、Wholesale 等词。
+${singleVariant
+    ? `本商品只有一个颜色/印花变体（原文：${JSON.stringify(colourValues[0])}）：标题或描述中必须体现该颜色/印花（请准确翻译成英文）。`
+    : `本商品有 ${colourValues.length} 个颜色/印花变体：标题和描述中都不得出现任何颜色、印花或图案词。`}
+description必须是35至120个英文单词的单段产品级描述。只写多张图片共同体现的稳定可见特点，例如品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁和套装组成；颜色/印花规则同上。不得描述单个SKU、促销、年份、平台、SEO关键词、穿着效果、材质、功能或不可见信息。
 中文标题仅可作为产品类别的弱提示，图片证据优先。不要输出Markdown或JSON之外的内容。
 中文标题弱提示：${JSON.stringify(source.title)}`;
   async function requestVisualCopy(correction = '', previousOutput = '') {
@@ -264,7 +281,7 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
     visualAttempt = await requestVisualCopy(visualCorrection, previousVisualOutput);
     visualCopy = parseJson(visualAttempt.raw);
     try {
-      validateGeneratedCatalogCopy(visualCopy || {});
+      validateGeneratedCatalogCopy(visualCopy || {}, { allowVariantTerms: singleVariant });
       break;
     } catch (error) {
       if (attempt === 2) throw error;

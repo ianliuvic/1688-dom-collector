@@ -532,9 +532,83 @@ async function dedupeScopeImages({ rows, title, config }) {
   return { kept, removed };
 }
 
+/**
+ * Regenerate ONLY the title/description of every split product from its
+ * already-deduped images and its variant set: a single colour/print variant
+ * may (and should) be named, multiple variants must stay colour-neutral.
+ */
+export async function regenerateSplitCopy({ detail, contents, config = {}, baseUrl }) {
+  const products = Array.isArray(contents?.products) ? contents.products : [];
+  if (!products.length) throw new Error('Split contents are required before regenerating copy.');
+  const updated = [];
+  for (const product of products) {
+    const rows = splitProductImageRows(detail, {
+      imageIds: product.imageRefs?.imageIds ?? [],
+      imageUrls: product.imageRefs?.imageUrls ?? [],
+    }, { baseUrl }).filter((row) => row.url);
+    if (!rows.length) { updated.push(product); continue; }
+    const colours = product.colours ?? [];
+    const singleVariant = colours.length === 1;
+    const colourRule = singleVariant
+      ? `本商品只有一个颜色/印花变体（规范化名称：${JSON.stringify(cleanText(colours[0]?.text) || cleanText(colours[0]?.source))}）：标题或描述中必须体现该颜色/印花（使用这个规范化名称）。`
+      : `本商品有 ${colours.length} 个颜色/印花变体：标题和描述中都不得出现任何颜色、印花或图案词。`;
+    const optionTexts = colours.map((colour) => cleanText(colour.source)).filter(Boolean);
+    const prompt = `你是电商B2B商品内容编辑，只输出严格JSON，不要输出解释。
+下面是一个"拆分后的独立商品"（来自一个捆绑 listing），并已按顺序提供它自己的最终图片（图片1 到 图片${rows.length}）。
+原 listing 选项原文（品类与内容范围以此为准）：${JSON.stringify(optionTexts)}
+${colourRule}
+输出内容：
+- title：4–15 个英文单词的稳定产品名称，必须清楚体现这件商品的特点（品类、结构、剪裁、部件），不得过于笼统或过短；品类必须与选项原文一致；不得包含年份、平台名（Amazon/AliExpress/TikTok 等）、Hot Sale、Cross-Border 或尺码词（如 One Size、XL）；只有选项原文本身包含多个部件时才写套装/组合表述，不得把原 listing 的其它部件写进来。
+- description：35–120 个英文单词的单段产品级描述；只写多张图片共同体现的稳定可见特点（品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁、套装组成）；范围以选项原文为准，图片或原 listing 中属于其它部件的部分不要写；颜色/印花规则同上；不得写单个 SKU、促销、年份、平台、SEO 关键词、穿着效果、材质、功能或不可见信息。
+输出格式：{"title":"","description":""}
+
+拆分商品参考名（中文）：${JSON.stringify(cleanText(product.name))}`;
+    const content = [
+      { type: 'text', text: prompt },
+      ...rows.map((row) => ({ type: 'image_url', image_url: { url: row.url } })),
+    ];
+    let parsed = null;
+    let lastRaw = '';
+    for (let attempt = 1; attempt <= 2 && !parsed; attempt += 1) {
+      const response = await fetch(endpointFrom(config.baseUrl), {
+        method: 'POST',
+        headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify(applyReasoning({
+          model: config.model,
+          messages: [{ role: 'user', content }],
+          response_format: { type: 'json_object' },
+          temperature: 0,
+          max_tokens: 384000,
+        }, config.reasoningEffort)),
+        signal: AbortSignal.timeout(180000),
+      });
+      if (!response.ok) {
+        const detailText = await response.text().catch(() => '');
+        throw new Error(`Split copy regeneration failed (${response.status}): ${String(detailText).slice(0, 200)}`);
+      }
+      const payload = await response.json();
+      const text = contentText(payload.choices?.[0]?.message?.content);
+      lastRaw = text;
+      try { parsed = JSON.parse(text); } catch { parsed = null; }
+      if (!parsed) {
+        const match = String(text || '').match(/\{[\s\S]*\}/);
+        if (match) { try { parsed = JSON.parse(match[0]); } catch { parsed = null; } }
+      }
+      if (parsed && (!cleanText(parsed.title) || !cleanText(parsed.description))) parsed = null;
+    }
+    if (!parsed) throw new Error(`Split copy for ${product.id ?? '?'} returned no usable result: ${String(lastRaw).slice(0, 120)}`);
+    updated.push({
+      ...product,
+      title: cleanText(parsed.title).slice(0, 160) || product.title || null,
+      description: cleanText(parsed.description).slice(0, 1200) || product.description || null,
+      copyRegeneratedAt: new Date().toISOString(),
+    });
+  }
+  return { ...contents, products: updated, updatedAt: new Date().toISOString() };
+}
+
 /** One content call per split product: title, description, variant names/codes, sizes. */
-export async function generateSplitContents({ detail, plan, styleNo = null, config = {}, baseUrl }) {
-  const raw = detail?.raw_data ?? {};
+export async function generateSplitContents({ detail, plan, styleNo = null, config = {}, baseUrl }) {  const raw = detail?.raw_data ?? {};
   const input = buildSplitInput(detail, { baseUrl });
   const products = (Array.isArray(plan?.products) ? plan.products : []).slice(0, MAX_PRODUCTS);
   if (!products.length) throw new Error('A saved split plan is required before generating content.');
@@ -597,12 +671,17 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
       colours.filter((colour) => colour.text).length
         ? `规范化变体名：${JSON.stringify(colours.map((colour) => colour.text).filter(Boolean))}` : null,
     ].filter(Boolean).join('；');
+    const singleVariant = colours.length === 1;
+    const colourRule = singleVariant
+      ? `本商品只有一个颜色/印花变体（规范化名称：${JSON.stringify(cleanText(colours[0]?.text) || cleanText(colours[0]?.source))}）：标题或描述中必须体现该颜色/印花（使用这个规范化名称）。`
+      : `本商品有 ${colours.length} 个颜色/印花变体：标题和描述中都不得出现任何颜色、印花或图案词。`;
     const prompt = `你是电商B2B商品内容编辑，只输出严格JSON，不要输出解释。
 下面是一个"拆分后的独立商品"（来自一个捆绑 listing），并已按顺序提供它自己的最终图片（图片1 到 图片${keptImageRows.length}）。
 ${variantNote}
+${colourRule}
 输出内容：
-- title：2–15 个英文单词的稳定产品名称；品类必须与上面的选项原文一致；不得包含年份、平台名（Amazon/AliExpress/TikTok 等）、Hot Sale、Cross-Border、颜色、印花、图案词或尺码词（如 One Size、XL）；只有选项原文本身包含多个部件时才写套装/组合表述，不得把原 listing 的其它部件写进来（例如选项只有比基尼时，不得写 with matching skirt / three-piece set / wrap skirt）。
-- description：35–120 个英文单词的单段产品级描述；只写多张图片共同体现的稳定可见特点（品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁、套装组成）；范围同样以选项原文为准，图片或原 listing 中属于其它部件的部分不要写；不得写颜色、印花、图案、单个 SKU、促销、年份、平台、SEO 关键词、穿着效果、材质、功能或不可见信息。
+- title：4–15 个英文单词的稳定产品名称，必须清楚体现这件商品的特点（品类、结构、剪裁、部件），不得过于笼统或过短；品类必须与上面的选项原文一致；不得包含年份、平台名（Amazon/AliExpress/TikTok 等）、Hot Sale、Cross-Border 或尺码词（如 One Size、XL）；只有选项原文本身包含多个部件时才写套装/组合表述，不得把原 listing 的其它部件写进来（例如选项只有比基尼时，不得写 with matching skirt / three-piece set / wrap skirt）。
+- description：35–120 个英文单词的单段产品级描述；只写多张图片共同体现的稳定可见特点（品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁、套装组成）；范围同样以选项原文为准，图片或原 listing 中属于其它部件的部分不要写；颜色/印花规则同上；不得写单个 SKU、促销、年份、平台、SEO 关键词、穿着效果、材质、功能或不可见信息。
 输出格式：{"title":"","description":""}
 
 拆分商品参考名（中文）：${JSON.stringify(cleanText(product.name))}`;
