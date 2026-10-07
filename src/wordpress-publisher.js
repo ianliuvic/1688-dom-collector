@@ -1035,8 +1035,16 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   const sorted = [...products].sort((left, right) =>
     (right.options?.length ?? 0) - (left.options?.length ?? 0)
     || (right.imageRefs?.imageIds?.length ?? 0) - (left.imageRefs?.imageIds?.length ?? 0));
-  const keeper = sorted[0];
-  const siblings = sorted.slice(1);
+  // Stable identity across runs: the product that is already the keeper stays
+  // the keeper, siblings keep the plan order (external ids and reserved style
+  // numbers must never travel between products when dedupe changes counts).
+  const planOrder = new Map(products.map((content, index) => [String(content.id), index]));
+  const previousKeeper = products
+    .find((content) => storedWp.get(String(content.id))?.role === 'keeper') ?? null;
+  const keeper = previousKeeper ?? sorted[0];
+  const siblings = products
+    .filter((item) => item !== keeper)
+    .sort((left, right) => (planOrder.get(String(left.id)) ?? 999) - (planOrder.get(String(right.id)) ?? 999));
   const results = { keeper: null, created: [], errors: [] };
 
   // 1) Update the original post with the keeper product.
