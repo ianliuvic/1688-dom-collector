@@ -1769,13 +1769,12 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
               await db.saveWordPressPublication(productDetailId, {
                 translationId: publication.translation_id,
                 externalId: publication.external_id,
-                styleNo: publication.style_no,
+                styleNo: result.keeper.styleNo ?? publication.style_no,
                 wpPostId: result.keeper.postId,
                 wpUrl: result.keeper.url,
                 wpEditUrl: publication.wp_edit_url,
                 wpStatus: 'publish',
-                syncHash,
-                payload: keeperPayload,
+                syncHash, payload: keeperPayload,
                 result: { ...(publication.result ?? {}), split_publish: true },
                 lastError: null,
               });
@@ -1895,7 +1894,7 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
               await db.saveWordPressPublication(productDetailId, {
                 translationId: publication.translation_id,
                 externalId: publication.external_id,
-                styleNo: publication.style_no,
+                styleNo: result.keeper.styleNo ?? publication.style_no,
                 wpPostId: result.keeper.postId,
                 wpUrl: result.keeper.url,
                 wpEditUrl: publication.wp_edit_url,

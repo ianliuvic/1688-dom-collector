@@ -814,6 +814,39 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   const attachmentFor = (url) => previousImages.get(normalizedUrlKey(url)) ?? null;
 
+  // Style numbers are bound to external ids by WordPress, so a product whose
+  // reviewed category changes prefix gets a freshly reserved number and the
+  // sync writes it explicitly; products already matching keep their number.
+  const stylePreview = async (externalId, categoryId) => wp('/wp-json/hx/v1/products/style-number', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ external_id: externalId, primary_category_id: categoryId ?? 0, reserve: false }),
+  }).catch(() => null);
+  const reserveStyleNumber = async (categoryId) => {
+    const allocated = await wp('/wp-json/hx/v1/products/style-number', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        external_id: `hx-renumber-${crypto.randomUUID()}`, primary_category_id: categoryId ?? 0, reserve: true,
+      }),
+    });
+    return clean(allocated?.style_no) || null;
+  };
+  const matchesStyleScheme = (styleNo, prefix) => {
+    const value = clean(styleNo).toUpperCase();
+    const schemePrefix = clean(prefix).toUpperCase();
+    return Boolean(value && schemePrefix) && new RegExp(`^${schemePrefix}\\d+$`).test(value);
+  };
+  const resolveStyle = async ({ currentStyle, externalId, categoryId }) => {
+    const current = clean(currentStyle) || null;
+    if (!categoryId) return { styleNo: current, renumbered: false };
+    const preview = await stylePreview(externalId, categoryId);
+    const prefix = clean(preview?.scheme?.prefix) || null;
+    if (!prefix || matchesStyleScheme(current, prefix)) return { styleNo: current, renumbered: false };
+    const reserved = await reserveStyleNumber(categoryId).catch(() => null);
+    if (reserved) return { styleNo: reserved, renumbered: true, prefix };
+    const fallback = clean(preview?.style_no) || null;
+    return { styleNo: fallback || current, renumbered: false, prefix };
+  };
+
   const buildImages = async (content, { externalId, styleNo, altText }) => {
     let rows = [];
     for (const imageId of content.imageRefs?.imageIds ?? []) {
@@ -930,15 +963,21 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       ...(pickedCategory ? [pickedCategory.id] : []),
       ...(Array.isArray(template.category_ids) ? template.category_ids : []),
     ].map(Number).filter((value) => Number.isInteger(value) && value > 0))];
+    const keeperStyle = await resolveStyle({
+      currentStyle: publication.style_no,
+      externalId: template.external_id,
+      categoryId: pickedCategory?.id ?? null,
+    });
+    const keeperStyleNo = keeperStyle.styleNo || publication.style_no;
     const { images, skipped, deduped } = await buildImages(keeper, {
-      externalId: template.external_id, styleNo: publication.style_no, altText: keeperTitle,
+      externalId: template.external_id, styleNo: keeperStyleNo, altText: keeperTitle,
     });
     const colours = buildColours(keeper);
     const prices = buildWearHongxiuPricing(detail);
     const payload = {
       ...template,
       external_id: template.external_id,
-      style_no: publication.style_no,
+      style_no: keeperStyleNo,
       title: keeperTitle,
       description: keeperDescription,
       status: 'publish',
@@ -951,7 +990,8 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       meta: {
         ...(template.meta ?? {}),
         ...(pickedCategory ? { primary_category_id: String(pickedCategory.id), primary_category: pickedCategory.name } : {}),
-        sku: publication.style_no, title: keeperTitle, description: keeperDescription,
+        style: pickedCategory?.name ?? template.meta?.style ?? '',
+        sku: keeperStyleNo, title: keeperTitle, description: keeperDescription,
       },
       source: { ...(template.source ?? {}), split_product_id: keeper.id ?? null, split_product_name: keeper.name ?? null },
     };
@@ -959,7 +999,8 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
     });
     results.keeper = {
-      productId: keeper.id, title: keeperTitle, description: keeperDescription, styleNo: publication.style_no,
+      productId: keeper.id, title: keeperTitle, description: keeperDescription, styleNo: keeperStyleNo,
+      renumbered: keeperStyle.renumbered === true,
       postId: synced.post_id ?? publication.wp_post_id, url: synced.permalink ?? publication.wp_url,
       status: synced.status ?? 'publish', imageCount: images.length, skippedImages: skipped.length,
       dedupedImages: deduped,
@@ -982,8 +1023,13 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       const title = clean(review?.title) || clean(content.title);
       const description = clean(review?.description) || clean(content.description);
       let categoryId = Number(review?.categoryId) || await pickSplitCategory({ content, categories: allCategories, config });
-      // A product already published keeps its reserved style number.
-      let styleNo = clean(previousWp?.styleNo) || null;
+      // Keep an already matching style number; otherwise reserve a fresh one
+      // from the reviewed category so style, category and collection align.
+      const storedStyle = clean(previousWp?.styleNo) || null;
+      const resolvedStyle = await resolveStyle({
+        currentStyle: storedStyle, externalId, categoryId,
+      }).catch(() => null);
+      let styleNo = clean(resolvedStyle?.styleNo) || storedStyle || null;
       if (!styleNo) {
         const allocate = (primaryCategoryId) => wp('/wp-json/hx/v1/products/style-number', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1031,6 +1077,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
           ...(template.meta ?? {}), sku: styleNo, title, description,
           primary_category_id: categoryId ? String(categoryId) : (template.meta?.primary_category_id ?? ''),
           primary_category: categoryName ?? template.meta?.primary_category ?? '',
+          style: categoryName ?? template.meta?.style ?? '',
         },
         source: { ...(template.source ?? {}), split_product_id: content.id ?? null, split_product_name: content.name ?? null },
       };
