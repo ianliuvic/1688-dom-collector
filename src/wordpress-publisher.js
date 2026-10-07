@@ -1047,6 +1047,19 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     .sort((left, right) => (planOrder.get(String(left.id)) ?? 999) - (planOrder.get(String(right.id)) ?? 999));
   const results = { keeper: null, created: [], errors: [] };
 
+  // Style numbers must stay unique per bundle; siblings also follow the post
+  // they already own (reverse-mapped external ids), so a product's identity
+  // never travels to another post when image counts change the sort order.
+  const usedStyles = new Set();
+  const postToExternalId = new Map();
+  for (let slot = 0; slot < siblings.length; slot += 1) {
+    const candidate = `${template.external_id}S${slot + 2}`;
+    const record = await wp(`/wp-json/hx/v1/products/by-external-id/${encodeURIComponent(candidate)}`, { timeoutMs: 30000 })
+      .catch(() => null);
+    const postId = Number(record?.post_id);
+    if (postId) postToExternalId.set(postId, candidate);
+  }
+
   // 1) Update the original post with the keeper product.
   {
     const review = await reviewSplitProduct({
@@ -1070,17 +1083,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       categoryId: pickedCategory?.id ?? null,
     });
     const keeperStyleNo = keeperStyle.styleNo || publication.style_no;
-  const usedStyles = new Set([clean(keeperStyleNo).toUpperCase()].filter(Boolean));
-  // Siblings follow the post they already own: reverse-map the candidate
-  // external ids once so a product's identity never travels to another post.
-  const postToExternalId = new Map();
-  for (let slot = 0; slot < siblings.length; slot += 1) {
-    const candidate = `${template.external_id}S${slot + 2}`;
-    const record = await wp(`/wp-json/hx/v1/products/by-external-id/${encodeURIComponent(candidate)}`, { timeoutMs: 30000 })
-      .catch(() => null);
-    const postId = Number(record?.post_id);
-    if (postId) postToExternalId.set(postId, candidate);
-  }
+    usedStyles.add(clean(keeperStyleNo).toUpperCase());
     const { images, skipped, deduped } = await buildImages(keeper, {
       externalId: template.external_id, styleNo: keeperStyleNo, altText: keeperTitle,
     });
