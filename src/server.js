@@ -2509,9 +2509,12 @@ app.post('/api/pipelines/run', { preHandler: requireApiKey }, async (request, re
       });
       await Promise.all(workers);
       job.status = job.failed ? 'completed_with_errors' : 'completed';
-      await notifyPipelineRunSummary(job).catch((error) => {
-        app.log.error({ err: error, jobId: job.id }, 'pipeline Feishu summary failed');
-      });
+      // Single-product runs stay silent; only batch runs send the Feishu summary.
+      if (job.total > 1) {
+        await notifyPipelineRunSummary(job).catch((error) => {
+          app.log.error({ err: error, jobId: job.id }, 'pipeline Feishu summary failed');
+        });
+      }
     } catch (error) {
       job.status = 'failed';
       job.error = String(error?.message || error).slice(0, 300);
