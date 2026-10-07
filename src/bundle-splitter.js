@@ -524,7 +524,7 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
 下面是一个"拆分后的独立商品"（来自一个捆绑 listing），并已按顺序提供它自己的最终图片（图片1 到 图片${keptImageRows.length}）。
 ${variantNote}
 输出内容：
-- title：2–15 个英文单词的稳定产品名称；品类必须与上面的选项原文一致；不得包含年份、平台名（Amazon/AliExpress/TikTok 等）、Hot Sale、Cross-Border、颜色、印花或图案词；只有选项原文本身包含多个部件时才写套装/组合表述，不得把原 listing 的其它部件写进来（例如选项只有比基尼时，不得写 with matching skirt / three-piece set / wrap skirt）。
+- title：2–15 个英文单词的稳定产品名称；品类必须与上面的选项原文一致；不得包含年份、平台名（Amazon/AliExpress/TikTok 等）、Hot Sale、Cross-Border、颜色、印花、图案词或尺码词（如 One Size、XL）；只有选项原文本身包含多个部件时才写套装/组合表述，不得把原 listing 的其它部件写进来（例如选项只有比基尼时，不得写 with matching skirt / three-piece set / wrap skirt）。
 - description：35–120 个英文单词的单段产品级描述；只写多张图片共同体现的稳定可见特点（品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁、套装组成）；范围同样以选项原文为准，图片或原 listing 中属于其它部件的部分不要写；不得写颜色、印花、图案、单个 SKU、促销、年份、平台、SEO 关键词、穿着效果、材质、功能或不可见信息。
 输出格式：{"title":"","description":""}
 
