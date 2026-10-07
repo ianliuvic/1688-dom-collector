@@ -54,8 +54,10 @@ export function getSourceMaximumPrice(detail) {
   return numbers.length ? Math.max(...numbers) : null;
 }
 
-export function buildWearHongxiuPricing(detail) {
-  const sourceMax = getSourceMaximumPrice(detail);
+export function buildWearHongxiuPricing(detail, { sourceMaxOverride = null } = {}) {
+  const override = sourceMaxOverride === null || sourceMaxOverride === undefined
+    ? null : numberOrNull(sourceMaxOverride);
+  const sourceMax = override === null ? getSourceMaximumPrice(detail) : override;
   if (sourceMax === null) throw new Error('A valid non-negative 1688 maximum price is required for pricing.');
   const exchangeRate = 6.5;
   const tiers = [
@@ -842,6 +844,24 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   const attachmentFor = (url) => previousImages.get(normalizedUrlKey(url)) ?? null;
 
+  // Each split product prices from its OWN option group's SKU prices (the
+  // bundle-wide maximum would give every split product the same price).
+  const pricingFor = (content) => {
+    const own = (content?.skus ?? [])
+      .map((sku) => numberOrNull(sku?.price))
+      .filter((value) => value !== null && value > 0);
+    if (!own.length) {
+      const fallback = buildWearHongxiuPricing(detail);
+      return { pricing: fallback, sourceMin: null, sourceMax: fallback.source_max_price };
+    }
+    const sourceMax = Math.max(...own);
+    const sourceMin = Math.min(...own);
+    return {
+      pricing: buildWearHongxiuPricing(detail, { sourceMaxOverride: sourceMax }),
+      sourceMin, sourceMax,
+    };
+  };
+
   // Swatch attachments for colour options: reuse what the template already
   // uploaded, otherwise resolve the colour's image from ANY stored image (the
   // colour's picture is often stored as a gallery/detail image, not a SKU
@@ -1122,7 +1142,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       externalId: template.external_id, styleNo: keeperStyleNo, altText: keeperTitle,
     });
     const colours = await buildColours(keeper);
-    const prices = buildWearHongxiuPricing(detail);
+    const { pricing: prices, sourceMin, sourceMax } = pricingFor(keeper);
     const keeperSkuRows = buildSkuRows(keeper, keeperStyleNo);
     const keeperInStock = keeperSkuRows.length > 0 && keeperSkuRows.every((row) => row.available === true);
     const payload = {
@@ -1141,13 +1161,20 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       meta: {
         ...(template.meta ?? {}),
         ...(pickedCategory ? { primary_category_id: String(pickedCategory.id), primary_category: pickedCategory.name } : {}),
+        ...(sourceMax !== null ? {
+          source_price_min: String(sourceMin ?? sourceMax), source_price_max: String(sourceMax),
+        } : {}),
         style: pickedCategory?.name ?? template.meta?.style ?? '',
         sample_available: keeperInStock,
         sample_lead_time: keeperInStock ? '3 working days' : '7 to 14 working days',
         lead_time: keeperInStock ? '3 working days' : '7 to 14 working days',
         sku: keeperStyleNo, title: keeperTitle, description: keeperDescription,
       },
-      source: { ...(template.source ?? {}), split_product_id: keeper.id ?? null, split_product_name: keeper.name ?? null },
+      source: {
+        ...(template.source ?? {}),
+        ...(sourceMax !== null ? { price_min: sourceMin ?? sourceMax, price_max: sourceMax } : {}),
+        split_product_id: keeper.id ?? null, split_product_name: keeper.name ?? null,
+      },
     };
     const synced = await wp('/wp-json/hx/v1/products/sync', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
@@ -1224,7 +1251,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       });
       const colours = await buildColours(content);
       const sizes = buildSizes(content);
-      const prices = buildWearHongxiuPricing(detail);
+      const { pricing: prices, sourceMin: siblingMin, sourceMax: siblingMax } = pricingFor(content);
       const categoryName = allCategories.find((item) => Number(item.id) === Number(categoryId))?.name ?? clean(template.meta?.primary_category);
       const siblingSkuRows = buildSkuRows(content, styleNo);
       const siblingInStock = siblingSkuRows.length > 0 && siblingSkuRows.every((row) => row.available === true);
@@ -1249,8 +1276,15 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
           sample_available: siblingInStock,
           sample_lead_time: siblingInStock ? '3 working days' : '7 to 14 working days',
           lead_time: siblingInStock ? '3 working days' : '7 to 14 working days',
+          ...(siblingMax !== null ? {
+            source_price_min: String(siblingMin ?? siblingMax), source_price_max: String(siblingMax),
+          } : {}),
         },
-        source: { ...(template.source ?? {}), split_product_id: content.id ?? null, split_product_name: content.name ?? null },
+        source: {
+          ...(template.source ?? {}),
+          ...(siblingMax !== null ? { price_min: siblingMin ?? siblingMax, price_max: siblingMax } : {}),
+          split_product_id: content.id ?? null, split_product_name: content.name ?? null,
+        },
       };
       const synced = await wp('/wp-json/hx/v1/products/sync', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 120000,
