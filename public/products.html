@@ -688,12 +688,56 @@ function renderPublishPreview(id, data){
   const variantsCard = '<div class="pp-card pp-wide"><div class="pp-card-title">变体矩阵（' + data.variants.total + ' 行，显示前 20）</div>'
     + '<table class="pp-table"><thead><tr><th>变体</th><th>源价</th><th>库存</th><th>skuId</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 
+  const norm = data.normalization ? data.normalization.result : null;
+  const normCard = norm
+    ? '<div class="pp-card pp-wide"><div class="pp-card-title">变体规范化（LLM 建议'
+      + (data.normalization.model ? ' · ' + esc(data.normalization.model) : '')
+      + (data.normalization.updatedAt ? ' · ' + esc(new Date(data.normalization.updatedAt).toLocaleString()) : '') + '）</div>'
+      + '<table class="pp-table"><thead><tr><th>swatch 图</th><th>规范化文本</th><th>SKU 缩写</th><th>原文</th><th>置信度</th></tr></thead><tbody>'
+      + (norm.colours || []).map((colour) => '<tr>'
+        + '<td>' + (colour.thumb
+          ? '<img src="' + esc(colour.thumb) + '" style="width:26px;height:26px;object-fit:cover;border-radius:4px;display:block" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">'
+          : '<span class="pp-muted">无</span>') + '</td>'
+        + '<td>' + (colour.text ? esc(colour.text) : '<span class="pp-muted">待人工</span>')
+        + (colour.placeholder ? ' <span class="pp-chip warn">占位</span>' : '')
+        + (colour.needsReview ? ' <span class="pp-chip gray">待复核</span>' : '') + '</td>'
+        + '<td>' + (colour.code ? '<code>' + esc(colour.code) + '</code>' : '—') + '</td>'
+        + '<td class="pp-muted">' + esc(colour.source) + '</td>'
+        + '<td>' + (colour.confidence === null || colour.confidence === undefined ? '—' : colour.confidence) + '</td>'
+        + '</tr>').join('')
+      + '</tbody></table>'
+      + ((norm.sizes || []).length
+        ? '<div class="pp-row" style="margin-top:6px"><span class="pp-muted" style="margin-right:6px">尺码标准化</span><span class="pp-tags">'
+          + norm.sizes.map((size) => '<span class="pp-tag">' + esc(size.text || size.source) + (size.placeholder ? '（占位）' : '') + '</span>').join('')
+          + '</span></div>'
+        : '')
+      + (norm.notes ? '<div class="pp-muted" style="margin-top:4px">备注：' + esc(norm.notes) + '</div>' : '')
+      + '</div>'
+    : '';
+
   panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 发布前预览</b>'
+    + '<button type="button" data-pp-normalize="' + id + '">运行变体规范化（LLM）</button>'
     + '<button type="button" data-pp-reload="' + id + '">刷新</button>'
     + '<button type="button" data-pp-close="' + id + '">收起</button>'
     + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（只读）</span></div>'
     + '<div class="pp-chips">' + chips.join('') + '</div>'
-    + '<div class="pp-grid">' + translationCard + pricingCard + merch + imagesCard + variantsCard + '</div>';
+    + '<div class="pp-grid">' + normCard + translationCard + pricingCard + merch + imagesCard + variantsCard + '</div>';
+}
+
+async function runVariantNormalization(id, button){
+  const original = button ? button.textContent : '';
+  if (button) { button.textContent = '规范化中…约 30–60 秒'; button.disabled = true; }
+  try {
+    const res = await fetch('/api/product-details/' + id + '/normalize-variants', { method: 'POST' });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 120));
+    const existing = document.getElementById('pp-panel-' + id);
+    if (existing) existing.remove();
+    await togglePublishPreview(id);
+  } catch (e) {
+    if (button) { button.textContent = '失败：' + String((e && e.message) || e); }
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 document.addEventListener('click', (e) => {
@@ -703,6 +747,8 @@ document.addEventListener('click', (e) => {
     void setBundleStatus(bundleBtn.dataset.bundleId, bundleBtn.dataset.bundleValue, stateEl);
     return;
   }
+  const ppNorm = e.target.closest('button[data-pp-normalize]');
+  if (ppNorm) { void runVariantNormalization(String(ppNorm.dataset.ppNormalize), ppNorm); return; }
   const ppToggle = e.target.closest('button[data-pp-id]');
   if (ppToggle) { void togglePublishPreview(String(ppToggle.dataset.ppId)); return; }
   const ppReload = e.target.closest('button[data-pp-reload]');

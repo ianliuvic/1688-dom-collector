@@ -26,6 +26,7 @@ import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
 import { analyzeBundleSplit, recomputePlan } from './bundle-splitter.js';
+import { normalizeVariants } from './variant-normalizer.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
@@ -931,6 +932,62 @@ app.put('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrA
   return { productDetailId: id, plan: saved.plan, updatedAt: saved.updated_at };
 });
 
+// Variant normalization: the model proposes a swatch text/code/image for every
+// existing colour option plus standardized size labels; the server validates
+// the one-to-one mapping and stores the result for the publisher and the UI.
+app.post('/api/product-details/:id/normalize-variants', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  try {
+    const { result, input } = await normalizeVariants({
+      detail,
+      config: {
+        apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+        model: config.complexModel, reasoningEffort: config.reasoningEffort,
+      },
+      baseUrl: config.publicBaseUrl,
+    });
+    const saved = await db.saveVariantNormalization(id, result, config.complexModel ?? null);
+    return {
+      productDetailId: id, result: saved.result, model: saved.model,
+      updatedAt: saved.updated_at, imageCount: input.images.length,
+    };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: id }, 'variant normalization failed');
+    return reply.code(502).send({
+      error: 'variant_normalization_failed', message: String(error?.message || error).slice(0, 300),
+    });
+  }
+});
+
+app.get('/api/product-details/:id/variant-normalization', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const record = await db.getVariantNormalization(id);
+  const detail = record ? await db.getProductDetail(id) : null;
+  return {
+    productDetailId: id,
+    result: record ? decorateNormalization(record.result, detail) : null,
+    model: record?.model ?? null,
+    updatedAt: record?.updated_at ?? null,
+  };
+});
+
+/** Add local thumbnails to a stored normalization for the review UI. */
+function decorateNormalization(result, detail) {
+  if (!result) return result;
+  const images = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
+  return {
+    ...result,
+    colours: (Array.isArray(result.colours) ? result.colours : []).map((colour) => {
+      const image = colour.imageId ? images.get(String(colour.imageId)) : null;
+      const base = image ? imagePublicPath(image.storage_path) : null;
+      return { ...colour, thumb: base ? `${base}?w=96` : (image?.source_url ?? null) };
+    }),
+  };
+}
 // Pre-publish review layer: everything the publisher would use for this
 // capture, assembled from stored data without any model call. Mirrors the
 // translation, pricing, merchandising, images, variants and every publish gate.
@@ -939,10 +996,11 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
-  const [translation, publication, sourceListings] = await Promise.all([
+  const [translation, publication, sourceListings, normalization] = await Promise.all([
     db.getLatestProductTranslation(id, 'en'),
     db.getWordPressPublication(id),
     db.listShopProductSources(detail.offer_id),
+    db.getVariantNormalization(id),
   ]);
   const policy = evaluateShopProductPolicy(sourceListings);
   let pricing = null;
@@ -1085,6 +1143,13 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       })),
       total: skuRows.length,
     },
+    normalization: normalization
+      ? {
+        result: decorateNormalization(normalization.result, detail),
+        model: normalization.model ?? null,
+        updatedAt: normalization.updated_at ?? null,
+      }
+      : null,
     gates: {
       bundle: {
         status: detail.bundle_status ?? null,

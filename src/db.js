@@ -291,6 +291,12 @@ export function createDatabase(databaseUrl) {
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       );
+      CREATE TABLE IF NOT EXISTS product_variant_normalizations (
+        product_detail_id bigint PRIMARY KEY REFERENCES product_details(id) ON DELETE CASCADE,
+        result jsonb NOT NULL DEFAULT '{}'::jsonb,
+        model text,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE TABLE IF NOT EXISTS product_detail_translations (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -2347,8 +2353,7 @@ export function createDatabase(databaseUrl) {
   }
 
   /** Saved bundle split plan for one product detail (manual or LLM). */
-  async function getProductSplitPlan(productDetailId) {
-    const result = await pool.query(
+  async function getProductSplitPlan(productDetailId) {    const result = await pool.query(
       'SELECT * FROM product_split_plans WHERE product_detail_id=$1', [productDetailId]);
     return result.rows[0] ?? null;
   }
@@ -2359,6 +2364,21 @@ export function createDatabase(databaseUrl) {
       ON CONFLICT (product_detail_id) DO UPDATE SET plan=EXCLUDED.plan, updated_at=now()
       RETURNING *`, [productDetailId, JSON.stringify(plan)]);
     return result.rows[0];
+  }
+
+  /** Saved variant normalization (swatch text/code/image + standardized sizes). */
+  async function getVariantNormalization(productDetailId) {
+    const result = await pool.query(
+      'SELECT * FROM product_variant_normalizations WHERE product_detail_id=$1', [productDetailId]);
+    return result.rows[0] ?? null;
+  }
+
+  async function saveVariantNormalization(productDetailId, result, model) {
+    const saved = await pool.query(`INSERT INTO product_variant_normalizations
+      (product_detail_id, result, model, updated_at) VALUES ($1,$2,$3,now())
+      ON CONFLICT (product_detail_id) DO UPDATE SET result=EXCLUDED.result, model=EXCLUDED.model, updated_at=now()
+      RETURNING *`, [productDetailId, JSON.stringify(result), model ?? null]);
+    return saved.rows[0];
   }
 
   async function listPortalPublishCandidates({ shopId, since, until, limit = 500 } = {}) {
@@ -2518,6 +2538,7 @@ export function createDatabase(databaseUrl) {
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     getProductSplitPlan, saveProductSplitPlan,
+    getVariantNormalization, saveVariantNormalization,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };
