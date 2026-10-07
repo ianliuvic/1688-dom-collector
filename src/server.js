@@ -1265,11 +1265,12 @@ app.get('/api/product-details/:id/image-dedupe', { preHandler: requireDashboardO
 // failure-tolerant; existing local rows are skipped.
 const DESCRIPTION_IMAGE_LIMIT = 60;
 
-async function ensureDescriptionImages(detail) {
+async function ensureDescriptionImages(detail, assignedUrls = null) {
   const raw = detail?.raw_data ?? {};
   const stored = new Set((detail?.images ?? [])
     .filter((image) => image.image_type === 'description')
     .map((image) => normalizedImageUrl(image.source_url)));
+  const allowed = assignedUrls ? new Set(assignedUrls.map((url) => normalizedImageUrl(url))) : null;
   const urls = [];
   const seen = new Set();
   for (const match of String(raw?.linkfox?.raw?.description ?? '').matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) {
@@ -1278,6 +1279,7 @@ async function ensureDescriptionImages(detail) {
     if (!/^https:\/\//i.test(url)) continue;
     const key = normalizedImageUrl(url);
     if (stored.has(key) || seen.has(key)) continue;
+    if (allowed && !allowed.has(key)) continue; // only images assigned to split products
     seen.add(key);
     urls.push(url);
     if (urls.length >= DESCRIPTION_IMAGE_LIMIT) break;
@@ -1862,7 +1864,12 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
               job.errors.push({ productDetailId, message: 'missing plan/contents/publication' });
               continue;
             }
-            const downloaded = await ensureDescriptionImages(detail).catch(() => ({ downloaded: 0 }));
+            const assignedDetailUrls = [];
+            for (const product of contents.result.products) {
+              for (const url of product.imageRefs?.imageUrls ?? []) assignedDetailUrls.push(String(url));
+            }
+            const downloaded = await ensureDescriptionImages(detail, assignedDetailUrls)
+              .catch(() => ({ downloaded: 0 }));
             if (downloaded.downloaded) {
               job.imagesDownloaded += downloaded.downloaded;
               detail = await db.getProductDetail(productDetailId);

@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { analyzeProductMerchandising } from './product-merchandiser.js';
 import { applyReasoning } from './model-request.js';
+import { dedupeImagesByHash } from './image-dedupe.js';
 import { applyOptionMapOverrides, buildOptionOverrideIndex,
   resolveOptionDisplayLabel } from './option-overrides.js';
 
@@ -728,7 +729,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   const attachmentFor = (url) => previousImages.get(normalizedUrlKey(url)) ?? null;
 
   const buildImages = async (content, { externalId, styleNo, altText }) => {
-    const rows = [];
+    let rows = [];
     for (const imageId of content.imageRefs?.imageIds ?? []) {
       const image = detailImages.get(String(imageId));
       if (image) rows.push(image);
@@ -739,6 +740,19 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         .find((image) => normalizedUrlKey(image.source_url) === normalizedUrlKey(url));
       if (match && !rows.some((row) => String(row.id) === String(match.id))) rows.push(match);
     }
+    // Content dedupe within this split product (exact sha + near dHash/pHash):
+    // nothing duplicated is published even when the source mixed it in.
+    let deduped = 0;
+    try {
+      const outcome = await dedupeImagesByHash(rows.map((image) => ({
+        id: String(image.id),
+        contentSha256: image.content_sha256 ?? null,
+        storagePath: image.storage_path ?? null,
+      })));
+      const keptIds = new Set(outcome.kept.map((entry) => String(entry.id)));
+      deduped = outcome.removed.length;
+      rows = rows.filter((row) => keptIds.has(String(row.id)));
+    } catch { /* keep the list as-is when hashing fails */ }
     const images = [];
     const skipped = [];
     let index = 0;
@@ -774,7 +788,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       }
       index += 1;
     }
-    return { images, skipped };
+    return { images, skipped, deduped };
   };
 
   const buildColours = (content) => (content.colours ?? []).map((colour, index) => {
@@ -814,7 +828,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   // 1) Update the original post with the keeper product.
   {
-    const { images, skipped } = await buildImages(keeper, {
+    const { images, skipped, deduped } = await buildImages(keeper, {
       externalId: template.external_id, styleNo: publication.style_no, altText: clean(keeper.title),
     });
     const colours = buildColours(keeper);
@@ -841,6 +855,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       productId: keeper.id, title: clean(keeper.title), styleNo: publication.style_no,
       postId: synced.post_id ?? publication.wp_post_id, url: synced.permalink ?? publication.wp_url,
       status: synced.status ?? 'publish', imageCount: images.length, skippedImages: skipped.length,
+      dedupedImages: deduped,
       payload,
     };
   }
@@ -904,7 +919,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       results.created.push({
         productId: content.id, title: clean(content.title), styleNo, categoryId, categoryName,
         postId: synced.post_id ?? null, url: synced.permalink ?? null, status: synced.status ?? 'draft',
-        imageCount: images.length, skippedImages: skipped.length,
+        imageCount: images.length, skippedImages: skipped.length, dedupedImages: deduped,
       });
     } catch (error) {
       results.errors.push({ productId: content.id, message: String(error?.message || error).slice(0, 200) });
