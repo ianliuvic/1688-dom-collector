@@ -797,7 +797,9 @@ function contentTextOf(content) {
 }
 
 function normalizedUrlKey(value) {
-  return clean(value).replace(/^http:/i, 'https:').replace(/[?#].*$/, '');
+  // 1688 serves one image as `x.jpg` and `x.jpg_.webp`; both must collapse to
+  // the same key or swatch attachments are never matched.
+  return normalizedSourceImageKey(value);
 }
 
 /**
