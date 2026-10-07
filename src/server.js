@@ -932,6 +932,62 @@ app.put('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrA
   return { productDetailId: id, plan: saved.plan, updatedAt: saved.updated_at };
 });
 
+// Download swatch images that exist as source URLs but were never stored
+// locally, so every variant can fall back to its own image during
+// normalization. Bounded and failure-tolerant.
+const SKU_SWATCH_DOWNLOAD_LIMIT = 80;
+
+async function ensureSkuSwatchImages(detail) {
+  const raw = detail?.raw_data ?? {};
+  const options = (Array.isArray(raw.skuOptions) ? raw.skuOptions : [])
+    .filter((option) => /(颜色|color|colour)/i.test(String(option?.dimensionName ?? '')));
+  const stored = new Set((detail?.images ?? [])
+    .filter((image) => image.image_type === 'sku')
+    .map((image) => normalizedImageUrl(image.source_url)));
+  const missing = options.filter((option) => {
+    const url = String(option?.image ?? '').trim();
+    return /^https:\/\//i.test(url) && !stored.has(normalizedImageUrl(url));
+  }).slice(0, SKU_SWATCH_DOWNLOAD_LIMIT);
+  if (!missing.length) return { downloaded: 0, failed: 0 };
+  const root = path.resolve(config.storagePath, 'product-images');
+  const folder = path.resolve(root, String(detail.offer_id ?? ''));
+  if (!folder.startsWith(`${root}${path.sep}`)) return { downloaded: 0, failed: 0 };
+  await fs.mkdir(folder, { recursive: true });
+  const results = { downloaded: 0, failed: 0 };
+  let next = 0;
+  const workers = Array.from({ length: Math.min(4, missing.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= missing.length) return;
+      const url = String(missing[index].image);
+      try {
+        const response = await fetch(url, {
+          headers: { referer: 'https://detail.1688.com/', 'user-agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(45000),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length < 64) throw new Error('image too small');
+        const extension = (url.split('?')[0].match(/\.(jpe?g|png|webp|gif|avif)$/i) || ['.jpg'])[0].toLowerCase();
+        const sha = crypto.createHash('sha256').update(bytes).digest('hex');
+        const fileName = `sku-${String(index + 1).padStart(4, '0')}-${sha.slice(0, 12)}${extension}`;
+        const filePath = path.join(folder, fileName);
+        await fs.writeFile(filePath, bytes);
+        await db.addProductImage(detail.id, {
+          type: 'sku', sortOrder: 1000 + index, sourceUrl: url, storagePath: filePath,
+          mimeType: String(response.headers.get('content-type') || '').split(';')[0] || 'image/jpeg',
+          contentSha256: sha, byteSize: bytes.length,
+        });
+        results.downloaded += 1;
+      } catch {
+        results.failed += 1;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 // Variant normalization: the model proposes a swatch text/code/image for every
 // existing colour option plus standardized size labels; the server validates
 // the one-to-one mapping and stores the result for the publisher and the UI.
@@ -941,8 +997,12 @@ app.post('/api/product-details/:id/normalize-variants', { preHandler: requireDas
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   try {
+    // Make sure every colour option that has a source swatch image actually has
+    // a local copy, so the normalizer can always fall back to it.
+    const ensured = await ensureSkuSwatchImages(detail).catch(() => ({ downloaded: 0, failed: 0 }));
+    const freshDetail = ensured.downloaded ? await db.getProductDetail(id) : detail;
     const { result, input } = await normalizeVariants({
-      detail,
+      detail: freshDetail,
       config: {
         apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
         model: config.complexModel, reasoningEffort: config.reasoningEffort,
@@ -953,6 +1013,7 @@ app.post('/api/product-details/:id/normalize-variants', { preHandler: requireDas
     return {
       productDetailId: id, result: saved.result, model: saved.model,
       updatedAt: saved.updated_at, imageCount: input.images.length,
+      swatchImagesDownloaded: ensured.downloaded,
     };
   } catch (error) {
     request.log.error({ err: error, productDetailId: id }, 'variant normalization failed');

@@ -2367,8 +2367,7 @@ export function createDatabase(databaseUrl) {
   }
 
   /** Saved variant normalization (swatch text/code/image + standardized sizes). */
-  async function getVariantNormalization(productDetailId) {
-    const result = await pool.query(
+  async function getVariantNormalization(productDetailId) {    const result = await pool.query(
       'SELECT * FROM product_variant_normalizations WHERE product_detail_id=$1', [productDetailId]);
     return result.rows[0] ?? null;
   }
@@ -2379,6 +2378,19 @@ export function createDatabase(databaseUrl) {
       ON CONFLICT (product_detail_id) DO UPDATE SET result=EXCLUDED.result, model=EXCLUDED.model, updated_at=now()
       RETURNING *`, [productDetailId, JSON.stringify(result), model ?? null]);
     return saved.rows[0];
+  }
+
+  /** Append one downloaded image row (used when a missing swatch image is fetched later). */
+  async function addProductImage(productDetailId, image) {
+    const result = await pool.query(`INSERT INTO product_detail_images
+      (product_detail_id, image_type, sort_order, source_url, storage_path, mime_type,
+       downloaded_at, content_sha256, byte_size)
+      VALUES ($1,$2,$3,$4,$5,$6,now(),$7,$8) RETURNING *`, [
+      productDetailId, image.type, image.sortOrder ?? 0, image.sourceUrl,
+      image.storagePath ?? null, image.mimeType ?? null,
+      image.contentSha256 ?? null, image.byteSize ?? null,
+    ]);
+    return result.rows[0];
   }
 
   async function listPortalPublishCandidates({ shopId, since, until, limit = 500 } = {}) {
@@ -2538,7 +2550,7 @@ export function createDatabase(databaseUrl) {
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     getProductSplitPlan, saveProductSplitPlan,
-    getVariantNormalization, saveVariantNormalization,
+    getVariantNormalization, saveVariantNormalization, addProductImage,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
     getPortalPublication, savePortalPublication, failPortalPublication, ping };
