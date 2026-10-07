@@ -1093,6 +1093,7 @@ app.post('/api/product-details/:id/split-content', { preHandler: requireDashboar
   trimTerminalJobs(splitContentJobs);
   (async () => {
     try {
+      const prior = await db.getSplitContents(id);
       const { contents } = await generateSplitContents({
         detail,
         plan: planRecord.plan,
@@ -1103,6 +1104,15 @@ app.post('/api/product-details/:id/split-content', { preHandler: requireDashboar
         },
         baseUrl: config.publicBaseUrl,
       });
+      // Already published split products keep their WordPress results
+      // (reserved style numbers, post ids) across content regenerations.
+      const priorWp = new Map((prior?.result?.products ?? [])
+        .map((product) => [String(product.id), product.wp])
+        .filter(([, wp]) => wp));
+      for (const product of contents.products) {
+        const wp = priorWp.get(String(product.id));
+        if (wp) product.wp = wp;
+      }
       const saved = await db.saveSplitContents(id, contents, config.complexModel ?? null);
       job.productCount = contents.products.length;
       job.result = { productCount: contents.products.length, styleNo: contents.styleNo };
@@ -2102,10 +2112,20 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
   // Split products are regular products: normalization (with the drop policy),
   // dedupe and copy all happen inside the splitter, in that exact order.
   const publication = await db.getWordPressPublication(detail.id);
+  const priorContents = await db.getSplitContents(detail.id);
   const { contents } = await generateSplitContents({
     detail, plan, styleNo: publication?.style_no ?? null,
     config: pipelineModelConfig(), baseUrl: config.publicBaseUrl,
   });
+  // Keep the WordPress results of already published split products: their
+  // reserved style numbers must survive every content regeneration.
+  const priorWp = new Map((priorContents?.result?.products ?? [])
+    .map((product) => [String(product.id), product.wp])
+    .filter(([, wp]) => wp));
+  for (const product of contents.products) {
+    const wp = priorWp.get(String(product.id));
+    if (wp) product.wp = wp;
+  }
   await db.saveSplitContents(detail.id, contents, config.complexModel ?? null);
   run.steps.normalize = { products: contents.products.length, dropped: contents.dropped ?? [] };
   run.dropped = contents.dropped ?? [];
