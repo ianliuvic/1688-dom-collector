@@ -455,7 +455,9 @@ export async function classifyNonProductImages({ images, title = '', config }) {
     }, config.reasoningEffort)),
     signal: AbortSignal.timeout(180000),
   });
-  if (!response.ok) return new Set();
+  if (!response.ok) {
+    throw new Error(`Non-product classification failed (${response.status}).`);
+  }
   const payload = await response.json().catch(() => null);
   const text = contentText(payload?.choices?.[0]?.message?.content);
   let parsed = null;
@@ -464,6 +466,7 @@ export async function classifyNonProductImages({ images, title = '', config }) {
     const match = String(text || '').match(/\{[\s\S]*\}/);
     if (match) { try { parsed = JSON.parse(match[0]); } catch { parsed = null; } }
   }
+  if (!parsed) throw new Error('Non-product classification returned no JSON.');
   const flagged = new Set();
   for (const number of (parsed?.nonProduct ?? [])) {
     const index = Number(number) - 1;

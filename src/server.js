@@ -2107,17 +2107,22 @@ async function stripNonProductDetailImages({ detail, contents, config }) {
       items.push({ key, url: sourceUrl });
     }
   }
-  if (!items.length) return { removed: 0, nonProduct: 0 };
+  if (!items.length) return { removed: 0, considered: 0, nonProduct: 0, errors: [] };
   const junkKeys = new Set();
+  const errors = [];
   for (let offset = 0; offset < items.length; offset += 12) {
-    const flagged = await classifyNonProductImages({
-      images: items.slice(offset, offset + 12),
-      title: detail?.title ?? '',
-      config: pipelineModelConfig(),
-    }).catch(() => new Set());
-    for (const key of flagged) junkKeys.add(key);
+    try {
+      const flagged = await classifyNonProductImages({
+        images: items.slice(offset, offset + 12),
+        title: detail?.title ?? '',
+        config: pipelineModelConfig(),
+      });
+      for (const key of flagged) junkKeys.add(key);
+    } catch (error) {
+      errors.push(String(error?.message || error).slice(0, 120));
+    }
   }
-  if (!junkKeys.size) return { removed: 0, nonProduct: 0 };
+  if (!junkKeys.size) return { removed: 0, considered: items.length, nonProduct: 0, errors };
   let removed = 0;
   for (const product of contents.products ?? []) {
     if (!product.imageRefs) continue;
@@ -2135,7 +2140,7 @@ async function stripNonProductDetailImages({ detail, contents, config }) {
     removed += ids.length - keptIds.length;
     product.imageRefs.imageIds = keptIds;
   }
-  return { removed, nonProduct: junkKeys.size };
+  return { removed, considered: items.length, nonProduct: junkKeys.size, errors };
 }
 
 /** Bundle products: split first, then continue as regular split products. */
