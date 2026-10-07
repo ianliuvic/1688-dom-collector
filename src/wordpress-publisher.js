@@ -260,7 +260,7 @@ function buildColorOptions(detail, translation, overrideIndex = null, normalized
       ...(label === sourceLabel ? {} : { source_label: sourceLabel }),
       ...(clean(normalized?.code) ? { code: clean(normalized.code) } : {}),
       source_image_url: imageUrl,
-      image_source_id: matched?.id ? String(matched.id) : '',
+      image_source_id: matched?.id ? String(matched.id) : (clean(normalized?.imageId) || ''),
     };
   });
 }
@@ -793,6 +793,8 @@ export async function publishProductToWordPress({ detail, translation, options =
         return {
           label: color.label,
           value: color.value,
+          ...(color.code ? { code: color.code } : {}),
+          ...(color.source_label ? { source_label: color.source_label } : {}),
           ...(uploaded?.attachmentId ? { image_id: uploaded.attachmentId } : {}),
         };
       }),
