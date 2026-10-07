@@ -886,7 +886,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       }
       const styleNo = clean(allocated.style_no);
       if (!styleNo) throw new Error('Style number allocation returned nothing.');
-      const { images, skipped } = await buildImages(content, {
+      const { images, skipped, deduped } = await buildImages(content, {
         externalId, styleNo, altText: clean(content.title),
       });
       const colours = buildColours(content);
