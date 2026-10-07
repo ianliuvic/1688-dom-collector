@@ -356,7 +356,7 @@ function imageUrlKey(value) {
     .replace(/(\.(?:jpe?g|png|webp|avif|gif))_(\.(?:jpe?g|png|webp|avif|gif))$/, '$1');
 }
 
-/** Publishable image rows for one split product (no swatch images). */
+/** Publishable image rows for one split product (gallery images only). */
 function splitProductImageRows(detail, product, { baseUrl }) {
   const byId = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
   const rows = [];
@@ -370,6 +370,8 @@ function splitProductImageRows(detail, product, { baseUrl }) {
   for (const id of product?.imageIds ?? []) {
     const image = byId.get(String(id));
     if (!image) continue;
+    // Detail-page (description) images are never published to the gallery.
+    if (String(image.image_type || '') === 'description') continue;
     const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? cleanText(image.source_url) : null;
     push({
       dbId: String(image.id),
@@ -380,23 +382,8 @@ function splitProductImageRows(detail, product, { baseUrl }) {
       label: imageLabelForRow(image),
     });
   }
-  for (const url of product?.imageUrls ?? []) {
-    const match = (detail?.images ?? [])
-      .find((image) => imageUrlKey(image.source_url) === imageUrlKey(url));
-    if (match) {
-      const sourceUrl = /^https:\/\//i.test(match.source_url || '') ? cleanText(match.source_url) : null;
-      push({
-        dbId: String(match.id),
-        sourceUrl: cleanText(match.source_url) || cleanText(url),
-        storagePath: match.storage_path ?? null,
-        sha: match.content_sha256 ?? null,
-        url: sourceUrl || publicImageUrl(match.storage_path, baseUrl),
-        label: imageLabelForRow(match),
-      });
-    } else {
-      push({ dbId: null, sourceUrl: cleanText(url), storagePath: null, sha: null, url: cleanText(url), label: '详情图' });
-    }
-  }
+  // URL-only assigned images come from the 1688 detail section and are kept
+  // as source material only — they are never published either.
   return rows;
 }
 

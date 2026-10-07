@@ -2553,7 +2553,7 @@ app.post('/api/wordpress/split-swatches/repair', { preHandler: requireApiKey }, 
   }
   const job = {
     id: crypto.randomUUID(), status: 'running', total: 0, processed: 0, bundles: 0,
-    siblings: 0, failed: 0, createdAt: new Date().toISOString(), completedAt: null, errors: [],
+    siblings: 0, strippedImages: 0, failed: 0, createdAt: new Date().toISOString(), completedAt: null, errors: [],
   };
   splitSwatchRepairJobs.set(job.id, job);
   trimTerminalJobs(splitSwatchRepairJobs);
@@ -2586,6 +2586,32 @@ app.post('/api/wordpress/split-swatches/repair', { preHandler: requireApiKey }, 
               const downloaded = await ensureDescriptionImages(detail, assignedDetailUrls)
                 .catch(() => ({ downloaded: 0 }));
               if (downloaded.downloaded) detail = await db.getProductDetail(productDetailId);
+            }
+            // Detail-page (description) images must never appear in the WP
+            // gallery: strip them from the stored refs before the re-sync.
+            const detailImageTypes = new Map((detail.images ?? [])
+              .map((image) => [String(image.id), String(image.image_type || '')]));
+            let stripped = 0;
+            let changed = false;
+            for (const product of contents.result.products) {
+              if (!product.imageRefs) product.imageRefs = {};
+              const refs = product.imageRefs;
+              if ((refs.imageUrls ?? []).length) {
+                stripped += refs.imageUrls.length;
+                refs.imageUrls = [];
+                changed = true;
+              }
+              const ids = refs.imageIds ?? [];
+              const keptIds = ids.filter((id) => detailImageTypes.get(String(id)) !== 'description');
+              if (keptIds.length !== ids.length) {
+                stripped += ids.length - keptIds.length;
+                refs.imageIds = keptIds;
+                changed = true;
+              }
+            }
+            if (changed) {
+              await db.saveSplitContents(productDetailId, contents.result, contents.model ?? null);
+              job.strippedImages += stripped;
             }
             const result = await publishSplitProductsToWordPress({
               detail, contents: contents.result, publication,
