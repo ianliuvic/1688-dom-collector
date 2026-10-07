@@ -563,6 +563,7 @@ function renderSplitPanel(id, plan){
     : (plan.source === 'manual' ? '手动方案' : '方案');
   panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 捆绑拆分</b>'
     + '<button type="button" data-split-run="' + id + '">重新分析（LLM）</button>'
+    + '<button type="button" data-split-addgroup="' + id + '">+ 添加组</button>'
     + '<button type="button" data-split-content="' + id + '">生成内容（LLM）</button>'
     + '<button type="button" data-split-save="' + id + '">保存</button>'
     + '<button type="button" data-split-close="' + id + '">收起</button>'
@@ -796,8 +797,7 @@ async function runVariantNormalization(id, button){
   }
 }
 
-function unassignSplitImage(id, kind, ref, index){
-  const plan = SPLITS.get(String(id));
+function unassignSplitImage(id, kind, ref, index){  const plan = SPLITS.get(String(id));
   const product = plan && (plan.products || [])[index];
   if (!product) return;
   if (kind === 'id') {
@@ -805,6 +805,18 @@ function unassignSplitImage(id, kind, ref, index){
   } else {
     product.imageUrls = (product.imageUrls || []).map(String).filter((value) => value !== String(ref));
   }
+  plan.source = 'manual';
+  renderSplitPanel(id, plan);
+}
+
+function addSplitGroup(id){
+  const plan = SPLITS.get(String(id));
+  if (!plan) return;
+  if ((plan.products || []).length >= 6) return;
+  const index = plan.products.length;
+  plan.products.push({
+    id: `p${index + 1}`, name: `产品${index + 1}`, options: [], imageIds: [], imageUrls: [], sizes: [], priceMax: null,
+  });
   plan.source = 'manual';
   renderSplitPanel(id, plan);
 }
@@ -845,6 +857,8 @@ document.addEventListener('click', (e) => {
   if (ppNorm) { void runVariantNormalization(String(ppNorm.dataset.ppNormalize), ppNorm); return; }
   const splitContentBtn = e.target.closest('button[data-split-content]');
   if (splitContentBtn) { void runSplitContent(String(splitContentBtn.dataset.splitContent), splitContentBtn); return; }
+  const addGroup = e.target.closest('button[data-split-addgroup]');
+  if (addGroup) { addSplitGroup(String(addGroup.dataset.splitAddgroup)); return; }
   const unassign = e.target.closest('button[data-split-unassign]');
   if (unassign) {
     unassignSplitImage(String(unassign.dataset.splitUnassign), unassign.dataset.kind,
