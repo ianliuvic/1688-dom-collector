@@ -166,12 +166,12 @@ export function normalizeVariantResult(parsed, input) {
     }
     const evidenceNumber = Number(proposal.imageNumber);
     const evidence = imageByNumber.get(evidenceNumber) ?? null;
-    // The variant's own swatch image is the default whenever the model could
-    // not point at a gallery image (or was never shown the swatch).
+    // A colour that has its own swatch image always uses it — the model's pick
+    // is only a fallback for colours without one.
     const ownImage = colour.ownImageId
       ? (imageById.get(String(colour.ownImageId)) ?? ownImageById.get(String(colour.ownImageId)) ?? null)
       : null;
-    const chosen = evidence ?? ownImage ?? null;
+    const chosen = ownImage ?? evidence ?? null;
     colours.push({
       source: colour.value,
       text: cleanText(proposal.text).slice(0, 60) || null,

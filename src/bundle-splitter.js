@@ -546,19 +546,21 @@ export async function generateSplitContents({ detail, plan, styleNo = null, conf
     // 1) Variant normalization first: it is the authority for names, swatches,
     //    sizes and SKUs, and unusable variants are dropped before anything else.
     let normalized = null;
-    try {
-      normalized = await normalizeVariantScope({
-        detail,
-        options: product.options ?? [],
-        sizes: product.sizes ?? [],
-        imageIds: product.imageIds ?? [],
-        imageUrls: product.imageUrls ?? [],
-        title: input.title,
-        config,
-        baseUrl,
-      });
-    } catch {
-      normalized = null;
+    for (let attempt = 0; attempt < 2 && !normalized; attempt += 1) {
+      try {
+        normalized = await normalizeVariantScope({
+          detail,
+          options: product.options ?? [],
+          sizes: product.sizes ?? [],
+          imageIds: product.imageIds ?? [],
+          imageUrls: product.imageUrls ?? [],
+          title: input.title,
+          config,
+          baseUrl,
+        });
+      } catch {
+        normalized = null;
+      }
     }
     const allColours = normalized
       ? normalized.result.colours.map((colour) => ({
@@ -736,26 +738,30 @@ export async function normalizeSplitContents({ detail, plan, contents, styleNo =
   for (const [index, product] of products.entries()) {
     const prior = stored.find((item) => item.id === product.id) ?? stored[index] ?? {};
     let normalized = null;
-    try {
-      normalized = await normalizeVariantScope({
-        detail,
-        options: product.options ?? [],
-        sizes: product.sizes ?? [],
-        imageIds: product.imageIds ?? [],
-        imageUrls: product.imageUrls ?? [],
-        title: cleanText(detail?.title),
-        config,
-        baseUrl,
-      });
-    } catch {
-      normalized = null;
+    for (let attempt = 0; attempt < 2 && !normalized; attempt += 1) {
+      try {
+        normalized = await normalizeVariantScope({
+          detail,
+          options: product.options ?? [],
+          sizes: product.sizes ?? [],
+          imageIds: product.imageIds ?? [],
+          imageUrls: product.imageUrls ?? [],
+          title: cleanText(detail?.title),
+          config,
+          baseUrl,
+        });
+      } catch {
+        normalized = null;
+      }
     }
+    // A failed normalization must never silently keep stale data: the prior
+    // colours stay but are flagged for review.
     const colours = normalized
       ? normalized.result.colours.map((colour) => ({
         source: colour.source, text: colour.text, code: colour.code, thumb: colour.thumb ?? null,
         placeholder: colour.placeholder === true, needsReview: colour.needsReview === true,
       }))
-      : (prior.colours ?? []);
+      : (prior.colours ?? []).map((colour) => ({ ...colour, needsReview: true }));
     const sizes = normalized
       ? normalized.result.sizes.map((size) => ({ source: size.source, text: size.text, placeholder: size.placeholder === true }))
       : (prior.sizes ?? []);
