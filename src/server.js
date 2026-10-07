@@ -3128,6 +3128,7 @@ app.get('/api/wordpress/publications/summary', { preHandler: requireDashboardOrA
 // available vs made to order) against the SKU stock stored in its payload.
 app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboardOrApiKey }, async (request) => ({
   counts: await db.auditPublicationStock(),
+  mismatches: await db.listSampleAvailabilityMismatches(request.query?.limit),
   samples: await db.samplePublicationStocks(request.query?.limit),
 }));
 

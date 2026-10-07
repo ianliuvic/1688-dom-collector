@@ -2421,7 +2421,28 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? {};
   }
 
-  /** A few published products per stock situation, for spot checks. */
+  /** Published pages that still claim "sample available" although their payload SKUs are not all in stock. */
+  async function listSampleAvailabilityMismatches(limit = 50) {
+    const result = await pool.query(`
+      SELECT pubs.style_no, pubs.wp_url, d.id AS product_detail_id, skus.total, skus.not_positive,
+        coalesce(pubs.payload->'meta'->>'sample_available', '') AS page_sample_available,
+        pubs.last_synced_at
+      FROM product_wordpress_publications pubs
+      JOIN product_details d ON d.id = pubs.product_detail_id
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE NOT ((row->>'source_stock') ~ '^[0-9]+(\\.[0-9]+)?$'
+                 AND (row->>'source_stock')::numeric > 0))::int AS not_positive
+        FROM jsonb_array_elements(coalesce(pubs.payload->'sku_matrix'->'rows', '[]'::jsonb)) AS row
+      ) skus ON TRUE
+      WHERE pubs.wp_status = 'publish'
+        AND coalesce(pubs.payload->'meta'->>'sample_available', '') IN ('1', 'true')
+        AND (skus.total = 0 OR skus.not_positive > 0)
+      ORDER BY pubs.last_synced_at DESC NULLS LAST
+      LIMIT $1`, [Math.min(Math.max(Number(limit) || 50, 1), 200)]);
+    return result.rows;
+  }
+
   async function samplePublicationStocks(limit = 8) {
     const result = await pool.query(`
       SELECT pubs.style_no, pubs.wp_url, d.id AS product_detail_id,
@@ -2730,7 +2751,7 @@ export function createDatabase(databaseUrl) {
     setProductBundleManual, listBundleRecheckRows,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     summarizeWordPressPublications, listWordPressPublications,
-    auditPublicationStock, samplePublicationStocks,
+    auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
     getPerceptualHashSummary, backfillPerceptualHashOffers,
