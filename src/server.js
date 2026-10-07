@@ -2109,9 +2109,50 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
       .catch(() => ({ downloaded: 0, failed: 0 }));
     if (downloaded.downloaded) detail = await db.getProductDetail(detail.id);
   }
+  // A brand-new bundle has no WordPress page yet: publish the anchor page with
+  // the regular flow first, then the split publish updates it with the keeper
+  // content. Existing pages are reused unchanged.
+  let publication = await db.getWordPressPublication(detail.id);
+  if (!publication?.payload) {
+    let anchorTranslation = await db.getLatestProductTranslation(detail.id, 'en');
+    if (!anchorTranslation) {
+      const fresh = await db.getProductDetail(detail.id);
+      const translated = await translateProductDetail({
+        detail: fresh, targetLanguage: 'en',
+        config: {
+          apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+          complexModel: config.complexModel, storagePath: config.storagePath,
+          reasoningEffort: config.reasoningEffort,
+          maxTranslationImages: config.translationImageLimit,
+          modelImageTransport: config.modelImageTransport,
+        },
+      });
+      anchorTranslation = await db.saveProductTranslation(detail.id, translated);
+    }
+    const anchored = await publishProductToWordPress({
+      detail, translation: anchorTranslation, config,
+      optionOverrides: await db.listProductOptionOverrides(detail.id),
+      options: {
+        status: 'publish', categoryMode: 'auto', tagMode: 'auto', imageMode: 'full',
+        allowUnverifiedGallery: detail.raw_data?.gallery?.source === 'linkfox'
+          || detail.raw_data?.gallery?.complete === false,
+      },
+    });
+    const anchorHash = crypto.createHash('sha256').update(JSON.stringify(anchored.payload)).digest('hex');
+    await db.saveWordPressPublication(detail.id, {
+      translationId: anchorTranslation.id,
+      externalId: anchored.draft.externalId,
+      styleNo: anchored.draft.styleNo,
+      wpPostId: anchored.wordpress.post_id ?? null,
+      wpUrl: anchored.wordpress.permalink ?? null,
+      wpEditUrl: anchored.wordpress.edit_link ?? null,
+      wpStatus: anchored.wordpress.status ?? 'publish',
+      syncHash: anchorHash, payload: anchored.payload, result: anchored.wordpress, lastError: null,
+    });
+    publication = await db.getWordPressPublication(detail.id);
+  }
   // Split products are regular products: normalization (with the drop policy),
   // dedupe and copy all happen inside the splitter, in that exact order.
-  const publication = await db.getWordPressPublication(detail.id);
   const priorContents = await db.getSplitContents(detail.id);
   const { contents } = await generateSplitContents({
     detail, plan, styleNo: publication?.style_no ?? null,
