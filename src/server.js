@@ -122,7 +122,7 @@ const wordpressPublishQueue = createConcurrentQueue({
 });
 let wordpressMaintenanceQueue = Promise.resolve();
 
-async function buildBestSellerPlan(limit = 36) {
+async function buildBestSellerPlan(limit = 48) {
   const candidates = await db.listBestSellerCandidates();
   return selectBestSellers(candidates, Math.min(Math.max(Number(limit) || 36, 1), 48));
 }
@@ -2670,7 +2670,7 @@ const splitSwatchRepairJobs = new Map();
  */
 async function refreshBestSellersCategory() {
   try {
-    const plan = await buildBestSellerPlan(36);
+    const plan = await buildBestSellerPlan(48);
     const result = await replaceWordPressBestSellers({
       postIds: plan.selected.map((item) => item.wp_post_id), config,
     });
@@ -4130,7 +4130,7 @@ app.get('/api/wordpress/best-sellers/preview', { preHandler: requireApiKey }, as
 
 app.post('/api/wordpress/best-sellers/rebuild', { preHandler: requireApiKey }, async (request, reply) => {
   const id = crypto.randomUUID();
-  const limit = Math.min(Math.max(Number(request.body?.limit) || 36, 1), 48);
+  const limit = Math.min(Math.max(Number(request.body?.limit) || 48, 1), 48);
   const job = { id, status: 'queued', limit, createdAt: new Date().toISOString(),
     startedAt: null, completedAt: null, plan: null, result: null, error: null };
   wordpressBestSellerJobs.set(id, job);
