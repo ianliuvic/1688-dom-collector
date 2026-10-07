@@ -213,7 +213,8 @@ export async function analyzeBundleSplit({ detail, config = {}, baseUrl }) {
 - 明显是同一类、只是颜色/花型/图案不同的选项，合并为同一个商品；
 - 没有意义、不是商品的信息（例如"现货放心拍"、"包邮"、"新款热卖"等卖家文案）放入 ignoredOptions，不要作为商品；
 - 如果所有选项本来就是同一类物件，只输出 1 个商品，不要硬拆；
-- 必须结合图片判断：为每个拆分后的商品列出它展示的图片编号（商品图、详情图、色卡都可用；同一张图片可以同时归属多个商品）；无法确定时宁可少分。
+- 必须结合图片判断：为每个拆分后的商品列出它展示的图片编号（商品图、详情图、色卡都可用；同一张图片可以同时归属多个商品）；无法确定时宁可少分；
+- 非产品图（工厂/车间/办公室/仓库/包装快递/团队/公司介绍/资质证书/纯文字海报如"产品实拍""工厂直销"/尺码表/物流或店铺宣传图）不属于任何商品：不要分配给任何商品，不要出现在任何商品的 images 里。
 输出格式：
 {"products":[{"name":"中文短名","options":["选项原文"],"images":[1,2],"reason":"一句话"}],"ignoredOptions":["..."]}
 
@@ -271,6 +272,21 @@ ${input.images.map((image) => `${image.index}. ${image.label}`).join('\n')}`;
       lastProblem = '分组后没有有效产品（options 与选项列表不匹配或全为空）';
       continue;
     }
+    // Images that no product claimed (non-product shots) are recorded so the
+    // review layer can see what the model left out on purpose.
+    const usedUrls = new Set();
+    const imageById = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
+    for (const product of products) {
+      for (const url of product.imageUrls ?? []) usedUrls.add(imageUrlKey(url));
+      for (const id of product.imageIds ?? []) {
+        const image = imageById.get(String(id));
+        if (image?.source_url) usedUrls.add(imageUrlKey(image.source_url));
+      }
+    }
+    const ignoredImages = (input.images ?? [])
+      .filter((image) => !usedUrls.has(imageUrlKey(image.url)))
+      .map((image) => image.url)
+      .slice(0, 120);
     return {
       input,
       plan: {
@@ -279,6 +295,7 @@ ${input.images.map((image) => `${image.index}. ${image.label}`).join('\n')}`;
         model: config.model ?? null,
         products,
         ignoredOptions,
+        ignoredImages,
         updatedAt: new Date().toISOString(),
       },
     };
@@ -311,6 +328,8 @@ export function recomputePlan(plan, detail) {  const raw = detail?.raw_data ?? {
     products,
     ignoredOptions: (Array.isArray(plan?.ignoredOptions) ? plan.ignoredOptions : [])
       .map(cleanText).filter(Boolean).slice(0, 60),
+    ignoredImages: (Array.isArray(plan?.ignoredImages) ? plan.ignoredImages : [])
+      .map((value) => String(value ?? '').trim()).filter(Boolean).slice(0, 120),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -356,7 +375,7 @@ function imageUrlKey(value) {
     .replace(/(\.(?:jpe?g|png|webp|avif|gif))_(\.(?:jpe?g|png|webp|avif|gif))$/, '$1');
 }
 
-/** Publishable image rows for one split product (gallery images only). */
+/** Publishable image rows for one split product (no swatch images). */
 function splitProductImageRows(detail, product, { baseUrl }) {
   const byId = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
   const rows = [];
@@ -370,8 +389,6 @@ function splitProductImageRows(detail, product, { baseUrl }) {
   for (const id of product?.imageIds ?? []) {
     const image = byId.get(String(id));
     if (!image) continue;
-    // Detail-page (description) images are never published to the gallery.
-    if (String(image.image_type || '') === 'description') continue;
     const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? cleanText(image.source_url) : null;
     push({
       dbId: String(image.id),
@@ -382,9 +399,73 @@ function splitProductImageRows(detail, product, { baseUrl }) {
       label: imageLabelForRow(image),
     });
   }
-  // URL-only assigned images come from the 1688 detail section and are kept
-  // as source material only — they are never published either.
+  for (const url of product?.imageUrls ?? []) {
+    const match = (detail?.images ?? [])
+      .find((image) => imageUrlKey(image.source_url) === imageUrlKey(url));
+    if (match) {
+      const sourceUrl = /^https:\/\//i.test(match.source_url || '') ? cleanText(match.source_url) : null;
+      push({
+        dbId: String(match.id),
+        sourceUrl: cleanText(match.source_url) || cleanText(url),
+        storagePath: match.storage_path ?? null,
+        sha: match.content_sha256 ?? null,
+        url: sourceUrl || publicImageUrl(match.storage_path, baseUrl),
+        label: imageLabelForRow(match),
+      });
+    } else {
+      push({ dbId: null, sourceUrl: cleanText(url), storagePath: null, sha: null, url: cleanText(url), label: '详情图' });
+    }
+  }
   return rows;
+}
+
+/**
+ * One vision pass over detail images: which of them show no product at all
+ * (factory/office/packing/text posters/company intro). Returns the caller's
+ * keys for the flagged images. Best-effort — a failed call flags nothing.
+ */
+export async function classifyNonProductImages({ images, title = '', config }) {
+  const items = (Array.isArray(images) ? images : []).filter((item) => item?.url && item?.key);
+  if (!items.length) return new Set();
+  const numbered = items.map((item, index) => ({ ...item, number: index + 1 }));
+  const prompt = `你是电商图片审核助手，只输出严格JSON。
+下面的图片来自 1688 商品详情区（按编号 图1 到 图${numbered.length}）。
+找出其中**不是产品图**的图片：
+- 非产品图：工厂/车间/办公室/仓库/包装快递/团队/公司介绍/资质证书/纯文字海报（如"产品实拍""工厂直销""品牌故事"）/尺码表/物流或店铺宣传图/与商品无关的装饰图；
+- 产品图：展示该商品本身的照片（模特上身、平铺实物、细节特写、颜色展示等）。
+输出：{"nonProduct":[编号,...]}；没有非产品图时输出 {"nonProduct":[]}
+标题参考：${JSON.stringify(String(title || '').slice(0, 80))}`;
+  const content = [
+    { type: 'text', text: prompt },
+    ...numbered.map((item) => ({ type: 'image_url', image_url: { url: item.url } })),
+  ];
+  const response = await fetch(endpointFrom(config.baseUrl), {
+    method: 'POST',
+    headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify(applyReasoning({
+      model: config.model,
+      messages: [{ role: 'user', content }],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 384000,
+    }, config.reasoningEffort)),
+    signal: AbortSignal.timeout(180000),
+  });
+  if (!response.ok) return new Set();
+  const payload = await response.json().catch(() => null);
+  const text = contentText(payload?.choices?.[0]?.message?.content);
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { parsed = null; }
+  if (!parsed) {
+    const match = String(text || '').match(/\{[\s\S]*\}/);
+    if (match) { try { parsed = JSON.parse(match[0]); } catch { parsed = null; } }
+  }
+  const flagged = new Set();
+  for (const number of (parsed?.nonProduct ?? [])) {
+    const index = Number(number) - 1;
+    if (Number.isInteger(index) && index >= 0 && index < numbered.length) flagged.add(numbered[index].key);
+  }
+  return flagged;
 }
 
 /**

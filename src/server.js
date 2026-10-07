@@ -26,7 +26,7 @@ import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
-import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy } from './bundle-splitter.js';
+import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy, classifyNonProductImages } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
 import { dedupeImagesByHash, dedupeImagesWithLlm } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
@@ -2080,9 +2080,66 @@ async function runRegularVariantStep(detail) {
   };
 }
 
+/**
+ * Removes non-product images (factory/office/packing/text posters/company
+ * intro) from a bundle's split contents. Only detail-section images are judged
+ * by the vision model; gallery images are never touched. Mutates the contents.
+ */
+async function stripNonProductDetailImages({ detail, contents, config }) {
+  const imageById = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
+  const items = [];
+  const seen = new Set();
+  for (const product of contents?.products ?? []) {
+    for (const url of product.imageRefs?.imageUrls ?? []) {
+      const key = normalizedImageUrl(url);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      items.push({ key, url: String(url) });
+    }
+    for (const id of product.imageRefs?.imageIds ?? []) {
+      const image = imageById.get(String(id));
+      if (!image || String(image.image_type || '') !== 'description') continue;
+      const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? String(image.source_url) : '';
+      if (!sourceUrl) continue;
+      const key = normalizedImageUrl(sourceUrl);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      items.push({ key, url: sourceUrl });
+    }
+  }
+  if (!items.length) return { removed: 0, nonProduct: 0 };
+  const junkKeys = new Set();
+  for (let offset = 0; offset < items.length; offset += 12) {
+    const flagged = await classifyNonProductImages({
+      images: items.slice(offset, offset + 12),
+      title: detail?.title ?? '',
+      config: pipelineModelConfig(),
+    }).catch(() => new Set());
+    for (const key of flagged) junkKeys.add(key);
+  }
+  if (!junkKeys.size) return { removed: 0, nonProduct: 0 };
+  let removed = 0;
+  for (const product of contents.products ?? []) {
+    if (!product.imageRefs) continue;
+    const urls = product.imageRefs.imageUrls ?? [];
+    const keptUrls = urls.filter((url) => !junkKeys.has(normalizedImageUrl(url)));
+    removed += urls.length - keptUrls.length;
+    product.imageRefs.imageUrls = keptUrls;
+    const ids = product.imageRefs.imageIds ?? [];
+    const keptIds = ids.filter((id) => {
+      const image = imageById.get(String(id));
+      if (!image) return true;
+      const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? String(image.source_url) : '';
+      return !sourceUrl || !junkKeys.has(normalizedImageUrl(sourceUrl));
+    });
+    removed += ids.length - keptIds.length;
+    product.imageRefs.imageIds = keptIds;
+  }
+  return { removed, nonProduct: junkKeys.size };
+}
+
 /** Bundle products: split first, then continue as regular split products. */
-async function runBundlePipelineStep({ detail, status, publish, refreshSplit = false, run }) {
-  const planRecord = await db.getProductSplitPlan(detail.id);
+async function runBundlePipelineStep({ detail, status, publish, refreshSplit = false, run }) {  const planRecord = await db.getProductSplitPlan(detail.id);
   let plan = !refreshSplit && planRecord?.plan?.products?.length ? planRecord.plan : null;
   if (plan) {
     run.steps.split = { products: plan.products.length, source: 'stored' };
@@ -2158,6 +2215,10 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
     detail, plan, styleNo: publication?.style_no ?? null,
     config: pipelineModelConfig(), baseUrl: config.publicBaseUrl,
   });
+  // Belt and braces: drop any non-product detail image the model still assigned.
+  const cleaned = await stripNonProductDetailImages({ detail, contents, config })
+    .catch(() => ({ removed: 0, nonProduct: 0 }));
+  if (cleaned.removed) run.steps.split.nonProductImagesRemoved = cleaned.removed;
   // Keep the WordPress results of already published split products: their
   // reserved style numbers must survive every content regeneration.
   const priorWp = new Map((priorContents?.result?.products ?? [])
@@ -2587,31 +2648,13 @@ app.post('/api/wordpress/split-swatches/repair', { preHandler: requireApiKey }, 
                 .catch(() => ({ downloaded: 0 }));
               if (downloaded.downloaded) detail = await db.getProductDetail(productDetailId);
             }
-            // Detail-page (description) images must never appear in the WP
-            // gallery: strip them from the stored refs before the re-sync.
-            const detailImageTypes = new Map((detail.images ?? [])
-              .map((image) => [String(image.id), String(image.image_type || '')]));
-            let stripped = 0;
-            let changed = false;
-            for (const product of contents.result.products) {
-              if (!product.imageRefs) product.imageRefs = {};
-              const refs = product.imageRefs;
-              if ((refs.imageUrls ?? []).length) {
-                stripped += refs.imageUrls.length;
-                refs.imageUrls = [];
-                changed = true;
-              }
-              const ids = refs.imageIds ?? [];
-              const keptIds = ids.filter((id) => detailImageTypes.get(String(id)) !== 'description');
-              if (keptIds.length !== ids.length) {
-                stripped += ids.length - keptIds.length;
-                refs.imageIds = keptIds;
-                changed = true;
-              }
-            }
-            if (changed) {
+            // Non-product detail images (factory/office/packing/posters) must
+            // not appear in the WP galleries: classify and strip only those.
+            const cleaned = await stripNonProductDetailImages({ detail, contents: contents.result, config })
+              .catch(() => ({ removed: 0, nonProduct: 0 }));
+            if (cleaned.removed) {
               await db.saveSplitContents(productDetailId, contents.result, contents.model ?? null);
-              job.strippedImages += stripped;
+              job.strippedImages += cleaned.removed;
             }
             const result = await publishSplitProductsToWordPress({
               detail, contents: contents.result, publication,
