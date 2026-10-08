@@ -177,7 +177,7 @@ function selectPublishingImages(detail, translation, imageMode = 'translated', a
   return kept;
 }
 
-function buildSkuMatrix(detail, translation, overrideIndex = null) {
+function buildSkuMatrix(detail, translation, overrideIndex = null, normalizedColours = null) {
   const droppedColours = droppedVariantColours(detail);
   const translatedRows = new Map(
     (translation?.sku_rows ?? []).map((row) => [clean(row.skuKey), row]),
@@ -194,7 +194,8 @@ function buildSkuMatrix(detail, translation, overrideIndex = null) {
     const translatedOptions = translated.options ?? {};
     const colorOption = optionValue(translatedOptions, ['color', '颜色'])
       || optionValue(sourceOptions, ['color', '颜色']);
-    const colorLabel = resolveOptionDisplayLabel(overrideIndex, colorOption) || colorOption;
+    const colorLabel = clean(normalizedColours?.get(clean(colorOption))?.text)
+      || resolveOptionDisplayLabel(overrideIndex, colorOption) || colorOption;
     const sizeLabel = optionValue(translatedOptions, ['size', '尺码'])
       || optionValue(sourceOptions, ['size', '尺码']);
     const translatedDisplayOptions = applyOptionMapOverrides(translatedOptions, overrideIndex);
@@ -347,7 +348,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
     : (detail.images ?? []).filter((image) => swatchImageIds.has(String(image.id)));
   const uploadImages = [...publishingImages, ...swatchImages]
     .filter((image, index, values) => values.findIndex((candidate) => String(candidate.id) === String(image.id)) === index);
-  const skuMatrix = buildSkuMatrix(detail, translation, overrideIndex);
+  const skuMatrix = buildSkuMatrix(detail, translation, overrideIndex, normalizedColours);
   const selection = resolveMerchandisingSelection({ options, merchandising, taxonomies });
   const material = selection.material || attributes.get('fabric composition')
     || attributes.get('fabric name') || 'Polyester';
