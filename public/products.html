@@ -60,6 +60,7 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .sp-pub-img.dragging{opacity:.4}
 .sp-pub-img.drop-before{box-shadow:-3px 0 0 var(--info)}
 .sp-pub-img.drop-after{box-shadow:3px 0 0 var(--info)}
+.sp-imgs.picking-swatch .sp-pub-img{outline:2px dashed var(--info);cursor:crosshair}
 .sp-pub-save{padding:2px 10px;font-size:11px;border:1px solid var(--line);border-radius:4px;background:#fff;cursor:pointer}
 .sp-pub-save:disabled{opacity:.6;cursor:default}
 .pp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
@@ -582,6 +583,30 @@ function renderSplitPanel(id, plan){
       : '<div class="sp-row"><span class="sp-label">发布图</span><span class="sp-imgs"><span class="muted">'
         + (content ? '（暂不可用）' : '未生成内容（发布图集在生成内容后可用）')
         + '</span></span></div>';
+    const swatchBlock = content && Array.isArray(content.colours) && content.colours.length
+      ? (() => {
+          const items = content.colours.map((colour) => {
+            const override = colour.swatchImageId ? splitThumb(colour.swatchImageId) : null;
+            const thumb = override || colour.thumb || null;
+            const label = colour.text || colour.source || '';
+            const colourSource = esc(String(colour.source ?? ''));
+            const productKey = esc(String(product.id ?? ''));
+            return '<span class="sp-opt" style="cursor:default">'
+              + (thumb
+                ? '<img src="' + esc(thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">'
+                : '<span class="muted" style="font-size:11px">无图</span>')
+              + '<span>' + esc(label) + (colour.code ? ' <span class="muted">' + esc(colour.code) + '</span>' : '') + '</span>'
+              + '<button type="button" class="sp-pub-save" data-swatch-replace="' + id + '" data-swatch-product="' + productKey + '" data-swatch-colour="' + colourSource + '">更换</button>'
+              + (colour.swatchImageId
+                ? '<button type="button" class="sp-pub-save" data-swatch-reset="' + id + '" data-swatch-product="' + productKey + '" data-swatch-colour="' + colourSource + '" title="恢复为默认 swatch">默认</button>'
+                : '')
+              + '</span>';
+          }).join('');
+          return '<div class="sp-row" data-swatch-product="' + esc(String(product.id ?? '')) + '"><span class="sp-label">颜色 Swatch</span><span class="sp-opts">'
+            + items
+            + '<span class="muted sp-swatch-status" style="font-size:11px;flex-basis:100%">发布到 WP 的颜色图（点「更换」后从上方发布图中点选一张）</span></span></div>';
+        })()
+      : '';
     return '<div class="sp-product"><div class="sp-title"><b>产品' + (index + 1) + '</b>'
       + '<input type="text" value="' + esc(product.name || '') + '" data-split-name="' + id + '" data-idx="' + index + '" placeholder="拆分后产品名称">'
       + '<span class="muted">参考价 ' + price + (product.reason ? ' · ' + esc(product.reason) : '') + '</span></div>'
@@ -589,6 +614,7 @@ function renderSplitPanel(id, plan){
       + '<div class="sp-row"><span class="sp-label">尺码</span><span class="sp-opts">' + (sizes || '<span class="muted">（保存后按矩阵重算）</span>') + '</span></div>'
       + assignedBlock
       + publishBlock
+      + swatchBlock
       + contentBlock
       + '</div>';
   }).join('');
@@ -677,6 +703,7 @@ document.addEventListener('drop', (e) => {
   cleanupSplitPubDrag();
 });
 document.addEventListener('dragend', () => cleanupSplitPubDrag());
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') endSwatchPick(); });
 
 async function pollSplitOrderJob(jobId, status){
   for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -685,12 +712,13 @@ async function pollSplitOrderJob(jobId, status){
       const res = await fetch('/api/split-order-jobs/' + jobId, { headers: { accept: 'application/json' } });
       if (!res.ok) continue;
       const job = await res.json();
-      if (job.status === 'completed') { if (status) status.textContent = '已同步到 WordPress'; return; }
-      if (job.status === 'failed') { if (status) status.textContent = '同步失败：' + String(job.error || '').slice(0, 80); return; }
+      if (job.status === 'completed') { if (status) status.textContent = '已同步到 WordPress'; return 'completed'; }
+      if (job.status === 'failed') { if (status) status.textContent = '同步失败：' + String(job.error || '').slice(0, 80); return 'failed'; }
       if (status) status.textContent = '同步中…';
     } catch { /* keep polling */ }
   }
   if (status) status.textContent = '同步仍在进行，稍后刷新查看';
+  return 'pending';
 }
 
 async function savePublishOrder(id, productId, button){
@@ -721,6 +749,68 @@ async function savePublishOrder(id, productId, button){
     if (status) status.textContent = '保存失败：' + String((e && e.message) || e).slice(0, 80);
   } finally {
     button.disabled = false;
+  }
+}
+
+let swatchPick = null; // { id, productId, colourSource, strip, statusEl }
+
+function publishStripFor(el){
+  const card = el.closest('.sp-product');
+  if (!card) return null;
+  for (const row of card.querySelectorAll('.sp-row')) {
+    const strip = row.querySelector('.sp-imgs');
+    if (strip && strip.querySelector('.sp-pub-img')) return strip;
+  }
+  return null;
+}
+
+function endSwatchPick(){
+  if (!swatchPick) return;
+  if (swatchPick.strip) swatchPick.strip.classList.remove('picking-swatch');
+  swatchPick = null;
+}
+
+async function reloadSplitPanel(id){
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-content', { headers: { accept: 'application/json' } });
+    if (!res.ok) return;
+    const body = await res.json();
+    if (body.result) SPLIT_CONTENTS.set(String(id), body.result);
+    SPLIT_PUBLISH_SETS.set(String(id), body.publishSets ?? null);
+    renderSplitPanel(id);
+  } catch { /* keep the current view */ }
+}
+
+function setSwatchStatus(id, productId, text){
+  const panel = document.getElementById('split-panel-' + id);
+  if (!panel) return;
+  const row = panel.querySelector('[data-swatch-product="' + CSS.escape(String(productId)) + '"]');
+  const status = row ? row.querySelector('.sp-swatch-status') : null;
+  if (status) status.textContent = text;
+}
+
+async function saveSwatch(id, productId, colourSource, imageId, statusEl){
+  endSwatchPick();
+  if (statusEl) statusEl.textContent = '保存中…';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-swatch', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ productId, colourSource, imageId }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
+    if (body && body.sync && body.sync.jobId) {
+      if (statusEl) statusEl.textContent = '已保存，正在同步到 WordPress…';
+      const done = await pollSplitOrderJob(body.sync.jobId, statusEl);
+      await reloadSplitPanel(id);
+      setSwatchStatus(id, productId, done === 'completed' ? '已同步到 WordPress'
+        : done === 'failed' ? '同步失败' : '同步仍在进行，稍后刷新查看');
+    } else {
+      await reloadSplitPanel(id);
+      setSwatchStatus(id, productId, '已保存（未发布，发布时生效）');
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = '保存失败：' + String((e && e.message) || e).slice(0, 80);
   }
 }
 
@@ -1030,6 +1120,39 @@ document.addEventListener('click', (e) => {
   if (save) { void saveSplitPlan(String(save.dataset.splitSave)); return; }
   const pubSave = e.target.closest('button[data-pub-save]');
   if (pubSave) { void savePublishOrder(String(pubSave.dataset.pubSave), String(pubSave.dataset.pubProduct), pubSave); return; }
+  const swatchBtn = e.target.closest('button[data-swatch-replace]');
+  if (swatchBtn) {
+    const strip = publishStripFor(swatchBtn);
+    const row = swatchBtn.closest('.sp-row');
+    const statusEl = row ? row.querySelector('.sp-swatch-status') : null;
+    endSwatchPick();
+    if (strip) {
+      swatchPick = {
+        id: String(swatchBtn.dataset.swatchReplace),
+        productId: String(swatchBtn.dataset.swatchProduct),
+        colourSource: String(swatchBtn.dataset.swatchColour),
+        strip, statusEl,
+      };
+      strip.classList.add('picking-swatch');
+      if (statusEl) statusEl.textContent = '请从上方「发布图」中点选一张作为 Swatch（Esc 取消）';
+    }
+    return;
+  }
+  const swatchReset = e.target.closest('button[data-swatch-reset]');
+  if (swatchReset) {
+    const row = swatchReset.closest('.sp-row');
+    void saveSwatch(String(swatchReset.dataset.swatchReset), String(swatchReset.dataset.swatchProduct),
+      String(swatchReset.dataset.swatchColour), null, row ? row.querySelector('.sp-swatch-status') : null);
+    return;
+  }
+  if (swatchPick) {
+    const img = e.target.closest('.sp-pub-img');
+    if (img && img.parentElement === swatchPick.strip) {
+      const pick = swatchPick;
+      void saveSwatch(pick.id, pick.productId, pick.colourSource, String(img.dataset.pubImg || ''), pick.statusEl);
+      return;
+    }
+  }
 });
 document.addEventListener('input', (e) => {
   const nameInput = e.target.closest('input[data-split-name]');

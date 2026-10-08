@@ -927,6 +927,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   if (!products.length) throw new Error('Split contents with titles are required.');
   const taxonomies = await wp('/wp-json/hx/v1/products/taxonomies');
   const allCategories = (taxonomies?.categories ?? []).filter((item) => item?.id && item?.name);
+  const detailImages = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
   const previousImages = new Map((template.images ?? [])
     .map((image) => [normalizedUrlKey(image?.source_url), image]));
 
@@ -1030,7 +1031,14 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     const colours = [];
     for (const [index, colour] of (content.colours ?? []).entries()) {
       const label = colour.text || colour.source;
-      const attachment = colour.thumb ? await swatchAttachmentFor(colour.thumb, label) : null;
+      // A review-picked swatch image (from the published set) wins over the
+      // colour's own thumb; it reuses the uploaded attachment when one exists.
+      const picked = colour.swatchImageId
+        ? detailImages.get(String(colour.swatchImageId)) ?? null
+        : null;
+      const pickedUrl = picked ? (clean(picked.source_url) || null) : null;
+      const swatchSource = pickedUrl || colour.thumb || null;
+      const attachment = swatchSource ? await swatchAttachmentFor(swatchSource, label) : null;
       colours.push({
         label: colour.text || colour.source,
         value: `color-${index + 1}`,

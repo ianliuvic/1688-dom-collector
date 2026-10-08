@@ -1187,10 +1187,36 @@ app.get('/api/product-details/:id/split-content', { preHandler: requireDashboard
   };
 });
 
-// Save the review-chosen publish image order for one split product. When the
-// bundle is already published, re-sync WordPress (attachments are reused) so
-// the saved order takes effect on the live pages immediately.
+// Review-panel edits that must reach the live pages: publish image order and
+// colour swatches. Saving either one re-syncs the bundle to WordPress
+// (existing attachments are reused) and tracks the sync as a pollable job.
 const splitOrderJobs = new Map();
+
+/** Re-sync a bundle's split products to WordPress and track the job. */
+async function queueSplitSyncJob({ productDetailId, productId, detail, publication, contents, trigger }) {
+  const planRecord = await db.getProductSplitPlan(productDetailId).catch(() => null);
+  const job = {
+    id: crypto.randomUUID(), productDetailId, productId, status: 'running',
+    startedAt: new Date().toISOString(), completedAt: null, error: null,
+  };
+  splitOrderJobs.set(job.id, job);
+  trimTerminalJobs(splitOrderJobs);
+  (async () => {
+    try {
+      await syncSplitBundle({
+        productDetailId, detail, publication, contents, plan: planRecord?.plan ?? null,
+      });
+      await scheduleProductRagSync(productDetailId, { trigger }).catch(() => {});
+      job.status = 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return job;
+}
 
 app.put('/api/product-details/:id/split-publish-order', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
@@ -1214,28 +1240,49 @@ app.put('/api/product-details/:id/split-publish-order', { preHandler: requireDas
   if (!publication?.payload || !isPublished) {
     return { saved: true, sync: null, reason: 'not_published' };
   }
-  const planRecord = await db.getProductSplitPlan(id).catch(() => null);
-  const job = {
-    id: crypto.randomUUID(), productDetailId: id, productId, status: 'running',
-    startedAt: new Date().toISOString(), completedAt: null, error: null,
-  };
-  splitOrderJobs.set(job.id, job);
-  trimTerminalJobs(splitOrderJobs);
-  (async () => {
-    try {
-      await syncSplitBundle({
-        productDetailId: id, detail, publication,
-        contents: record.result, plan: planRecord?.plan ?? null,
-      });
-      await scheduleProductRagSync(id, { trigger: 'wordpress_image_order' }).catch(() => {});
-      job.status = 'completed';
-    } catch (error) {
-      job.status = 'failed';
-      job.error = String(error?.message || error).slice(0, 300);
-    } finally {
-      job.completedAt = new Date().toISOString();
-    }
-  })();
+  const job = await queueSplitSyncJob({
+    productDetailId: id, productId, detail, publication,
+    contents: record.result, trigger: 'wordpress_image_order',
+  });
+  return { saved: true, sync: { jobId: job.id } };
+});
+
+// Set (imageId) or clear (null) the WordPress colour-swatch image for one
+// colour option, choosing among the stored product images; the bundle is
+// re-synced so the live swatch follows.
+app.put('/api/product-details/:id/split-swatch', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const productId = String(request.body?.productId ?? '');
+  const colourSource = String(request.body?.colourSource ?? '');
+  const imageId = request.body?.imageId === null || request.body?.imageId === undefined
+    ? null : String(request.body.imageId);
+  if (!productId || !colourSource) return reply.code(400).send({ error: 'product_and_colour_required' });
+  const record = await db.getSplitContents(id);
+  const product = (record?.result?.products ?? []).find((item) => String(item?.id) === productId);
+  if (!product) return reply.code(404).send({ error: 'split_product_not_found' });
+  const colour = (product.colours ?? []).find((item) => String(item?.source ?? '') === colourSource);
+  if (!colour) return reply.code(404).send({ error: 'colour_not_found' });
+  const detail = await db.getProductDetail(id);
+  if (imageId !== null) {
+    const image = (detail?.images ?? []).find((item) => String(item.id) === imageId);
+    if (!image) return reply.code(400).send({ error: 'image_not_found' });
+    if (!image.source_url && !image.storage_path) return reply.code(400).send({ error: 'image_has_no_source' });
+    colour.swatchImageId = imageId;
+  } else {
+    delete colour.swatchImageId;
+  }
+  await db.saveSplitContents(id, record.result, record.model ?? null);
+
+  const publication = await db.getWordPressPublication(id);
+  const isPublished = (record.result.products ?? []).some((item) => item?.wp?.postId);
+  if (!publication?.payload || !isPublished) {
+    return { saved: true, sync: null, reason: 'not_published' };
+  }
+  const job = await queueSplitSyncJob({
+    productDetailId: id, productId, detail, publication,
+    contents: record.result, trigger: 'wordpress_swatch',
+  });
   return { saved: true, sync: { jobId: job.id } };
 });
 
