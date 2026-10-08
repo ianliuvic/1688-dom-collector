@@ -426,6 +426,7 @@ async function setBundleStatus(id, value, stateEl){
 // --- bundle split editor -----------------------------------------------------
 const SPLITS = new Map();
 const SPLIT_CONTENTS = new Map();
+const SPLIT_IMAGES = new Map();
 
 function splitItem(id){ return DATA.find((x) => String(x.id) === String(id)); }
 
@@ -453,6 +454,9 @@ async function toggleSplit(id){
     const res = await fetch('/api/product-details/' + id + '/split-plan', { headers: { accept: 'application/json' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const body = await res.json();
+    if (Array.isArray(body.images)) {
+      SPLIT_IMAGES.set(String(id), new Map(body.images.map((image) => [String(image.id), image.thumb || null])));
+    }
     if (body.plan) {
       SPLITS.set(String(id), body.plan);
       try {
@@ -499,6 +503,12 @@ function renderSplitPanel(id, plan){
     return '<span class="sp-opt">' + (image ? '<img src="' + esc(image) + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">' : '')
       + '<span>' + esc(text) + '</span>' + moveSelect(text, current) + '</span>';
   };
+  const splitThumb = (imageId) => {
+    const mapped = SPLIT_IMAGES.get(String(id))?.get(String(imageId));
+    if (mapped) return mapped;
+    const galleryImage = (item.gallery || []).find((image) => String(image.id) === String(imageId));
+    return galleryImage?.thumb ?? null;
+  };
   const cards = products.map((product, index) => {
     const sizes = (product.sizes || []).map((size) => '<span class="chip">' + esc(size) + '</span>').join('');
     const price = product.priceMax != null ? '¥' + product.priceMax : '—';
@@ -507,10 +517,7 @@ function renderSplitPanel(id, plan){
       : '<span class="muted">（无选项，可在下方未采用里分配）</span>';
     const content = (SPLIT_CONTENTS.get(String(id))?.products ?? []).find((item) => item.id === product.id);
     const assignedImages = [
-      ...(product.imageIds || []).map((imageId) => {
-        const galleryImage = (item.gallery || []).find((image) => String(image.id) === String(imageId));
-        return { kind: 'id', ref: String(imageId), thumb: galleryImage?.thumb ?? null };
-      }),
+      ...(product.imageIds || []).map((imageId) => ({ kind: 'id', ref: String(imageId), thumb: splitThumb(imageId) })),
       ...(product.imageUrls || []).map((url) => ({ kind: 'url', ref: String(url), thumb: String(url) })),
     ];
     const assignedBlock = '<div class="sp-row"><span class="sp-label">已分配图</span><span class="sp-imgs">'
@@ -544,12 +551,49 @@ function renderSplitPanel(id, plan){
           : '')
         + '</span></div>'
       : '';
+    const dedupeReasonLabel = { exact: '完全重复', 'source-url': '同源URL重复', near: '近似重复', llm: '视觉去重' };
+    const dedupedBlock = content
+      ? (() => {
+          const refs = content.imageRefs || {};
+          const kept = [
+            ...(refs.imageIds || []).map((imageId) => splitThumb(imageId)),
+            ...(refs.imageUrls || []).map((url) => String(url)),
+          ];
+          const dedupe = content.dedupe || null;
+          const counts = dedupe?.counts || {};
+          const removedDetails = Array.isArray(dedupe?.removedDetails) ? dedupe.removedDetails : [];
+          const statsText = dedupe
+            ? '分配 ' + dedupe.total + ' 张 → 去重后 ' + kept.length + ' 张'
+              + (dedupe.removed
+                ? '（移除：完全重复 ' + (counts.exact || 0) + '、同源URL ' + (counts['source-url'] || 0)
+                  + '、近似 ' + (counts.near || 0) + '、视觉 ' + (counts.llm || 0) + '）'
+                : '')
+            : '';
+          const thumbCell = (thumb, titleAttr, dimmed) => '<div class="sp-img" style="width:66px' + (dimmed ? ';opacity:.45' : '') + '"'
+            + (titleAttr ? ' title="' + esc(titleAttr) + '"' : '') + '>'
+            + '<img src="' + esc(thumb || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt=""></div>';
+          const keptHtml = kept.length
+            ? kept.map((thumb) => thumbCell(thumb, '', false)).join('')
+            : '<span class="muted">（无）</span>';
+          const removedHtml = removedDetails.length
+            ? '<span class="muted" style="font-size:11px;margin:0 2px">已移除：</span>'
+              + removedDetails.map((entry) => {
+                const thumb = (entry.dbId && splitThumb(entry.dbId)) || entry.url || null;
+                const tip = (dedupeReasonLabel[entry.reason] || entry.reason || '去重移除') + (entry.note ? '：' + entry.note : '');
+                return thumbCell(thumb, tip, true);
+              }).join('')
+            : '';
+          const statsHtml = statsText ? '<span class="muted" style="font-size:11px;flex-basis:100%">' + esc(statsText) + '</span>' : '';
+          return '<div class="sp-row"><span class="sp-label">去重后图</span><span class="sp-imgs">' + keptHtml + removedHtml + statsHtml + '</span></div>';
+        })()
+      : '<div class="sp-row"><span class="sp-label">去重后图</span><span class="sp-imgs"><span class="muted">未生成内容（点“生成内容”后显示去重结果）</span></span></div>';
     return '<div class="sp-product"><div class="sp-title"><b>产品' + (index + 1) + '</b>'
       + '<input type="text" value="' + esc(product.name || '') + '" data-split-name="' + id + '" data-idx="' + index + '" placeholder="拆分后产品名称">'
       + '<span class="muted">参考价 ' + price + (product.reason ? ' · ' + esc(product.reason) : '') + '</span></div>'
       + '<div class="sp-row"><span class="sp-label">选项</span><span class="sp-opts">' + optionChips + '</span></div>'
       + '<div class="sp-row"><span class="sp-label">尺码</span><span class="sp-opts">' + (sizes || '<span class="muted">（保存后按矩阵重算）</span>') + '</span></div>'
       + assignedBlock
+      + dedupedBlock
       + contentBlock
       + '</div>';
   }).join('');
@@ -568,7 +612,7 @@ function renderSplitPanel(id, plan){
     + '<span class="sp-status" id="split-status-' + id + '">' + sourceLabel + (plan.updatedAt ? ' · ' + esc(new Date(plan.updatedAt).toLocaleString()) : '') + '</span></div>'
     + '<div class="sp-products">' + cards + '</div>'
     + '<div class="sp-row sp-ignored"><span class="sp-label">未采用</span><span class="sp-opts">' + ignored + '</span></div>'
-    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算。</div>';
+    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算；去重后图为生成内容时的去重结果，发布按此上传。</div>';
 }
 
 async function runSplitAnalysis(id){

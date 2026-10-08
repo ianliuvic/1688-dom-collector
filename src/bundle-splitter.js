@@ -743,6 +743,20 @@ ${colourRule}
       imageIds: keptImageRows.filter((row) => row.dbId).map((row) => row.dbId),
       imageUrls: keptImageRows.filter((row) => !row.dbId).map((row) => row.sourceUrl).filter(Boolean),
     };
+    // Removed-image details for the review UI: key, thumbnail source and the
+    // dedupe reason of every dropped image, stored next to the kept refs.
+    const imageRowByKey = new Map(imageRows.map((row) => [String(row.key), row]));
+    const removedDetails = removedImages.map((entry) => {
+      const row = imageRowByKey.get(String(entry.imageId)) ?? null;
+      return {
+        imageId: String(entry.imageId),
+        dbId: row?.dbId ? String(row.dbId) : null,
+        url: row?.sourceUrl ?? row?.url ?? null,
+        reason: entry.reason ?? 'hash',
+        keptImageId: entry.keptImageId ? String(entry.keptImageId) : null,
+        note: entry.note ? String(entry.note).slice(0, 120) : null,
+      };
+    });
     contents.push({
       id: productId,
       name: cleanText(product.name) || null,
@@ -762,6 +776,7 @@ ${colourRule}
           'source-url': removedImages.filter((entry) => entry.reason === 'source-url').length,
           llm: removedImages.filter((entry) => entry.reason === 'llm').length,
         },
+        removedDetails,
       },
       needsReview: colours.some((colour) => !colour.code || colour.needsReview === true),
     });

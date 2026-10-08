@@ -917,8 +917,15 @@ app.post('/api/product-details/:id/split-analysis', { preHandler: requireDashboa
 app.get('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
-  const record = await db.getProductSplitPlan(id);
-  return { productDetailId: id, plan: record?.plan ?? null, updatedAt: record?.updated_at ?? null };
+  const [record, detail] = await Promise.all([db.getProductSplitPlan(id), db.getProductDetail(id)]);
+  // Every stored image (any type) with a local thumbnail, so the split panel can
+  // render assigned/deduped strips without a request per image.
+  const images = (detail?.images ?? []).map((image) => {
+    const base = imagePublicPath(image.storage_path);
+    const source = /^https?:\/\//i.test(String(image.source_url || '')) ? String(image.source_url) : null;
+    return { id: String(image.id), type: image.image_type, thumb: base ? `${base}?w=96` : source };
+  });
+  return { productDetailId: id, plan: record?.plan ?? null, updatedAt: record?.updated_at ?? null, images };
 });
 
 // Save a manually adjusted split plan. Sizes and prices are always recomputed
