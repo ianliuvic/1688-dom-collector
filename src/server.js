@@ -3309,6 +3309,90 @@ app.get('/api/wordpress/split-keeper-category-repair-jobs/:id', { preHandler: re
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
+// One-off repair: after a direct REST classification change on WordPress the
+// stored publication payload still carries the previous categories, so any
+// payload replay (refresh, price, or style repairs) would write the old terms
+// back. This aligns the saved payload with the live WordPress state without
+// re-syncing the post.
+app.post('/api/wordpress/publication-categories/backfill', { preHandler: requireApiKey }, async (request) => {
+  const items = (Array.isArray(request.body?.items) ? request.body.items : []).slice(0, 2000);
+  const scheduleRag = request.body?.scheduleRagSync === true;
+  const normalizeIds = (values) => [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0))].sort((a, b) => a - b);
+  const summary = { updated: 0, unchanged: 0, skipped: 0, failed: 0, ragScheduled: 0, errors: [], results: [] };
+  let next = 0;
+  const workers = Array.from({ length: Math.min(5, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      const item = items[index] ?? {};
+      const productDetailId = Number(item.product_detail_id);
+      const categoryIds = normalizeIds(item.category_ids);
+      const primaryCategoryId = Number(item.primary_category_id);
+      try {
+        if (!Number.isInteger(productDetailId) || productDetailId <= 0 || !categoryIds.length
+          || !categoryIds.includes(primaryCategoryId)) {
+          summary.failed += 1;
+          if (summary.errors.length < 200) summary.errors.push({ productDetailId: item.product_detail_id, message: 'invalid item' });
+          continue;
+        }
+        const publication = await db.getWordPressPublication(productDetailId);
+        if (!publication?.payload || !publication.wp_post_id) {
+          summary.skipped += 1;
+          continue;
+        }
+        const previousCategoryIds = normalizeIds(publication.payload.category_ids);
+        const previousPrimaryId = Number(publication.payload.meta?.primary_category_id) || 0;
+        const categoryName = item.primary_category_name ? String(item.primary_category_name).slice(0, 200) : null;
+        if (JSON.stringify(previousCategoryIds) === JSON.stringify(categoryIds)
+          && previousPrimaryId === primaryCategoryId
+          && (!categoryName || categoryName === publication.payload.meta?.primary_category)) {
+          summary.unchanged += 1;
+          continue;
+        }
+        const payload = structuredClone(publication.payload);
+        payload.category_ids = categoryIds;
+        payload.meta = { ...(payload.meta ?? {}), primary_category_id: String(primaryCategoryId) };
+        if (categoryName) payload.meta.primary_category = categoryName;
+        const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+        await db.saveWordPressPublication(productDetailId, {
+          translationId: publication.translation_id,
+          externalId: publication.external_id,
+          styleNo: publication.style_no,
+          wpPostId: publication.wp_post_id,
+          wpUrl: publication.wp_url,
+          wpEditUrl: publication.wp_edit_url,
+          wpStatus: publication.wp_status ?? 'publish',
+          syncHash,
+          payload,
+          result: publication.result,
+          lastError: null,
+        });
+        if (scheduleRag) {
+          const rag = await scheduleProductRagSync(productDetailId, { trigger: 'publication_category_backfill' })
+            .catch(() => null);
+          if (rag?.scheduled) summary.ragScheduled += 1;
+        }
+        summary.updated += 1;
+        if (summary.results.length < 500) {
+          summary.results.push({
+            productDetailId, styleNo: publication.style_no, categoryIds, previousCategoryIds,
+            primaryCategoryId, previousPrimaryId,
+          });
+        }
+      } catch (error) {
+        summary.failed += 1;
+        if (summary.errors.length < 200) {
+          summary.errors.push({ productDetailId: item.product_detail_id, message: String(error?.message || error).slice(0, 200) });
+        }
+      }
+    }
+  });
+  await Promise.all(workers);
+  return summary;
+});
+
 // Diagnostic: show what the vision pass would strip for one bundle.
 app.post('/api/product-details/:id/classify-detail-images', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
