@@ -56,6 +56,12 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .sp-assign{display:flex;gap:3px;justify-content:center;margin-top:3px;flex-wrap:wrap}
 .sp-assign button{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);background:#fff;font-size:10.5px;cursor:pointer;line-height:1;padding:0}
 .sp-assign button.on{background:var(--info);border-color:var(--info);color:#fff}
+.sp-pub-img{cursor:grab}
+.sp-pub-img.dragging{opacity:.4}
+.sp-pub-img.drop-before{box-shadow:-3px 0 0 var(--info)}
+.sp-pub-img.drop-after{box-shadow:3px 0 0 var(--info)}
+.sp-pub-save{padding:2px 10px;font-size:11px;border:1px solid var(--line);border-radius:4px;background:#fff;cursor:pointer}
+.sp-pub-save:disabled{opacity:.6;cursor:default}
 .pp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .pp-chip{font-size:11.5px;border-radius:999px;padding:2px 10px;border:1px solid var(--line);background:#fff;color:var(--text)}
 .pp-chip.ok{background:#ecfdf3;border-color:#a6f4c5;color:#067647}
@@ -564,11 +570,14 @@ function renderSplitPanel(id, plan){
           const statsText = '候选 ' + publishSet.candidateCount + ' 张 → 发布 ' + imageIds.length + ' 张'
             + (parts.length ? '（剔除：' + parts.join('、') + '）' : '');
           const thumbHtml = imageIds.length
-            ? imageIds.map((imageId) => '<div class="sp-img" style="width:66px">'
-              + '<img src="' + esc(splitThumb(imageId) || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt=""></div>').join('')
+            ? imageIds.map((imageId) => '<div class="sp-img sp-pub-img" draggable="true" data-pub-img="' + esc(String(imageId)) + '" title="拖拽调整发布顺序" style="width:66px">'
+              + '<img draggable="false" src="' + esc(splitThumb(imageId) || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt=""></div>').join('')
             : '<span class="muted">（无）</span>';
+          const toolsHtml = '<span style="flex-basis:100%;display:flex;gap:8px;align-items:center;margin-top:2px">'
+            + '<button type="button" class="sp-pub-save" data-pub-save="' + id + '" data-pub-product="' + esc(String(product.id ?? '')) + '">保存顺序</button>'
+            + '<span class="muted sp-pub-status" style="font-size:11px"></span></span>';
           return '<div class="sp-row"><span class="sp-label">发布图</span><span class="sp-imgs">' + thumbHtml
-            + '<span class="muted" style="font-size:11px;flex-basis:100%">' + esc(statsText) + '</span></span></div>';
+            + '<span class="muted" style="font-size:11px;flex-basis:100%">' + esc(statsText) + '</span>' + toolsHtml + '</span></div>';
         })()
       : '<div class="sp-row"><span class="sp-label">发布图</span><span class="sp-imgs"><span class="muted">'
         + (content ? '（暂不可用）' : '未生成内容（发布图集在生成内容后可用）')
@@ -629,6 +638,90 @@ function moveSplitOption(id, text, target){
   else plan.ignoredOptions = [...plan.ignoredOptions, text];
   plan.source = 'manual';
   renderSplitPanel(id, plan);
+}
+
+let splitPubDragEl = null;
+
+function cleanupSplitPubDrag(){
+  if (!splitPubDragEl) return;
+  splitPubDragEl.classList.remove('dragging');
+  const strip = splitPubDragEl.parentElement;
+  if (strip) for (const other of strip.querySelectorAll('.sp-pub-img')) other.classList.remove('drop-before', 'drop-after');
+  splitPubDragEl = null;
+}
+
+document.addEventListener('dragstart', (e) => {
+  const el = e.target.closest('.sp-pub-img');
+  if (!el || !e.dataTransfer) return;
+  splitPubDragEl = el;
+  el.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', el.dataset.pubImg || ''); } catch { /* ignore */ }
+});
+document.addEventListener('dragover', (e) => {
+  const el = e.target.closest('.sp-pub-img');
+  if (!el || !splitPubDragEl || el === splitPubDragEl || el.parentElement !== splitPubDragEl.parentElement) return;
+  e.preventDefault();
+  const rect = el.getBoundingClientRect();
+  const after = e.clientX > rect.left + rect.width / 2;
+  for (const other of el.parentElement.querySelectorAll('.sp-pub-img')) other.classList.remove('drop-before', 'drop-after');
+  el.classList.add(after ? 'drop-after' : 'drop-before');
+});
+document.addEventListener('drop', (e) => {
+  const el = e.target.closest('.sp-pub-img');
+  if (!el || !splitPubDragEl || el === splitPubDragEl || el.parentElement !== splitPubDragEl.parentElement) return;
+  e.preventDefault();
+  const rect = el.getBoundingClientRect();
+  const after = e.clientX > rect.left + rect.width / 2;
+  if (after) el.after(splitPubDragEl); else el.before(splitPubDragEl);
+  cleanupSplitPubDrag();
+});
+document.addEventListener('dragend', () => cleanupSplitPubDrag());
+
+async function pollSplitOrderJob(jobId, status){
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    try {
+      const res = await fetch('/api/split-order-jobs/' + jobId, { headers: { accept: 'application/json' } });
+      if (!res.ok) continue;
+      const job = await res.json();
+      if (job.status === 'completed') { if (status) status.textContent = '已同步到 WordPress'; return; }
+      if (job.status === 'failed') { if (status) status.textContent = '同步失败：' + String(job.error || '').slice(0, 80); return; }
+      if (status) status.textContent = '同步中…';
+    } catch { /* keep polling */ }
+  }
+  if (status) status.textContent = '同步仍在进行，稍后刷新查看';
+}
+
+async function savePublishOrder(id, productId, button){
+  const panel = document.getElementById('split-panel-' + id);
+  if (!panel || !button) return;
+  const row = button.closest('.sp-row');
+  const strip = row ? row.querySelector('.sp-imgs') : null;
+  const status = row ? row.querySelector('.sp-pub-status') : null;
+  if (!strip) return;
+  const order = [...strip.querySelectorAll('.sp-pub-img')].map((el) => String(el.dataset.pubImg || '')).filter(Boolean);
+  if (!order.length) return;
+  button.disabled = true;
+  if (status) status.textContent = '保存中…';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-publish-order', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ productId, order }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
+    if (body && body.sync && body.sync.jobId) {
+      if (status) status.textContent = '已保存，正在同步到 WordPress…';
+      await pollSplitOrderJob(body.sync.jobId, status);
+    } else if (status) {
+      status.textContent = '已保存（未发布，发布时生效）';
+    }
+  } catch (e) {
+    if (status) status.textContent = '保存失败：' + String((e && e.message) || e).slice(0, 80);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function saveSplitPlan(id){
@@ -935,6 +1028,8 @@ document.addEventListener('click', (e) => {
   }
   const save = e.target.closest('button[data-split-save]');
   if (save) { void saveSplitPlan(String(save.dataset.splitSave)); return; }
+  const pubSave = e.target.closest('button[data-pub-save]');
+  if (pubSave) { void savePublishOrder(String(pubSave.dataset.pubSave), String(pubSave.dataset.pubProduct), pubSave); return; }
 });
 document.addEventListener('input', (e) => {
   const nameInput = e.target.closest('input[data-split-name]');

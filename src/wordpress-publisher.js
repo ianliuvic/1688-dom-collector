@@ -895,6 +895,24 @@ export async function dedupePublishImageRows(rows) {
 }
 
 /**
+ * Apply the review-saved publish order: images listed in `order` come first in
+ * exactly that order; everything else keeps its default order afterwards.
+ */
+export function applyPublishOrder(rows, order) {
+  if (!Array.isArray(order) || !order.length) return rows;
+  const rank = new Map();
+  order.forEach((id, index) => {
+    const key = String(id);
+    if (!rank.has(key)) rank.set(key, index);
+  });
+  return [...rows].sort((left, right) => {
+    const leftRank = rank.has(String(left.id)) ? rank.get(String(left.id)) : Number.MAX_SAFE_INTEGER;
+    const rightRank = rank.has(String(right.id)) ? rank.get(String(right.id)) : Number.MAX_SAFE_INTEGER;
+    return leftRank - rightRank;
+  });
+}
+
+/**
  * Publish the split products of one bundle: update the original WordPress post
  * with the best-matching split product (keeping its URL, style number and
  * taxonomies) and create the remaining split products as new drafts (fresh
@@ -1058,12 +1076,13 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   };
 
   const buildImages = async (content, { externalId, styleNo, altText }) => {
-    // Resolve the stored refs and run the publish-time dedupe. The review UI
-    // previews its result, so both must stay on the same helper.
+    // Resolve the stored refs, run the publish-time dedupe and apply the
+    // review-saved order. The review UI previews the same helpers, so what it
+    // shows is what gets uploaded, in the saved order.
     const resolvedRows = resolvePublishImageRows(detail, content.imageRefs);
     const dedupedOutcome = await dedupePublishImageRows(resolvedRows);
     const deduped = dedupedOutcome.removed.length;
-    let rows = dedupedOutcome.rows;
+    let rows = applyPublishOrder(dedupedOutcome.rows, content.publishOrder);
     const images = [];
     const skipped = [];
     const altFixes = [];

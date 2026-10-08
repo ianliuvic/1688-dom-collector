@@ -16,7 +16,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   syncWordPressProductPricing, replaceWordPressBestSellers,
   resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
-  resolvePublishImageRows, dedupePublishImageRows } from './wordpress-publisher.js';
+  resolvePublishImageRows, dedupePublishImageRows, applyPublishOrder } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -1121,6 +1121,15 @@ app.post('/api/product-details/:id/split-content', { preHandler: requireDashboar
         const wp = priorWp.get(String(product.id));
         if (wp) product.wp = wp;
       }
+      // The review-saved publish order survives content regenerations; ids
+      // that no longer exist are simply ignored when the order is applied.
+      const priorOrder = new Map((prior?.result?.products ?? [])
+        .map((product) => [String(product.id), product.publishOrder])
+        .filter(([, order]) => Array.isArray(order) && order.length));
+      for (const product of contents.products) {
+        const order = priorOrder.get(String(product.id));
+        if (order) product.publishOrder = order;
+      }
       const saved = await db.saveSplitContents(id, contents, config.complexModel ?? null);
       job.productCount = contents.products.length;
       job.result = { productCount: contents.products.length, styleNo: contents.styleNo };
@@ -1156,9 +1165,11 @@ app.get('/api/product-details/:id/split-content', { preHandler: requireDashboard
     for (const product of products) {
       const rows = resolvePublishImageRows(detail, product?.imageRefs ?? {});
       const outcome = await dedupePublishImageRows(rows);
+      const ordered = applyPublishOrder(outcome.rows, product?.publishOrder);
       publishSets[String(product?.id ?? '')] = {
         candidateCount: rows.length,
-        imageIds: outcome.rows.map((row) => String(row.id)),
+        imageIds: ordered.map((row) => String(row.id)),
+        savedOrder: Array.isArray(product?.publishOrder) ? product.publishOrder.map(String) : [],
         removed: (outcome.removed ?? []).map((entry) => ({
           imageId: String(entry.imageId),
           keptImageId: entry.keptImageId ? String(entry.keptImageId) : null,
@@ -1174,6 +1185,62 @@ app.get('/api/product-details/:id/split-content', { preHandler: requireDashboard
     updatedAt: record?.updated_at ?? null,
     publishSets,
   };
+});
+
+// Save the review-chosen publish image order for one split product. When the
+// bundle is already published, re-sync WordPress (attachments are reused) so
+// the saved order takes effect on the live pages immediately.
+const splitOrderJobs = new Map();
+
+app.put('/api/product-details/:id/split-publish-order', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const productId = String(request.body?.productId ?? '');
+  const order = (Array.isArray(request.body?.order) ? request.body.order : [])
+    .map((value) => String(value)).filter(Boolean);
+  if (!productId || !order.length) return reply.code(400).send({ error: 'order_required' });
+  const record = await db.getSplitContents(id);
+  const product = (record?.result?.products ?? []).find((item) => String(item?.id) === productId);
+  if (!product) return reply.code(404).send({ error: 'split_product_not_found' });
+  const detail = await db.getProductDetail(id);
+  const validIds = new Set((detail?.images ?? []).map((image) => String(image.id)));
+  const cleaned = [...new Set(order.filter((value) => validIds.has(value)))];
+  if (!cleaned.length) return reply.code(400).send({ error: 'no_valid_image_ids' });
+  product.publishOrder = cleaned;
+  await db.saveSplitContents(id, record.result, record.model ?? null);
+
+  const publication = await db.getWordPressPublication(id);
+  const isPublished = (record.result.products ?? []).some((item) => item?.wp?.postId);
+  if (!publication?.payload || !isPublished) {
+    return { saved: true, sync: null, reason: 'not_published' };
+  }
+  const planRecord = await db.getProductSplitPlan(id).catch(() => null);
+  const job = {
+    id: crypto.randomUUID(), productDetailId: id, productId, status: 'running',
+    startedAt: new Date().toISOString(), completedAt: null, error: null,
+  };
+  splitOrderJobs.set(job.id, job);
+  trimTerminalJobs(splitOrderJobs);
+  (async () => {
+    try {
+      await syncSplitBundle({
+        productDetailId: id, detail, publication,
+        contents: record.result, plan: planRecord?.plan ?? null,
+      });
+      await scheduleProductRagSync(id, { trigger: 'wordpress_image_order' }).catch(() => {});
+      job.status = 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return { saved: true, sync: { jobId: job.id } };
+});
+
+app.get('/api/split-order-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  return splitOrderJobs.get(request.params.id) ?? reply.code(404).send({ error: 'not_found' });
 });
 
 // Re-run ONLY the variant normalization for every split product (keeps the
