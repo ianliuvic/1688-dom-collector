@@ -194,17 +194,28 @@ function buildSkuMatrix(detail, translation, overrideIndex = null) {
     const translatedOptions = translated.options ?? {};
     const colorOption = optionValue(translatedOptions, ['color', '颜色'])
       || optionValue(sourceOptions, ['color', '颜色']);
+    const colorLabel = resolveOptionDisplayLabel(overrideIndex, colorOption) || colorOption;
+    const sizeLabel = optionValue(translatedOptions, ['size', '尺码'])
+      || optionValue(sourceOptions, ['size', '尺码']);
+    const translatedDisplayOptions = applyOptionMapOverrides(translatedOptions, overrideIndex);
+    // Some legacy translations carry no per-row option labels; fall back to the
+    // row's own display labels so the matrix never ships empty options.
+    const displayOptions = Object.keys(translatedDisplayOptions ?? {}).length
+      ? translatedDisplayOptions
+      : {
+        ...(colorLabel ? { Color: colorLabel } : {}),
+        ...(sizeLabel ? { Size: sizeLabel } : {}),
+      };
     return {
       index,
       source_sku_key: clean(sku.sku_key),
       source_sku_text: clean(sku.sku_text),
       label: clean(translated.skuText) || clean(sku.sku_text) || clean(sku.sku_key),
       // Display copy is renamed; source_options below keeps the captured text.
-      options: applyOptionMapOverrides(translatedOptions, overrideIndex),
+      options: displayOptions,
       source_options: sourceOptions,
-      color: resolveOptionDisplayLabel(overrideIndex, colorOption) || colorOption,
-      size: optionValue(translatedOptions, ['size', '尺码'])
-        || optionValue(sourceOptions, ['size', '尺码']),
+      color: colorLabel,
+      size: sizeLabel,
       source_price: numberOrNull(sku.price),
       source_currency: clean(detail.currency) || 'CNY',
       source_stock: numberOrNull(sku.stock),
