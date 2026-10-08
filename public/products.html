@@ -56,11 +56,13 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .sp-assign{display:flex;gap:3px;justify-content:center;margin-top:3px;flex-wrap:wrap}
 .sp-assign button{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);background:#fff;font-size:10.5px;cursor:pointer;line-height:1;padding:0}
 .sp-assign button.on{background:var(--info);border-color:var(--info);color:#fff}
-.sp-pub-img{cursor:grab}
+.sp-pub-img{position:relative;cursor:grab}
 .sp-pub-img.dragging{opacity:.4}
 .sp-pub-img.drop-before{box-shadow:-3px 0 0 var(--info)}
 .sp-pub-img.drop-after{box-shadow:3px 0 0 var(--info)}
+.sp-pub-x{position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;border:1px solid var(--line);background:#fff;font-size:10px;line-height:1;padding:0;cursor:pointer;z-index:1}
 .sp-imgs.picking-swatch .sp-pub-img{outline:2px dashed var(--info);cursor:crosshair}
+.sp-imgs.adding-publish .sp-img[data-assign-ref]{outline:2px dashed var(--info);cursor:copy}
 .sp-pub-save{padding:2px 10px;font-size:11px;border:1px solid var(--line);border-radius:4px;background:#fff;cursor:pointer}
 .sp-pub-save:disabled{opacity:.6;cursor:default}
 .pp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
@@ -531,7 +533,7 @@ function renderSplitPanel(id, plan){
     ];
     const assignedBlock = '<div class="sp-row"><span class="sp-label">已分配图</span><span class="sp-imgs">'
       + (assignedImages.length
-        ? assignedImages.map((image) => '<div class="sp-img" style="width:66px">'
+        ? assignedImages.map((image) => '<div class="sp-img" data-assign-ref="' + esc(image.ref) + '" data-assign-kind="' + image.kind + '" style="width:66px">'
           + '<img src="' + esc(image.thumb || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt="">'
           + '<div class="sp-assign"><button type="button" title="从此产品移除" data-split-unassign="' + id + '" data-kind="' + image.kind + '" data-ref="' + esc(image.ref) + '" data-idx="' + index + '">×</button></div>'
           + '</div>').join('')
@@ -568,17 +570,23 @@ function renderSplitPanel(id, plan){
           const counts = {};
           for (const entry of publishSet.removed || []) counts[entry.reason] = (counts[entry.reason] || 0) + 1;
           const parts = Object.entries(counts).map(([reason, count]) => (publishReasonLabel[reason] || reason) + ' ' + count);
+          const manualParts = [];
+          if (publishSet.addedCount) manualParts.push('手动加 ' + publishSet.addedCount);
+          if (publishSet.excludedCount) manualParts.push('手动删 ' + publishSet.excludedCount);
           const statsText = '候选 ' + publishSet.candidateCount + ' 张 → 发布 ' + imageIds.length + ' 张'
-            + (parts.length ? '（剔除：' + parts.join('、') + '）' : '');
+            + (parts.length ? '（去重剔除：' + parts.join('、') + '）' : '')
+            + (manualParts.length ? '（' + manualParts.join('，') + '）' : '');
           const thumbHtml = imageIds.length
             ? imageIds.map((imageId) => '<div class="sp-img sp-pub-img" draggable="true" data-pub-img="' + esc(String(imageId)) + '" title="拖拽调整发布顺序" style="width:66px">'
-              + '<img draggable="false" src="' + esc(splitThumb(imageId) || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt=""></div>').join('')
+              + '<img draggable="false" src="' + esc(splitThumb(imageId) || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt="">'
+              + '<button type="button" class="sp-pub-x" title="从发布图移除（保存后从 WP 同步消失）">×</button></div>').join('')
             : '<span class="muted">（无）</span>';
           const toolsHtml = '<span style="flex-basis:100%;display:flex;gap:8px;align-items:center;margin-top:2px">'
-            + '<button type="button" class="sp-pub-save" data-pub-save="' + id + '" data-pub-product="' + esc(String(product.id ?? '')) + '">保存顺序</button>'
+            + '<button type="button" class="sp-pub-save" data-pub-add="' + id + '" data-pub-product="' + esc(String(product.id ?? '')) + '">添加图片</button>'
+            + '<button type="button" class="sp-pub-save" data-pub-save="' + id + '" data-pub-product="' + esc(String(product.id ?? '')) + '">保存发布图</button>'
             + '<span class="muted sp-pub-status" style="font-size:11px"></span></span>';
-          return '<div class="sp-row"><span class="sp-label">发布图</span><span class="sp-imgs">' + thumbHtml
-            + '<span class="muted" style="font-size:11px;flex-basis:100%">' + esc(statsText) + '</span>' + toolsHtml + '</span></div>';
+          return '<div class="sp-row" data-pub-row="' + esc(String(product.id ?? '')) + '"><span class="sp-label">发布图</span><span class="sp-imgs">' + thumbHtml
+            + '<span class="muted sp-pub-stats" style="font-size:11px;flex-basis:100%">' + esc(statsText) + '</span>' + toolsHtml + '</span></div>';
         })()
       : '<div class="sp-row"><span class="sp-label">发布图</span><span class="sp-imgs"><span class="muted">'
         + (content ? '（暂不可用）' : '未生成内容（发布图集在生成内容后可用）')
@@ -703,7 +711,7 @@ document.addEventListener('drop', (e) => {
   cleanupSplitPubDrag();
 });
 document.addEventListener('dragend', () => cleanupSplitPubDrag());
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') endSwatchPick(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { endSwatchPick(); endAddPick(); } });
 
 async function pollSplitOrderJob(jobId, status){
   for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -721,35 +729,87 @@ async function pollSplitOrderJob(jobId, status){
   return 'pending';
 }
 
-async function savePublishOrder(id, productId, button){
+async function savePublishSet(id, productId, button){
   const panel = document.getElementById('split-panel-' + id);
   if (!panel || !button) return;
+  endAddPick();
   const row = button.closest('.sp-row');
   const strip = row ? row.querySelector('.sp-imgs') : null;
   const status = row ? row.querySelector('.sp-pub-status') : null;
   if (!strip) return;
-  const order = [...strip.querySelectorAll('.sp-pub-img')].map((el) => String(el.dataset.pubImg || '')).filter(Boolean);
-  if (!order.length) return;
+  const imageIds = [...strip.querySelectorAll('.sp-pub-img')].map((el) => String(el.dataset.pubImg || '')).filter(Boolean);
+  if (!imageIds.length) return;
   button.disabled = true;
   if (status) status.textContent = '保存中…';
   try {
-    const res = await fetch('/api/product-details/' + id + '/split-publish-order', {
+    const res = await fetch('/api/product-details/' + id + '/split-publish-images', {
       method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ productId, order }),
+      body: JSON.stringify({ productId, imageIds }),
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
     if (body && body.sync && body.sync.jobId) {
       if (status) status.textContent = '已保存，正在同步到 WordPress…';
-      await pollSplitOrderJob(body.sync.jobId, status);
-    } else if (status) {
-      status.textContent = '已保存（未发布，发布时生效）';
+      const done = await pollSplitOrderJob(body.sync.jobId, status);
+      await reloadSplitPanel(id);
+      setPublishStatus(id, productId, done === 'completed' ? '已同步到 WordPress'
+        : done === 'failed' ? '同步失败' : '同步仍在进行，稍后刷新查看');
+    } else {
+      await reloadSplitPanel(id);
+      setPublishStatus(id, productId, '已保存（未发布，发布时生效）');
     }
   } catch (e) {
     if (status) status.textContent = '保存失败：' + String((e && e.message) || e).slice(0, 80);
   } finally {
     button.disabled = false;
   }
+}
+
+function setPublishStatus(id, productId, text){
+  const panel = document.getElementById('split-panel-' + id);
+  if (!panel) return;
+  const row = panel.querySelector('[data-pub-row="' + CSS.escape(String(productId)) + '"]');
+  const status = row ? row.querySelector('.sp-pub-status') : null;
+  if (status) status.textContent = text;
+}
+
+let addPick = null; // { id, productId, strip, assignedStrip, statusEl, button }
+
+function assignedStripFor(el){
+  const card = el.closest('.sp-product');
+  if (!card) return null;
+  for (const row of card.querySelectorAll('.sp-row')) {
+    const strip = row.querySelector('.sp-imgs');
+    if (strip && strip.querySelector('.sp-img[data-assign-ref]')) return strip;
+  }
+  return null;
+}
+
+function endAddPick(){
+  if (!addPick) return;
+  if (addPick.assignedStrip) addPick.assignedStrip.classList.remove('adding-publish');
+  if (addPick.button) addPick.button.textContent = '添加图片';
+  addPick = null;
+}
+
+function addAssignedToPublish(pick, ref, thumb){
+  const strip = pick.strip;
+  const exists = [...strip.querySelectorAll('.sp-pub-img')].some((el) => String(el.dataset.pubImg) === String(ref));
+  if (exists) {
+    if (pick.statusEl) pick.statusEl.textContent = '该图片已在发布图中';
+    return;
+  }
+  const el = document.createElement('div');
+  el.className = 'sp-img sp-pub-img';
+  el.draggable = true;
+  el.dataset.pubImg = String(ref);
+  el.title = '拖拽调整发布顺序';
+  el.style.width = '66px';
+  el.innerHTML = '<img draggable="false" src="' + esc(thumb || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt="">'
+    + '<button type="button" class="sp-pub-x" title="从发布图移除（保存后从 WP 同步消失）">×</button>';
+  const stats = strip.querySelector('.sp-pub-stats');
+  if (stats) strip.insertBefore(el, stats); else strip.appendChild(el);
+  if (pick.statusEl) pick.statusEl.textContent = '已加入发布图（点「保存发布图」同步到 WP）';
 }
 
 let swatchPick = null; // { id, productId, colourSource, strip, statusEl }
@@ -1119,13 +1179,43 @@ document.addEventListener('click', (e) => {
   const save = e.target.closest('button[data-split-save]');
   if (save) { void saveSplitPlan(String(save.dataset.splitSave)); return; }
   const pubSave = e.target.closest('button[data-pub-save]');
-  if (pubSave) { void savePublishOrder(String(pubSave.dataset.pubSave), String(pubSave.dataset.pubProduct), pubSave); return; }
+  if (pubSave) { void savePublishSet(String(pubSave.dataset.pubSave), String(pubSave.dataset.pubProduct), pubSave); return; }
+  const pubAdd = e.target.closest('button[data-pub-add]');
+  if (pubAdd) {
+    const wasActive = Boolean(addPick && addPick.button === pubAdd);
+    endAddPick();
+    endSwatchPick();
+    if (!wasActive) {
+      const strip = publishStripFor(pubAdd);
+      const assignedStrip = assignedStripFor(pubAdd);
+      const row = pubAdd.closest('.sp-row');
+      const statusEl = row ? row.querySelector('.sp-pub-status') : null;
+      if (strip && assignedStrip) {
+        addPick = {
+          id: String(pubAdd.dataset.pubAdd),
+          productId: String(pubAdd.dataset.pubProduct),
+          strip, assignedStrip, statusEl, button: pubAdd,
+        };
+        assignedStrip.classList.add('adding-publish');
+        pubAdd.textContent = '结束添加';
+        if (statusEl) statusEl.textContent = '点选「已分配图」中的图片加入发布图（Esc 结束）';
+      }
+    }
+    return;
+  }
+  const pubRemove = e.target.closest('button.sp-pub-x');
+  if (pubRemove) {
+    const thumb = pubRemove.closest('.sp-pub-img');
+    if (thumb) thumb.remove();
+    return;
+  }
   const swatchBtn = e.target.closest('button[data-swatch-replace]');
   if (swatchBtn) {
     const strip = publishStripFor(swatchBtn);
     const row = swatchBtn.closest('.sp-row');
     const statusEl = row ? row.querySelector('.sp-swatch-status') : null;
     endSwatchPick();
+    endAddPick();
     if (strip) {
       swatchPick = {
         id: String(swatchBtn.dataset.swatchReplace),
@@ -1144,6 +1234,14 @@ document.addEventListener('click', (e) => {
     void saveSwatch(String(swatchReset.dataset.swatchReset), String(swatchReset.dataset.swatchProduct),
       String(swatchReset.dataset.swatchColour), null, row ? row.querySelector('.sp-swatch-status') : null);
     return;
+  }
+  if (addPick) {
+    const thumb = e.target.closest('.sp-img[data-assign-ref]');
+    if (thumb && thumb.parentElement === addPick.assignedStrip) {
+      const imgEl = thumb.querySelector('img');
+      addAssignedToPublish(addPick, thumb.dataset.assignRef, imgEl ? imgEl.getAttribute('src') : null);
+      return;
+    }
   }
   if (swatchPick) {
     const img = e.target.closest('.sp-pub-img');

@@ -16,7 +16,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   syncWordPressProductPricing, replaceWordPressBestSellers,
   resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
-  resolvePublishImageRows, dedupePublishImageRows, applyPublishOrder } from './wordpress-publisher.js';
+  resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -29,7 +29,7 @@ import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
 import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy, classifyNonProductImages, regenerateSplitCopy } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
-import { dedupeImagesByHash, dedupeImagesWithLlm } from './image-dedupe.js';
+import { dedupeImagesByHash, dedupeImagesWithLlm, normalizedSourceImageKey } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
@@ -1143,6 +1143,17 @@ app.post('/api/product-details/:id/split-content', { preHandler: requireDashboar
           if (picked) colour.swatchImageId = picked;
         }
       }
+      // Manual publish-image additions/removals survive regenerations too.
+      const priorOverrides = new Map((prior?.result?.products ?? [])
+        .map((product) => [String(product.id), {
+          added: Array.isArray(product.publishAdded) ? product.publishAdded : null,
+          excluded: Array.isArray(product.publishExcluded) ? product.publishExcluded : null,
+        }]));
+      for (const product of contents.products) {
+        const overrides = priorOverrides.get(String(product.id));
+        if (overrides?.added?.length) product.publishAdded = overrides.added;
+        if (overrides?.excluded?.length) product.publishExcluded = overrides.excluded;
+      }
       const saved = await db.saveSplitContents(id, contents, config.complexModel ?? null);
       job.productCount = contents.products.length;
       job.result = { productCount: contents.products.length, styleNo: contents.styleNo };
@@ -1176,13 +1187,14 @@ app.get('/api/product-details/:id/split-content', { preHandler: requireDashboard
   if (products.length) {
     const detail = await db.getProductDetail(id);
     for (const product of products) {
-      const rows = resolvePublishImageRows(detail, product?.imageRefs ?? {});
-      const outcome = await dedupePublishImageRows(rows);
-      const ordered = applyPublishOrder(outcome.rows, product?.publishOrder);
+      const resolvedRows = resolvePublishImageRows(detail, product?.imageRefs ?? {});
+      const outcome = await computePublishImageRows(detail, product);
       publishSets[String(product?.id ?? '')] = {
-        candidateCount: rows.length,
-        imageIds: ordered.map((row) => String(row.id)),
+        candidateCount: resolvedRows.length,
+        imageIds: outcome.rows.map((row) => String(row.id)),
         savedOrder: Array.isArray(product?.publishOrder) ? product.publishOrder.map(String) : [],
+        addedCount: Array.isArray(product?.publishAdded) ? product.publishAdded.length : 0,
+        excludedCount: Array.isArray(product?.publishExcluded) ? product.publishExcluded.length : 0,
         removed: (outcome.removed ?? []).map((entry) => ({
           imageId: String(entry.imageId),
           keptImageId: entry.keptImageId ? String(entry.keptImageId) : null,
@@ -1231,21 +1243,64 @@ async function queueSplitSyncJob({ productDetailId, productId, detail, publicati
   return job;
 }
 
-app.put('/api/product-details/:id/split-publish-order', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+/** Resolve review-submitted image refs (stored ids or source URLs) to image ids. */
+function resolveReviewImageRefs(detail, refs) {
+  const images = detail?.images ?? [];
+  const byId = new Map(images.map((image) => [String(image.id), image]));
+  const byUrl = new Map();
+  for (const image of images) {
+    const key = normalizedSourceImageKey(image.source_url);
+    if (key && !byUrl.has(key)) byUrl.set(key, image);
+  }
+  const out = [];
+  const seen = new Set();
+  for (const ref of refs) {
+    const value = String(ref ?? '');
+    if (!value) continue;
+    const image = byId.get(value) ?? byUrl.get(normalizedSourceImageKey(value)) ?? null;
+    if (!image) continue;
+    const key = String(image.id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
+
+// Save the review-edited publish image set (manual additions from the assigned
+// images, removals, order) and re-sync WordPress so the live pages follow.
+app.put('/api/product-details/:id/split-publish-images', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const productId = String(request.body?.productId ?? '');
-  const order = (Array.isArray(request.body?.order) ? request.body.order : [])
+  const refs = (Array.isArray(request.body?.imageIds) ? request.body.imageIds : [])
     .map((value) => String(value)).filter(Boolean);
-  if (!productId || !order.length) return reply.code(400).send({ error: 'order_required' });
+  if (!productId || !refs.length) return reply.code(400).send({ error: 'image_ids_required' });
   const record = await db.getSplitContents(id);
   const product = (record?.result?.products ?? []).find((item) => String(item?.id) === productId);
   if (!product) return reply.code(404).send({ error: 'split_product_not_found' });
   const detail = await db.getProductDetail(id);
-  const validIds = new Set((detail?.images ?? []).map((image) => String(image.id)));
-  const cleaned = [...new Set(order.filter((value) => validIds.has(value)))];
-  if (!cleaned.length) return reply.code(400).send({ error: 'no_valid_image_ids' });
-  product.publishOrder = cleaned;
+  const desired = resolveReviewImageRefs(detail, refs);
+  if (!desired.length) return reply.code(400).send({ error: 'no_valid_image_ids' });
+  // Reconcile the manual overrides against the automatic (deduped) base set.
+  const base = (await dedupePublishImageRows(resolvePublishImageRows(detail, product.imageRefs ?? {}))).rows;
+  const baseIds = new Set(base.map((row) => String(row.id)));
+  const desiredSet = new Set(desired);
+  const excluded = new Set((Array.isArray(product.publishExcluded) ? product.publishExcluded : []).map((value) => String(value)));
+  const added = new Set((Array.isArray(product.publishAdded) ? product.publishAdded : []).map((value) => String(value)));
+  for (const imageId of desired) {
+    excluded.delete(imageId); // re-added images stop being excluded
+    if (!baseIds.has(imageId)) added.add(imageId); // images outside the base set are manual additions
+  }
+  for (const rowId of baseIds) {
+    if (!desiredSet.has(rowId)) excluded.add(rowId); // removed from the publish set
+  }
+  for (const imageId of [...added]) {
+    if (!desiredSet.has(imageId)) added.delete(imageId); // added images removed again
+  }
+  product.publishOrder = desired;
+  product.publishAdded = [...added];
+  product.publishExcluded = [...excluded];
   await db.saveSplitContents(id, record.result, record.model ?? null);
 
   const publication = await db.getWordPressPublication(id);
@@ -1255,7 +1310,7 @@ app.put('/api/product-details/:id/split-publish-order', { preHandler: requireDas
   }
   const job = await queueSplitSyncJob({
     productDetailId: id, productId, detail, publication,
-    contents: record.result, trigger: 'wordpress_image_order',
+    contents: record.result, trigger: 'wordpress_publish_images',
   });
   return { saved: true, sync: { jobId: job.id } };
 });

@@ -913,6 +913,41 @@ export function applyPublishOrder(rows, order) {
 }
 
 /**
+ * Final publish image rows for a split product: resolve the stored refs, run
+ * the publish-time dedupe, apply the review's manual additions/removals and
+ * the saved order. Manual additions bypass the near/vision dedupe (the review
+ * chose them on purpose) but never introduce exact or same-URL duplicates.
+ */
+export async function computePublishImageRows(detail, content) {
+  const deduped = await dedupePublishImageRows(resolvePublishImageRows(detail, content?.imageRefs ?? {}));
+  let rows = deduped.rows;
+  const additions = Array.isArray(content?.publishAdded) ? content.publishAdded : [];
+  if (additions.length) {
+    const byId = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
+    const seenIds = new Set(rows.map((row) => String(row.id)));
+    const seenSha = new Set(rows.map((row) => row.content_sha256).filter(Boolean));
+    const seenUrls = new Set(rows.map((row) => normalizedSourceImageKey(row.source_url)).filter(Boolean));
+    for (const id of additions) {
+      const key = String(id);
+      if (seenIds.has(key)) continue;
+      const image = byId.get(key);
+      if (!image) continue;
+      const sha = image.content_sha256 ?? null;
+      const urlKey = normalizedSourceImageKey(image.source_url);
+      if ((sha && seenSha.has(sha)) || (urlKey && seenUrls.has(urlKey))) continue;
+      rows.push(image);
+      seenIds.add(key);
+      if (sha) seenSha.add(sha);
+      if (urlKey) seenUrls.add(urlKey);
+    }
+  }
+  const excluded = new Set((Array.isArray(content?.publishExcluded) ? content.publishExcluded : []).map((id) => String(id)));
+  if (excluded.size) rows = rows.filter((row) => !excluded.has(String(row.id)));
+  rows = applyPublishOrder(rows, content?.publishOrder);
+  return { rows, removed: deduped.removed };
+}
+
+/**
  * Publish the split products of one bundle: update the original WordPress post
  * with the best-matching split product (keeping its URL, style number and
  * taxonomies) and create the remaining split products as new drafts (fresh
@@ -1084,13 +1119,12 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   };
 
   const buildImages = async (content, { externalId, styleNo, altText }) => {
-    // Resolve the stored refs, run the publish-time dedupe and apply the
-    // review-saved order. The review UI previews the same helpers, so what it
-    // shows is what gets uploaded, in the saved order.
-    const resolvedRows = resolvePublishImageRows(detail, content.imageRefs);
-    const dedupedOutcome = await dedupePublishImageRows(resolvedRows);
-    const deduped = dedupedOutcome.removed.length;
-    let rows = applyPublishOrder(dedupedOutcome.rows, content.publishOrder);
+    // Resolve + dedupe + apply the review's manual overrides and order. The
+    // review UI previews the same helper, so what it shows is what gets
+    // uploaded, in the saved order.
+    const outcome = await computePublishImageRows(detail, content);
+    const deduped = outcome.removed.length;
+    let rows = outcome.rows;
     const images = [];
     const skipped = [];
     const altFixes = [];
