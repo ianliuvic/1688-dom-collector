@@ -1279,9 +1279,19 @@ app.put('/api/product-details/:id/split-publish-images', { preHandler: requireDa
   const record = await db.getSplitContents(id);
   const product = (record?.result?.products ?? []).find((item) => String(item?.id) === productId);
   if (!product) return reply.code(404).send({ error: 'split_product_not_found' });
-  const detail = await db.getProductDetail(id);
+  let detail = await db.getProductDetail(id);
+  // URL-only assigned images may not be stored locally yet; fetch them so an
+  // added image can actually be published instead of silently disappearing.
+  const unresolved = refs.filter((ref) => /^https:\/\//i.test(ref) && !resolveReviewImageRefs(detail, [ref]).length);
+  let downloaded = 0;
+  if (unresolved.length) {
+    const result = await downloadDetailImageUrls(detail, unresolved).catch(() => ({ downloaded: 0 }));
+    downloaded = result.downloaded ?? 0;
+    if (downloaded) detail = await db.getProductDetail(id);
+  }
   const desired = resolveReviewImageRefs(detail, refs);
-  if (!desired.length) return reply.code(400).send({ error: 'no_valid_image_ids' });
+  const skipped = refs.filter((ref) => !resolveReviewImageRefs(detail, [ref]).length);
+  if (!desired.length) return reply.code(400).send({ error: 'no_valid_image_ids', skipped });
   // Reconcile the manual overrides against the automatic (deduped) base set.
   const base = (await dedupePublishImageRows(resolvePublishImageRows(detail, product.imageRefs ?? {}))).rows;
   const baseIds = new Set(base.map((row) => String(row.id)));
@@ -1306,13 +1316,13 @@ app.put('/api/product-details/:id/split-publish-images', { preHandler: requireDa
   const publication = await db.getWordPressPublication(id);
   const isPublished = (record.result.products ?? []).some((item) => item?.wp?.postId);
   if (!publication?.payload || !isPublished) {
-    return { saved: true, sync: null, reason: 'not_published' };
+    return { saved: true, sync: null, reason: 'not_published', downloaded, skipped };
   }
   const job = await queueSplitSyncJob({
     productDetailId: id, productId, detail, publication,
     contents: record.result, trigger: 'wordpress_publish_images',
   });
-  return { saved: true, sync: { jobId: job.id } };
+  return { saved: true, sync: { jobId: job.id }, downloaded, skipped };
 });
 
 // Set (imageId) or clear (null) the WordPress colour-swatch image for one
@@ -1548,6 +1558,41 @@ async function ensureDescriptionImages(detail, assignedUrls = null) {
     }
   });
   await Promise.all(workers);
+  return results;
+}
+
+// Download explicit image URLs (e.g. an assigned image the review wants to
+// publish but that was never stored locally) into the product's media folder.
+async function downloadDetailImageUrls(detail, urls) {
+  const results = { downloaded: 0, failed: 0 };
+  const root = path.resolve(config.storagePath, 'product-images');
+  const folder = path.resolve(root, String(detail.offer_id ?? ''));
+  if (!folder.startsWith(`${root}${path.sep}`)) return results;
+  await fs.mkdir(folder, { recursive: true });
+  for (const [index, url] of urls.entries()) {
+    try {
+      const response = await fetch(url, {
+        headers: { referer: 'https://detail.1688.com/', 'user-agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(45000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length < 64) throw new Error('image too small');
+      const extension = (url.split('?')[0].match(/\.(jpe?g|png|webp|gif|avif)$/i) || ['.jpg'])[0].toLowerCase();
+      const sha = crypto.createHash('sha256').update(bytes).digest('hex');
+      const fileName = `detail-extra-${sha.slice(0, 16)}${extension}`;
+      const filePath = path.join(folder, fileName);
+      await fs.writeFile(filePath, bytes);
+      await db.addProductImage(detail.id, {
+        type: 'description', sortOrder: 500 + index, sourceUrl: url, storagePath: filePath,
+        mimeType: String(response.headers.get('content-type') || '').split(';')[0] || 'image/jpeg',
+        contentSha256: sha, byteSize: bytes.length,
+      });
+      results.downloaded += 1;
+    } catch {
+      results.failed += 1;
+    }
+  }
   return results;
 }
 

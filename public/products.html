@@ -751,15 +751,17 @@ async function savePublishSet(id, productId, button){
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
+    const skippedNote = body && Array.isArray(body.skipped) && body.skipped.length
+      ? '（' + body.skipped.length + ' 张图无法获取，未加入）' : '';
     if (body && body.sync && body.sync.jobId) {
       if (status) status.textContent = '已保存，正在同步到 WordPress…';
       const done = await pollSplitOrderJob(body.sync.jobId, status);
       await reloadSplitPanel(id);
-      setPublishStatus(id, productId, done === 'completed' ? '已同步到 WordPress'
-        : done === 'failed' ? '同步失败' : '同步仍在进行，稍后刷新查看');
+      setPublishStatus(id, productId, (done === 'completed' ? '已同步到 WordPress'
+        : done === 'failed' ? '同步失败' : '同步仍在进行，稍后刷新查看') + skippedNote);
     } else {
       await reloadSplitPanel(id);
-      setPublishStatus(id, productId, '已保存（未发布，发布时生效）');
+      setPublishStatus(id, productId, '已保存（未发布，发布时生效）' + skippedNote);
     }
   } catch (e) {
     if (status) status.textContent = '保存失败：' + String((e && e.message) || e).slice(0, 80);
