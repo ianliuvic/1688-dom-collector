@@ -4354,40 +4354,39 @@ app.post('/api/product-details/:id/sku-audit', { preHandler: requireApiKey }, as
 });
 
 // Captures the description (detail) images of a saved product on demand. The
-// images are stored with the collector (files + product_detail_images rows) and
-// are intentionally not pushed to WordPress.
-app.post('/api/product-details/:id/detail-images', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
+// image URLs come from the LinkFox capture data (raw_data.linkfox.raw
+// .description); they are downloaded directly — no 1688 page visit, no
+// browser. Files + product_detail_images rows stay with the collector and are
+// intentionally not pushed to WordPress.
+app.post('/api/product-details/:id/detail-images', { preHandler: requireApiKey }, async (request, reply) => {
   const detailId = Number(request.params.id);
   if (!Number.isInteger(detailId) || detailId <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const detail = await db.getProductDetail(detailId).catch(() => null);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
-  const targetUrl = detail.canonical_url || detail.source_url
-    || (detail.offer_id ? `https://detail.1688.com/offer/${detail.offer_id}.html` : null);
-  if (!targetUrl) return reply.code(400).send({ error: 'detail_has_no_source_url' });
 
   const id = crypto.randomUUID();
-  const job = { id, status: 'queued', detailId, offerId: detail.offer_id ?? null, url: targetUrl,
+  const job = { id, status: 'queued', detailId, offerId: detail.offer_id ?? null,
     createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
-    container: null, imageCount: null, images: null, error: null };
+    downloaded: null, failed: null, imageCount: null, images: null, error: null };
   detailImageJobs.set(id, job);
   trimTerminalJobs(detailImageJobs);
   multimodalAuditQueue = multimodalAuditQueue.catch(() => {}).then(async () => {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
     try {
-      const result = await collector.captureDetailImages(targetUrl, { debug: Boolean(request.body?.debug) });
-      await db.saveDetailImages(detailId, result.images ?? []);
-      job.container = result.container ?? null;
-      job.containerFrame = result.containerFrame ?? null;
-      job.frameSummaries = result.frameSummaries ?? null;
-      job.tabLabel = result.tabLabel ?? null;
-      job.imageCount = result.imageCount ?? 0;
-      job.debugArtifacts = result.debugArtifacts ?? null;
-      job.images = (result.images ?? []).map((image) => ({ sourceUrl: image.sourceUrl,
-        mimeType: image.mimeType ?? null, byteSize: image.byteSize ?? null,
-        storagePath: image.storagePath ?? null, sortOrder: image.sortOrder ?? 0 }));
+      const result = await ensureDescriptionImages(detail);
+      const fresh = await db.getProductDetail(detailId);
+      const rows = (fresh?.images ?? [])
+        .filter((image) => image.image_type === 'description')
+        .sort((left, right) => (left.sort_order ?? 0) - (right.sort_order ?? 0));
+      job.downloaded = result.downloaded;
+      job.failed = result.failed;
+      job.imageCount = rows.length;
+      job.images = rows.map((image) => ({ sourceUrl: image.source_url ?? null,
+        storagePath: image.storage_path ?? null, mimeType: image.mime_type ?? null,
+        byteSize: image.byte_size ?? null, sortOrder: image.sort_order ?? 0 }));
       job.status = 'completed';
-      job.error = job.imageCount ? null : 'No description images were found on the page.';
+      job.error = rows.length ? null : 'The LinkFox capture has no description images for this product.';
     } catch (error) {
       job.status = 'failed';
       job.error = error.message;
