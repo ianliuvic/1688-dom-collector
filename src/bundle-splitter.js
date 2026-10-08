@@ -863,6 +863,12 @@ export async function normalizeSplitContents({ detail, plan, contents, styleNo =
     const codeMap = new Map(colours.filter((colour) => colour.code).map((colour) => [colour.source, colour.code]));
     const prefix = styleNo ? `${styleNo}S${index + 1}` : `S${index + 1}`;
     const skus = splitSkusForProduct(raw, product, codeMap, sizeTexts, prefix);
+    // Keep the already-deduped publish refs: this job only refreshes variant
+    // naming/sizes/SKUs. Resetting them to the plan's raw image assignment
+    // would undo the generation-time dedupe and desync the stored statistics.
+    const priorRefs = (prior.imageRefs?.imageIds?.length || prior.imageRefs?.imageUrls?.length)
+      ? prior.imageRefs
+      : { imageIds: product.imageIds ?? [], imageUrls: product.imageUrls ?? [] };
     updated.push({
       ...prior,
       id: product.id ?? `p${index + 1}`,
@@ -870,7 +876,7 @@ export async function normalizeSplitContents({ detail, plan, contents, styleNo =
       colours,
       sizes,
       skus,
-      imageRefs: { imageIds: product.imageIds ?? [], imageUrls: product.imageUrls ?? [] },
+      imageRefs: priorRefs,
       normalizedAt: new Date().toISOString(),
       needsReview: colours.some((colour) => !colour.text || !colour.code || colour.needsReview === true),
     });
