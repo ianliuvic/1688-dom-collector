@@ -15,7 +15,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   setWordPressProductPublicationDate, setWordPressProductStatus,
   syncWordPressProductPricing, replaceWordPressBestSellers,
   resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
-  publishSplitProductsToWordPress } from './wordpress-publisher.js';
+  publishSplitProductsToWordPress, repairSplitKeeperCategories } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -2925,6 +2925,98 @@ app.post('/api/wordpress/split-copy/repair', { preHandler: requireApiKey }, asyn
 
 app.get('/api/wordpress/split-copy-repair-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = splitCopyRepairJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+// Repair keeper categories for every published split bundle: keep only the
+// stored reviewed category plus its navigation ancestors (drops the original
+// bundle's cross-type categories). Curated collections are preserved. No
+// model calls, no media changes.
+const splitKeeperCategoryRepairJobs = new Map();
+
+app.post('/api/wordpress/split-keeper-categories/repair', { preHandler: requireApiKey }, async (_request, reply) => {
+  if ([...splitKeeperCategoryRepairJobs.values()].some((job) => job.status === 'running')) {
+    return reply.code(409).send({ error: 'split_keeper_category_repair_already_running' });
+  }
+  const job = {
+    id: crypto.randomUUID(), status: 'running', total: 0, processed: 0, repaired: 0, unchanged: 0, skipped: 0,
+    failed: 0, createdAt: new Date().toISOString(), completedAt: null, results: [], errors: [],
+  };
+  splitKeeperCategoryRepairJobs.set(job.id, job);
+  trimTerminalJobs(splitKeeperCategoryRepairJobs);
+  (async () => {
+    try {
+      const rows = await db.listSplitPublishableBundles({ limit: 2000, offset: 0 });
+      job.total = rows.length;
+      let next = 0;
+      const workers = Array.from({ length: Math.min(5, rows.length) }, async () => {
+        while (true) {
+          const index = next++;
+          if (index >= rows.length) return;
+          const productDetailId = Number(rows[index].product_detail_id);
+          job.processed += 1;
+          try {
+            const contents = await db.getSplitContents(productDetailId);
+            const keeper = (contents?.result?.products ?? [])
+              .find((product) => product?.wp?.role === 'keeper' && product?.wp?.postId);
+            if (!keeper) {
+              job.skipped += 1;
+              continue;
+            }
+            const publication = await db.getWordPressPublication(productDetailId);
+            if (!publication?.payload || !publication.wp_post_id) {
+              job.failed += 1;
+              job.errors.push({ productDetailId, message: 'missing publication' });
+              continue;
+            }
+            const repaired = await repairSplitKeeperCategories({ publication, config });
+            if (repaired.changed) {
+              const syncHash = crypto.createHash('sha256').update(JSON.stringify(repaired.payload)).digest('hex');
+              await db.saveWordPressPublication(productDetailId, {
+                translationId: publication.translation_id,
+                externalId: publication.external_id,
+                styleNo: publication.style_no,
+                wpPostId: publication.wp_post_id,
+                wpUrl: publication.wp_url,
+                wpEditUrl: publication.wp_edit_url,
+                wpStatus: publication.wp_status ?? 'publish',
+                syncHash,
+                payload: repaired.payload,
+                result: publication.result,
+                lastError: null,
+              });
+              job.repaired += 1;
+              if (job.results.length < 200) {
+                job.results.push({
+                  productDetailId, styleNo: publication.style_no,
+                  categoryIds: repaired.categoryIds, previousCategoryIds: repaired.previousCategoryIds,
+                });
+              }
+            } else {
+              job.unchanged += 1;
+            }
+          } catch (error) {
+            job.failed += 1;
+            if (job.errors.length < 200) {
+              job.errors.push({ productDetailId, message: String(error?.message || error).slice(0, 200) });
+            }
+          }
+        }
+      });
+      await Promise.all(workers);
+      job.status = job.failed ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress/split-keeper-category-repair-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = splitKeeperCategoryRepairJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 

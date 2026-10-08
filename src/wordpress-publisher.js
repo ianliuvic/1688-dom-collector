@@ -77,6 +77,24 @@ function taxonomyById(taxonomies, id) {
   return (taxonomies?.categories ?? []).find((item) => Number(item.id) === Number(id)) ?? null;
 }
 
+/**
+ * A category id plus its navigation ancestors (e.g. Bikini Set -> women
+ * swimwear). Used for split keepers so they carry only their own product-type
+ * category and the parent categories the site navigation needs.
+ */
+function categoryIdsWithAncestors(categoryId, categories) {
+  const ids = [];
+  const seen = new Set();
+  let current = Number(categoryId) || 0;
+  while (current > 0 && !seen.has(current)) {
+    seen.add(current);
+    ids.push(current);
+    const node = (categories ?? []).find((item) => Number(item.id) === current);
+    current = Number(node?.parent) || 0;
+  }
+  return ids;
+}
+
 export function resolveMerchandisingSelection({ options = {}, merchandising = null, taxonomies = null }) {
   const manualCategories = Array.isArray(options.categoryIds) ? options.categoryIds.map(Number).filter(Boolean) : [];
   const categoryMode = clean(options.categoryMode)
@@ -1152,10 +1170,16 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     const keeperDescription = clean(review?.description) || clean(keeper.description);
     const pickedCategory = allCategories
       .find((item) => Number(item.id) === Number(review?.categoryId)) ?? null;
-    const keeperCategories = [...new Set([
-      ...(pickedCategory ? [pickedCategory.id] : []),
-      ...(Array.isArray(template.category_ids) ? template.category_ids : []),
-    ].map(Number).filter((value) => Number.isInteger(value) && value > 0))];
+    // The keeper keeps only its reviewed category plus that category's
+    // navigation ancestors (e.g. Bikini Set -> women swimwear). The original
+    // bundle's other product-type categories must never leak into the keeper.
+    // When the review is skipped (repair re-syncs), reuse the stored primary.
+    const keeperPrimaryId = Number(pickedCategory?.id)
+      || Number(template.meta?.primary_category_id) || 0;
+    const keeperCategories = keeperPrimaryId
+      ? categoryIdsWithAncestors(keeperPrimaryId, allCategories)
+      : [...new Set((Array.isArray(template.category_ids) ? template.category_ids : [])
+          .map(Number).filter((value) => Number.isInteger(value) && value > 0))];
     const keeperStyle = await resolveStyle({
       currentStyle: publication.style_no,
       externalId: template.external_id,
@@ -1324,6 +1348,57 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     }
   }
   return results;
+}
+
+/**
+ * Repair one published split keeper's categories: keep only the stored
+ * reviewed primary category plus its navigation ancestors (drops the original
+ * bundle's cross-type categories). Curated collections that are currently on
+ * the post (Best Sellers, Factory Quality Choice) are preserved. Updates
+ * WordPress and returns the corrected payload for the caller to persist.
+ */
+export async function repairSplitKeeperCategories({ publication, config }) {
+  const payload = publication?.payload;
+  if (!payload?.external_id || !publication?.wp_post_id) {
+    throw new Error('A stored publication with a WordPress post is required.');
+  }
+  const wp = wordpressClient(config);
+  const taxonomies = await wp('/wp-json/hx/v1/products/taxonomies');
+  const allCategories = (taxonomies?.categories ?? []).filter((item) => item?.id && item?.name);
+  const primaryId = Number(payload.meta?.primary_category_id) || 0;
+  const primaryCategory = allCategories.find((item) => Number(item.id) === primaryId) ?? null;
+  if (!primaryCategory) throw new Error('The stored review category was not found in WordPress.');
+  const target = categoryIdsWithAncestors(primaryId, allCategories);
+  const product = await wp(`/wp-json/wp/v2/product/${publication.wp_post_id}?context=edit&_fields=id,status,product_cat`);
+  const currentIds = [...new Set((product?.product_cat ?? []).map(Number).filter(Boolean))];
+  const curatedSlugs = new Set(['best-sellers', 'factory-quality-choice']);
+  const curatedIds = new Set(allCategories
+    .filter((item) => curatedSlugs.has(clean(item.slug)))
+    .map((item) => Number(item.id)));
+  const preserved = currentIds.filter((id) => curatedIds.has(id));
+  const categoryIds = [...new Set([...target, ...preserved])];
+  const equalSets = (left, right) => left.length === right.length
+    && left.every((id) => right.includes(id));
+  const changed = !equalSets(categoryIds, currentIds);
+  if (changed) {
+    await wp('/wp-json/hx/v1/products/classification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        post_id: Number(publication.wp_post_id),
+        category_ids: categoryIds,
+        primary_category_id: primaryId,
+      }),
+      timeoutMs: 60000,
+    });
+  }
+  return {
+    changed,
+    categoryIds,
+    previousCategoryIds: currentIds,
+    primaryCategoryId: primaryId,
+    payload: { ...payload, category_ids: categoryIds },
+  };
 }
 
 export async function updateWordPressProductStyleNumber({ publication, styleNo, config, optionOverrides = [] }) {
