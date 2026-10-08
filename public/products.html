@@ -837,11 +837,21 @@ function endSwatchPick(){
 
 async function reloadSplitPanel(id){
   try {
-    const res = await fetch('/api/product-details/' + id + '/split-content', { headers: { accept: 'application/json' } });
-    if (!res.ok) return;
-    const body = await res.json();
-    if (body.result) SPLIT_CONTENTS.set(String(id), body.result);
-    SPLIT_PUBLISH_SETS.set(String(id), body.publishSets ?? null);
+    const [contentRes, planRes] = await Promise.all([
+      fetch('/api/product-details/' + id + '/split-content', { headers: { accept: 'application/json' } }),
+      fetch('/api/product-details/' + id + '/split-plan', { headers: { accept: 'application/json' } }),
+    ]);
+    if (contentRes.ok) {
+      const body = await contentRes.json();
+      if (body.result) SPLIT_CONTENTS.set(String(id), body.result);
+      SPLIT_PUBLISH_SETS.set(String(id), body.publishSets ?? null);
+    }
+    if (planRes.ok) {
+      const planBody = await planRes.json();
+      if (Array.isArray(planBody.images)) {
+        SPLIT_IMAGES.set(String(id), new Map(planBody.images.map((image) => [String(image.id), image.thumb || null])));
+      }
+    }
     renderSplitPanel(id);
   } catch { /* keep the current view */ }
 }
