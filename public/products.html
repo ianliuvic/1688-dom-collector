@@ -63,6 +63,8 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .sp-pub-x{position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;border:1px solid var(--line);background:#fff;font-size:10px;line-height:1;padding:0;cursor:pointer;z-index:1}
 .sp-imgs.picking-swatch .sp-pub-img{outline:2px dashed var(--info);cursor:crosshair}
 .sp-imgs.adding-publish .sp-img[data-assign-ref]{outline:2px dashed var(--info);cursor:copy}
+.sp-pool-row .sp-pool-img{cursor:default}
+.sp-pool-row.pick-on .sp-pool-img{outline:2px dashed var(--info);cursor:copy}
 .sp-pub-save{padding:2px 10px;font-size:11px;border:1px solid var(--line);border-radius:4px;background:#fff;cursor:pointer}
 .sp-pub-save:disabled{opacity:.6;cursor:default}
 .pp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
@@ -440,6 +442,7 @@ const SPLITS = new Map();
 const SPLIT_CONTENTS = new Map();
 const SPLIT_IMAGES = new Map();
 const SPLIT_PUBLISH_SETS = new Map();
+const SPLIT_POOLS = new Map();
 
 function splitItem(id){ return DATA.find((x) => String(x.id) === String(id)); }
 
@@ -470,6 +473,7 @@ async function toggleSplit(id){
     if (Array.isArray(body.images)) {
       SPLIT_IMAGES.set(String(id), new Map(body.images.map((image) => [String(image.id), image.thumb || null])));
     }
+    if (Array.isArray(body.pool)) SPLIT_POOLS.set(String(id), body.pool);
     if (body.plan) {
       SPLITS.set(String(id), body.plan);
       try {
@@ -635,6 +639,14 @@ function renderSplitPanel(id, plan){
   const sourceLabel = plan.source === 'llm'
     ? '模型拆分' + (plan.model ? '（' + esc(plan.model) + '）' : '')
     : (plan.source === 'manual' ? '手动方案' : '方案');
+  const pool = SPLIT_POOLS.get(String(id)) ?? [];
+  const poolHtml = pool.length
+    ? pool.map((item) => {
+      const ref = item.id ? String(item.id) : String(item.url || '');
+      return '<div class="sp-img sp-pool-img" data-pool-ref="' + esc(ref) + '" title="在「添加图片」或「更换 Swatch」时点选此图（未下载的图使用时会自动下载）" style="width:56px">'
+        + '<img src="' + esc(item.thumb || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:48px;height:48px" onerror="imgFallback(this)" data-fallback="" alt=""></div>';
+    }).join('')
+    : '<span class="muted">（无）</span>';
   panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 捆绑拆分</b>'
     + '<button type="button" data-split-run="' + id + '">重新分析（LLM）</button>'
     + '<button type="button" data-split-addgroup="' + id + '">+ 添加组</button>'
@@ -644,7 +656,8 @@ function renderSplitPanel(id, plan){
     + '<span class="sp-status" id="split-status-' + id + '">' + sourceLabel + (plan.updatedAt ? ' · ' + esc(new Date(plan.updatedAt).toLocaleString()) : '') + '</span></div>'
     + '<div class="sp-products">' + cards + '</div>'
     + '<div class="sp-row sp-ignored"><span class="sp-label">未采用</span><span class="sp-opts">' + ignored + '</span></div>'
-    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算；发布图为发布到 WP 的最终图片（实时按发布去重计算）。</div>';
+    + '<div class="sp-row sp-pool-row"><span class="sp-label">全部图片</span><span class="sp-imgs">' + poolHtml + '</span></div>'
+    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算；发布图为发布到 WP 的最终图片（实时按发布去重计算）；「全部图片」是分配前的图池，点「添加图片」或「更换 Swatch」后可直接从中点选（未下载的图使用时自动下载）。</div>';
 }
 
 async function runSplitAnalysis(id){
@@ -751,8 +764,11 @@ async function savePublishSet(id, productId, button){
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
-    const skippedNote = body && Array.isArray(body.skipped) && body.skipped.length
-      ? '（' + body.skipped.length + ' 张图无法获取，未加入）' : '';
+    const noteParts = [];
+    if (body && body.downloaded) noteParts.push('已补下载 ' + body.downloaded + ' 张');
+    if (body && Array.isArray(body.skipped) && body.skipped.length) noteParts.push(body.skipped.length + ' 张图无法获取');
+    if (body && Array.isArray(body.duplicates) && body.duplicates.length) noteParts.push(body.duplicates.length + ' 张与已发布图重复');
+    const skippedNote = noteParts.length ? '（' + noteParts.join('，') + '）' : '';
     if (body && body.sync && body.sync.jobId) {
       if (status) status.textContent = '已保存，正在同步到 WordPress…';
       const done = await pollSplitOrderJob(body.sync.jobId, status);
@@ -790,11 +806,21 @@ function assignedStripFor(el){
   return null;
 }
 
+function updatePoolHighlight(id){
+  const panel = document.getElementById('split-panel-' + id);
+  if (!panel) return;
+  const on = Boolean((addPick && String(addPick.id) === String(id))
+    || (swatchPick && String(swatchPick.id) === String(id)));
+  for (const row of panel.querySelectorAll('.sp-pool-row')) row.classList.toggle('pick-on', on);
+}
+
 function endAddPick(){
   if (!addPick) return;
+  const id = String(addPick.id);
   if (addPick.assignedStrip) addPick.assignedStrip.classList.remove('adding-publish');
   if (addPick.button) addPick.button.textContent = '添加图片';
   addPick = null;
+  updatePoolHighlight(id);
 }
 
 function addAssignedToPublish(pick, ref, thumb){
@@ -831,8 +857,10 @@ function publishStripFor(el){
 
 function endSwatchPick(){
   if (!swatchPick) return;
+  const id = String(swatchPick.id);
   if (swatchPick.strip) swatchPick.strip.classList.remove('picking-swatch');
   swatchPick = null;
+  updatePoolHighlight(id);
 }
 
 async function reloadSplitPanel(id){
@@ -851,6 +879,7 @@ async function reloadSplitPanel(id){
       if (Array.isArray(planBody.images)) {
         SPLIT_IMAGES.set(String(id), new Map(planBody.images.map((image) => [String(image.id), image.thumb || null])));
       }
+      if (Array.isArray(planBody.pool)) SPLIT_POOLS.set(String(id), planBody.pool);
     }
     renderSplitPanel(id);
   } catch { /* keep the current view */ }
@@ -1213,7 +1242,8 @@ document.addEventListener('click', (e) => {
         };
         assignedStrip.classList.add('adding-publish');
         pubAdd.textContent = '结束添加';
-        if (statusEl) statusEl.textContent = '点选「已分配图」中的图片加入发布图（Esc 结束）';
+        updatePoolHighlight(String(pubAdd.dataset.pubAdd));
+        if (statusEl) statusEl.textContent = '点选「已分配图」或「全部图片」中的图片加入发布图（Esc 结束）';
       }
     }
     return;
@@ -1239,7 +1269,8 @@ document.addEventListener('click', (e) => {
         strip, statusEl,
       };
       strip.classList.add('picking-swatch');
-      if (statusEl) statusEl.textContent = '请从上方「发布图」中点选一张作为 Swatch（Esc 取消）';
+      updatePoolHighlight(String(swatchBtn.dataset.swatchReplace));
+      if (statusEl) statusEl.textContent = '请从「发布图」或「全部图片」中点选一张作为 Swatch（Esc 取消）';
     }
     return;
   }
@@ -1257,8 +1288,20 @@ document.addEventListener('click', (e) => {
       addAssignedToPublish(addPick, thumb.dataset.assignRef, imgEl ? imgEl.getAttribute('src') : null);
       return;
     }
+    const poolThumb = e.target.closest('.sp-pool-img[data-pool-ref]');
+    if (poolThumb) {
+      const imgEl = poolThumb.querySelector('img');
+      addAssignedToPublish(addPick, String(poolThumb.dataset.poolRef || ''), imgEl ? imgEl.getAttribute('src') : null);
+      return;
+    }
   }
   if (swatchPick) {
+    const poolThumb = e.target.closest('.sp-pool-img[data-pool-ref]');
+    if (poolThumb) {
+      const pick = swatchPick;
+      void saveSwatch(pick.id, pick.productId, pick.colourSource, String(poolThumb.dataset.poolRef || ''), pick.statusEl);
+      return;
+    }
     const img = e.target.closest('.sp-pub-img');
     if (img && img.parentElement === swatchPick.strip) {
       const pick = swatchPick;

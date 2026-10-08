@@ -926,7 +926,33 @@ app.get('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrA
     const source = /^https?:\/\//i.test(String(image.source_url || '')) ? String(image.source_url) : null;
     return { id: String(image.id), type: image.image_type, thumb: base ? `${base}?w=96` : source };
   });
-  return { productDetailId: id, plan: record?.plan ?? null, updatedAt: record?.updated_at ?? null, images };
+  // The pre-assignment pool: every image the split analysis could see — stored
+  // images (thumbnails served locally) plus detail-page URLs that were never
+  // downloaded (rendered from the CDN, fetched only when actually used).
+  const pool = [];
+  const poolSeen = new Set();
+  for (const image of detail?.images ?? []) {
+    if (image.image_type === 'sku') continue;
+    const key = normalizedSourceImageKey(image.source_url) || `id:${image.id}`;
+    if (poolSeen.has(key)) continue;
+    poolSeen.add(key);
+    const base = imagePublicPath(image.storage_path);
+    const source = /^https?:\/\//i.test(String(image.source_url || '')) ? String(image.source_url) : null;
+    pool.push({
+      id: String(image.id), url: source, type: image.image_type,
+      thumb: base ? `${base}?w=96` : source,
+    });
+  }
+  for (const match of String(detail?.raw_data?.linkfox?.raw?.description ?? '').matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) {
+    let url = match[1].trim();
+    if (url.startsWith('//')) url = `https:${url}`;
+    if (!/^https:\/\//i.test(url)) continue;
+    const key = normalizedSourceImageKey(url);
+    if (!key || poolSeen.has(key)) continue;
+    poolSeen.add(key);
+    pool.push({ id: null, url, type: 'description-web', thumb: url });
+  }
+  return { productDetailId: id, plan: record?.plan ?? null, updatedAt: record?.updated_at ?? null, images, pool };
 });
 
 // Save a manually adjusted split plan. Sizes and prices are always recomputed
@@ -1312,17 +1338,22 @@ app.put('/api/product-details/:id/split-publish-images', { preHandler: requireDa
   product.publishAdded = [...added];
   product.publishExcluded = [...excluded];
   await db.saveSplitContents(id, record.result, record.model ?? null);
+  // Report images that resolve but will still be folded away by the publish
+  // duplicate guard (exact / same-URL copies of what is already published).
+  const outcome = await computePublishImageRows(detail, product);
+  const keptIds = new Set(outcome.rows.map((row) => String(row.id)));
+  const duplicates = desired.filter((value) => !keptIds.has(value));
 
   const publication = await db.getWordPressPublication(id);
   const isPublished = (record.result.products ?? []).some((item) => item?.wp?.postId);
   if (!publication?.payload || !isPublished) {
-    return { saved: true, sync: null, reason: 'not_published', downloaded, skipped };
+    return { saved: true, sync: null, reason: 'not_published', downloaded, skipped, duplicates };
   }
   const job = await queueSplitSyncJob({
     productDetailId: id, productId, detail, publication,
     contents: record.result, trigger: 'wordpress_publish_images',
   });
-  return { saved: true, sync: { jobId: job.id }, downloaded, skipped };
+  return { saved: true, sync: { jobId: job.id }, downloaded, skipped, duplicates };
 });
 
 // Set (imageId) or clear (null) the WordPress colour-swatch image for one
@@ -1341,12 +1372,20 @@ app.put('/api/product-details/:id/split-swatch', { preHandler: requireDashboardO
   if (!product) return reply.code(404).send({ error: 'split_product_not_found' });
   const colour = (product.colours ?? []).find((item) => String(item?.source ?? '') === colourSource);
   if (!colour) return reply.code(404).send({ error: 'colour_not_found' });
-  const detail = await db.getProductDetail(id);
+  let detail = await db.getProductDetail(id);
   if (imageId !== null) {
-    const image = (detail?.images ?? []).find((item) => String(item.id) === imageId);
-    if (!image) return reply.code(400).send({ error: 'image_not_found' });
-    if (!image.source_url && !image.storage_path) return reply.code(400).send({ error: 'image_has_no_source' });
-    colour.swatchImageId = imageId;
+    let resolved = resolveReviewImageRefs(detail, [imageId]);
+    if (!resolved.length && /^https:\/\//i.test(imageId)) {
+      // Not stored locally yet: fetch it now so it can actually be the swatch.
+      await downloadDetailImageUrls(detail, [imageId]).catch(() => null);
+      detail = await db.getProductDetail(id);
+      resolved = resolveReviewImageRefs(detail, [imageId]);
+    }
+    const resolvedId = resolved[0] ?? null;
+    if (!resolvedId) return reply.code(400).send({ error: 'image_not_found' });
+    const image = (detail?.images ?? []).find((item) => String(item.id) === resolvedId);
+    if (!image || (!image.source_url && !image.storage_path)) return reply.code(400).send({ error: 'image_has_no_source' });
+    colour.swatchImageId = resolvedId;
   } else {
     delete colour.swatchImageId;
   }
