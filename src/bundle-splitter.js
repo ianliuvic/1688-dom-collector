@@ -850,12 +850,19 @@ export async function normalizeSplitContents({ detail, plan, contents, styleNo =
     }
     // A failed normalization must never silently keep stale data: the prior
     // colours stay but are flagged for review.
-    const colours = normalized
+    // A review-picked swatch image must survive normalization refreshes.
+    const priorSwatchBySource = new Map((prior.colours ?? [])
+      .filter((colour) => colour?.swatchImageId)
+      .map((colour) => [String(colour.source ?? ''), colour.swatchImageId]));
+    const colours = (normalized
       ? normalized.result.colours.map((colour) => ({
         source: colour.source, text: colour.text, code: colour.code, thumb: colour.thumb ?? null,
         placeholder: colour.placeholder === true, needsReview: colour.needsReview === true,
       }))
-      : (prior.colours ?? []).map((colour) => ({ ...colour, needsReview: true }));
+      : (prior.colours ?? []).map((colour) => ({ ...colour, needsReview: true })))
+      .map((colour) => (priorSwatchBySource.has(String(colour.source ?? ''))
+        ? { ...colour, swatchImageId: priorSwatchBySource.get(String(colour.source ?? '')) }
+        : colour));
     const sizes = normalized
       ? normalized.result.sizes.map((size) => ({ source: size.source, text: size.text, placeholder: size.placeholder === true }))
       : (prior.sizes ?? []);

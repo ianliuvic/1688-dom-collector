@@ -1130,6 +1130,19 @@ app.post('/api/product-details/:id/split-content', { preHandler: requireDashboar
         const order = priorOrder.get(String(product.id));
         if (order) product.publishOrder = order;
       }
+      // Review-picked swatch images survive content regenerations as well.
+      const priorSwatch = new Map();
+      for (const product of prior?.result?.products ?? []) {
+        for (const colour of product.colours ?? []) {
+          if (colour?.swatchImageId) priorSwatch.set(String(product.id) + '|' + String(colour.source ?? ''), colour.swatchImageId);
+        }
+      }
+      for (const product of contents.products) {
+        for (const colour of product.colours ?? []) {
+          const picked = priorSwatch.get(String(product.id) + '|' + String(colour.source ?? ''));
+          if (picked) colour.swatchImageId = picked;
+        }
+      }
       const saved = await db.saveSplitContents(id, contents, config.complexModel ?? null);
       job.productCount = contents.products.length;
       job.result = { productCount: contents.products.length, styleNo: contents.styleNo };
