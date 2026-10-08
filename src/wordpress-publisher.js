@@ -855,6 +855,46 @@ function normalizedUrlKey(value) {
 }
 
 /**
+ * Resolve a split product's stored image refs into the local image rows the
+ * publisher uploads: gallery ids first, then URL-matched detail images.
+ */
+export function resolvePublishImageRows(detail, refs) {
+  const byId = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
+  const rows = [];
+  for (const imageId of refs?.imageIds ?? []) {
+    const image = byId.get(String(imageId));
+    if (image) rows.push(image);
+  }
+  // URL-only assigned images become usable once downloaded (matched by URL).
+  for (const url of refs?.imageUrls ?? []) {
+    const match = (detail?.images ?? [])
+      .find((image) => normalizedUrlKey(image.source_url) === normalizedUrlKey(url));
+    if (match && !rows.some((row) => String(row.id) === String(match.id))) rows.push(match);
+  }
+  return rows;
+}
+
+/**
+ * Publish-time dedupe (exact sha + normalized source URL + near dHash/pHash).
+ * The same pass runs when a split product is published, so the review UI can
+ * use it to show the final WP image set.
+ */
+export async function dedupePublishImageRows(rows) {
+  try {
+    const outcome = await dedupeImagesByHash(rows.map((image) => ({
+      id: String(image.id),
+      sourceUrl: image.source_url ?? null,
+      contentSha256: image.content_sha256 ?? null,
+      storagePath: image.storage_path ?? null,
+    })));
+    const keptIds = new Set(outcome.kept.map((entry) => String(entry.id)));
+    return { rows: rows.filter((row) => keptIds.has(String(row.id))), removed: outcome.removed };
+  } catch {
+    return { rows, removed: [] }; // hashing failure must not drop images
+  }
+}
+
+/**
  * Publish the split products of one bundle: update the original WordPress post
  * with the best-matching split product (keeping its URL, style number and
  * taxonomies) and create the remaining split products as new drafts (fresh
@@ -869,7 +909,6 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   if (!products.length) throw new Error('Split contents with titles are required.');
   const taxonomies = await wp('/wp-json/hx/v1/products/taxonomies');
   const allCategories = (taxonomies?.categories ?? []).filter((item) => item?.id && item?.name);
-  const detailImages = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
   const previousImages = new Map((template.images ?? [])
     .map((image) => [normalizedUrlKey(image?.source_url), image]));
 
@@ -1019,31 +1058,12 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
   };
 
   const buildImages = async (content, { externalId, styleNo, altText }) => {
-    let rows = [];
-    for (const imageId of content.imageRefs?.imageIds ?? []) {
-      const image = detailImages.get(String(imageId));
-      if (image) rows.push(image);
-    }
-    // URL-only assigned images become usable once downloaded (matched by URL).
-    for (const url of content.imageRefs?.imageUrls ?? []) {
-      const match = (detail?.images ?? [])
-        .find((image) => normalizedUrlKey(image.source_url) === normalizedUrlKey(url));
-      if (match && !rows.some((row) => String(row.id) === String(match.id))) rows.push(match);
-    }
-    // Content dedupe within this split product (exact sha + near dHash/pHash):
-    // nothing duplicated is published even when the source mixed it in.
-    let deduped = 0;
-    try {
-      const outcome = await dedupeImagesByHash(rows.map((image) => ({
-        id: String(image.id),
-        sourceUrl: image.source_url ?? null,
-        contentSha256: image.content_sha256 ?? null,
-        storagePath: image.storage_path ?? null,
-      })));
-      const keptIds = new Set(outcome.kept.map((entry) => String(entry.id)));
-      deduped = outcome.removed.length;
-      rows = rows.filter((row) => keptIds.has(String(row.id)));
-    } catch { /* keep the list as-is when hashing fails */ }
+    // Resolve the stored refs and run the publish-time dedupe. The review UI
+    // previews its result, so both must stay on the same helper.
+    const resolvedRows = resolvePublishImageRows(detail, content.imageRefs);
+    const dedupedOutcome = await dedupePublishImageRows(resolvedRows);
+    const deduped = dedupedOutcome.removed.length;
+    let rows = dedupedOutcome.rows;
     const images = [];
     const skipped = [];
     const altFixes = [];

@@ -15,7 +15,8 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   setWordPressProductPublicationDate, setWordPressProductStatus,
   syncWordPressProductPricing, replaceWordPressBestSellers,
   resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
-  publishSplitProductsToWordPress, repairSplitKeeperCategories } from './wordpress-publisher.js';
+  publishSplitProductsToWordPress, repairSplitKeeperCategories,
+  resolvePublishImageRows, dedupePublishImageRows } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -1145,11 +1146,33 @@ app.get('/api/product-details/:id/split-content', { preHandler: requireDashboard
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const record = await db.getSplitContents(id);
+  // Live publish-set preview: resolve each split product's stored refs and run
+  // the exact publisher dedupe, so the review UI shows the final WP image set
+  // instead of the generation-time refs (which repair jobs can rewrite).
+  const publishSets = {};
+  const products = Array.isArray(record?.result?.products) ? record.result.products : [];
+  if (products.length) {
+    const detail = await db.getProductDetail(id);
+    for (const product of products) {
+      const rows = resolvePublishImageRows(detail, product?.imageRefs ?? {});
+      const outcome = await dedupePublishImageRows(rows);
+      publishSets[String(product?.id ?? '')] = {
+        candidateCount: rows.length,
+        imageIds: outcome.rows.map((row) => String(row.id)),
+        removed: (outcome.removed ?? []).map((entry) => ({
+          imageId: String(entry.imageId),
+          keptImageId: entry.keptImageId ? String(entry.keptImageId) : null,
+          reason: entry.reason ?? 'hash',
+        })),
+      };
+    }
+  }
   return {
     productDetailId: id,
     result: record?.result ?? null,
     model: record?.model ?? null,
     updatedAt: record?.updated_at ?? null,
+    publishSets,
   };
 });
 

@@ -427,6 +427,7 @@ async function setBundleStatus(id, value, stateEl){
 const SPLITS = new Map();
 const SPLIT_CONTENTS = new Map();
 const SPLIT_IMAGES = new Map();
+const SPLIT_PUBLISH_SETS = new Map();
 
 function splitItem(id){ return DATA.find((x) => String(x.id) === String(id)); }
 
@@ -464,6 +465,7 @@ async function toggleSplit(id){
         if (contentRes.ok) {
           const contentBody = await contentRes.json();
           if (contentBody.result) SPLIT_CONTENTS.set(String(id), contentBody.result);
+          SPLIT_PUBLISH_SETS.set(String(id), contentBody.publishSets ?? null);
         }
       } catch { /* content is optional */ }
       renderSplitPanel(id);
@@ -551,49 +553,33 @@ function renderSplitPanel(id, plan){
           : '')
         + '</span></div>'
       : '';
-    const dedupeReasonLabel = { exact: '完全重复', 'source-url': '同源URL重复', near: '近似重复', llm: '视觉去重' };
-    const dedupedBlock = content
+    const publishReasonLabel = { exact: '完全重复', 'source-url': '同源URL重复', near: '近似重复', llm: '视觉去重' };
+    const publishSet = SPLIT_PUBLISH_SETS.get(String(id))?.[String(product.id)] ?? null;
+    const publishBlock = publishSet
       ? (() => {
-          const refs = content.imageRefs || {};
-          const kept = [
-            ...(refs.imageIds || []).map((imageId) => splitThumb(imageId)),
-            ...(refs.imageUrls || []).map((url) => String(url)),
-          ];
-          const dedupe = content.dedupe || null;
-          const counts = dedupe?.counts || {};
-          const removedDetails = Array.isArray(dedupe?.removedDetails) ? dedupe.removedDetails : [];
-          const statsText = dedupe
-            ? '分配 ' + dedupe.total + ' 张 → 去重后 ' + kept.length + ' 张'
-              + (dedupe.removed
-                ? '（移除：完全重复 ' + (counts.exact || 0) + '、同源URL ' + (counts['source-url'] || 0)
-                  + '、近似 ' + (counts.near || 0) + '、视觉 ' + (counts.llm || 0) + '）'
-                : '')
-            : '';
-          const thumbCell = (thumb, titleAttr, dimmed) => '<div class="sp-img" style="width:66px' + (dimmed ? ';opacity:.45' : '') + '"'
-            + (titleAttr ? ' title="' + esc(titleAttr) + '"' : '') + '>'
-            + '<img src="' + esc(thumb || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt=""></div>';
-          const keptHtml = kept.length
-            ? kept.map((thumb) => thumbCell(thumb, '', false)).join('')
+          const imageIds = publishSet.imageIds || [];
+          const counts = {};
+          for (const entry of publishSet.removed || []) counts[entry.reason] = (counts[entry.reason] || 0) + 1;
+          const parts = Object.entries(counts).map(([reason, count]) => (publishReasonLabel[reason] || reason) + ' ' + count);
+          const statsText = '候选 ' + publishSet.candidateCount + ' 张 → 发布 ' + imageIds.length + ' 张'
+            + (parts.length ? '（剔除：' + parts.join('、') + '）' : '');
+          const thumbHtml = imageIds.length
+            ? imageIds.map((imageId) => '<div class="sp-img" style="width:66px">'
+              + '<img src="' + esc(splitThumb(imageId) || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt=""></div>').join('')
             : '<span class="muted">（无）</span>';
-          const removedHtml = removedDetails.length
-            ? '<span class="muted" style="font-size:11px;margin:0 2px">已移除：</span>'
-              + removedDetails.map((entry) => {
-                const thumb = (entry.dbId && splitThumb(entry.dbId)) || entry.url || null;
-                const tip = (dedupeReasonLabel[entry.reason] || entry.reason || '去重移除') + (entry.note ? '：' + entry.note : '');
-                return thumbCell(thumb, tip, true);
-              }).join('')
-            : '';
-          const statsHtml = statsText ? '<span class="muted" style="font-size:11px;flex-basis:100%">' + esc(statsText) + '</span>' : '';
-          return '<div class="sp-row"><span class="sp-label">去重后图</span><span class="sp-imgs">' + keptHtml + removedHtml + statsHtml + '</span></div>';
+          return '<div class="sp-row"><span class="sp-label">发布图</span><span class="sp-imgs">' + thumbHtml
+            + '<span class="muted" style="font-size:11px;flex-basis:100%">' + esc(statsText) + '</span></span></div>';
         })()
-      : '<div class="sp-row"><span class="sp-label">去重后图</span><span class="sp-imgs"><span class="muted">未生成内容（点“生成内容”后显示去重结果）</span></span></div>';
+      : '<div class="sp-row"><span class="sp-label">发布图</span><span class="sp-imgs"><span class="muted">'
+        + (content ? '（暂不可用）' : '未生成内容（发布图集在生成内容后可用）')
+        + '</span></span></div>';
     return '<div class="sp-product"><div class="sp-title"><b>产品' + (index + 1) + '</b>'
       + '<input type="text" value="' + esc(product.name || '') + '" data-split-name="' + id + '" data-idx="' + index + '" placeholder="拆分后产品名称">'
       + '<span class="muted">参考价 ' + price + (product.reason ? ' · ' + esc(product.reason) : '') + '</span></div>'
       + '<div class="sp-row"><span class="sp-label">选项</span><span class="sp-opts">' + optionChips + '</span></div>'
       + '<div class="sp-row"><span class="sp-label">尺码</span><span class="sp-opts">' + (sizes || '<span class="muted">（保存后按矩阵重算）</span>') + '</span></div>'
       + assignedBlock
-      + dedupedBlock
+      + publishBlock
       + contentBlock
       + '</div>';
   }).join('');
@@ -612,7 +598,7 @@ function renderSplitPanel(id, plan){
     + '<span class="sp-status" id="split-status-' + id + '">' + sourceLabel + (plan.updatedAt ? ' · ' + esc(new Date(plan.updatedAt).toLocaleString()) : '') + '</span></div>'
     + '<div class="sp-products">' + cards + '</div>'
     + '<div class="sp-row sp-ignored"><span class="sp-label">未采用</span><span class="sp-opts">' + ignored + '</span></div>'
-    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算；去重后图为生成内容时的去重结果，发布按此上传。</div>';
+    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算；发布图为发布到 WP 的最终图片（实时按发布去重计算）。</div>';
 }
 
 async function runSplitAnalysis(id){
