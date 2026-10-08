@@ -1243,16 +1243,22 @@ app.get('/api/product-details/:id/split-content', { preHandler: requireDashboard
 // (existing attachments are reused) and tracks the sync as a pollable job.
 const splitOrderJobs = new Map();
 
-/** Re-sync a bundle's split products to WordPress and track the job. */
+/** Re-sync a bundle's split products to WordPress and track the job. Sync jobs
+ * for the same detail run strictly one after another (last save wins). */
+const splitSyncChains = new Map();
+
 async function queueSplitSyncJob({ productDetailId, productId, detail, publication, contents, trigger }) {
   const planRecord = await db.getProductSplitPlan(productDetailId).catch(() => null);
   const job = {
-    id: crypto.randomUUID(), productDetailId, productId, status: 'running',
+    id: crypto.randomUUID(), productDetailId, productId, status: 'queued',
     startedAt: new Date().toISOString(), completedAt: null, error: null,
   };
   splitOrderJobs.set(job.id, job);
   trimTerminalJobs(splitOrderJobs);
-  (async () => {
+  const chainKey = String(productDetailId);
+  const previous = splitSyncChains.get(chainKey) ?? Promise.resolve();
+  const run = previous.catch(() => {}).then(async () => {
+    job.status = 'running';
     try {
       await syncSplitBundle({
         productDetailId, detail, publication, contents, plan: planRecord?.plan ?? null,
@@ -1265,7 +1271,11 @@ async function queueSplitSyncJob({ productDetailId, productId, detail, publicati
     } finally {
       job.completedAt = new Date().toISOString();
     }
-  })();
+  });
+  splitSyncChains.set(chainKey, run);
+  run.then(() => {
+    if (splitSyncChains.get(chainKey) === run) splitSyncChains.delete(chainKey);
+  });
   return job;
 }
 
@@ -1318,6 +1328,17 @@ app.put('/api/product-details/:id/split-publish-images', { preHandler: requireDa
   const desired = resolveReviewImageRefs(detail, refs);
   const skipped = refs.filter((ref) => !resolveReviewImageRefs(detail, [ref]).length);
   if (!desired.length) return reply.code(400).send({ error: 'no_valid_image_ids', skipped });
+  // Refs → stored ids + local thumbnails, so the review UI can patch freshly
+  // downloaded images in place instead of reloading the whole panel.
+  const resolved = [];
+  for (const ref of refs) {
+    const ids = resolveReviewImageRefs(detail, [ref]);
+    const image = ids.length ? (detail?.images ?? []).find((item) => String(item.id) === ids[0]) : null;
+    if (!image) continue;
+    const base = imagePublicPath(image.storage_path);
+    const source = /^https?:\/\//i.test(String(image.source_url || '')) ? String(image.source_url) : null;
+    resolved.push({ ref: String(ref), id: String(image.id), thumb: base ? `${base}?w=96` : source });
+  }
   // Reconcile the manual overrides against the automatic (deduped) base set.
   const base = (await dedupePublishImageRows(resolvePublishImageRows(detail, product.imageRefs ?? {}))).rows;
   const baseIds = new Set(base.map((row) => String(row.id)));
@@ -1347,13 +1368,13 @@ app.put('/api/product-details/:id/split-publish-images', { preHandler: requireDa
   const publication = await db.getWordPressPublication(id);
   const isPublished = (record.result.products ?? []).some((item) => item?.wp?.postId);
   if (!publication?.payload || !isPublished) {
-    return { saved: true, sync: null, reason: 'not_published', downloaded, skipped, duplicates };
+    return { saved: true, sync: null, reason: 'not_published', downloaded, skipped, duplicates, resolved };
   }
   const job = await queueSplitSyncJob({
     productDetailId: id, productId, detail, publication,
     contents: record.result, trigger: 'wordpress_publish_images',
   });
-  return { saved: true, sync: { jobId: job.id }, downloaded, skipped, duplicates };
+  return { saved: true, sync: { jobId: job.id }, downloaded, skipped, duplicates, resolved };
 });
 
 // Set (imageId) or clear (null) the WordPress colour-swatch image for one
@@ -1373,6 +1394,7 @@ app.put('/api/product-details/:id/split-swatch', { preHandler: requireDashboardO
   const colour = (product.colours ?? []).find((item) => String(item?.source ?? '') === colourSource);
   if (!colour) return reply.code(404).send({ error: 'colour_not_found' });
   let detail = await db.getProductDetail(id);
+  let swatchResolved = null;
   if (imageId !== null) {
     let resolved = resolveReviewImageRefs(detail, [imageId]);
     if (!resolved.length && /^https:\/\//i.test(imageId)) {
@@ -1386,6 +1408,9 @@ app.put('/api/product-details/:id/split-swatch', { preHandler: requireDashboardO
     const image = (detail?.images ?? []).find((item) => String(item.id) === resolvedId);
     if (!image || (!image.source_url && !image.storage_path)) return reply.code(400).send({ error: 'image_has_no_source' });
     colour.swatchImageId = resolvedId;
+    const base = imagePublicPath(image.storage_path);
+    const source = /^https?:\/\//i.test(String(image.source_url || '')) ? String(image.source_url) : null;
+    swatchResolved = { id: resolvedId, thumb: base ? `${base}?w=96` : source };
   } else {
     delete colour.swatchImageId;
   }
@@ -1394,13 +1419,13 @@ app.put('/api/product-details/:id/split-swatch', { preHandler: requireDashboardO
   const publication = await db.getWordPressPublication(id);
   const isPublished = (record.result.products ?? []).some((item) => item?.wp?.postId);
   if (!publication?.payload || !isPublished) {
-    return { saved: true, sync: null, reason: 'not_published' };
+    return { saved: true, sync: null, reason: 'not_published', resolved: swatchResolved };
   }
   const job = await queueSplitSyncJob({
     productDetailId: id, productId, detail, publication,
     contents: record.result, trigger: 'wordpress_swatch',
   });
-  return { saved: true, sync: { jobId: job.id } };
+  return { saved: true, sync: { jobId: job.id }, resolved: swatchResolved };
 });
 
 app.get('/api/split-order-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {

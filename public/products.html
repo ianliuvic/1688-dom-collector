@@ -591,6 +591,7 @@ function renderSplitPanel(id, plan){
           const toolsHtml = '<span style="flex-basis:100%;display:flex;gap:8px;align-items:center;margin-top:2px">'
             + '<button type="button" class="sp-pub-save" data-pub-add="' + id + '" data-pub-product="' + esc(String(product.id ?? '')) + '">添加图片</button>'
             + '<button type="button" class="sp-pub-save" data-pub-save="' + id + '" data-pub-product="' + esc(String(product.id ?? '')) + '">保存发布图</button>'
+            + '<button type="button" class="sp-pub-save" data-pub-refresh="' + id + '" data-pub-product="' + esc(String(product.id ?? '')) + '">刷新</button>'
             + '<span class="muted sp-pub-status" style="font-size:11px"></span></span>';
           return '<div class="sp-row" data-pub-row="' + esc(String(product.id ?? '')) + '"><span class="sp-label">发布图</span><span class="sp-imgs">' + thumbHtml
             + '<span class="muted sp-pub-stats" style="font-size:11px;flex-basis:100%">' + esc(statsText) + '</span>' + toolsHtml + '</span></div>';
@@ -729,20 +730,97 @@ document.addEventListener('drop', (e) => {
 document.addEventListener('dragend', () => cleanupSplitPubDrag());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { endSwatchPick(); endAddPick(); } });
 
-async function pollSplitOrderJob(jobId, status){
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    try {
-      const res = await fetch('/api/split-order-jobs/' + jobId, { headers: { accept: 'application/json' } });
-      if (!res.ok) continue;
-      const job = await res.json();
-      if (job.status === 'completed') { if (status) status.textContent = '已同步到 WordPress'; return 'completed'; }
-      if (job.status === 'failed') { if (status) status.textContent = '同步失败：' + String(job.error || '').slice(0, 80); return 'failed'; }
-      if (status) status.textContent = '同步中…';
-    } catch { /* keep polling */ }
+const saveSeqCounters = new Map();
+const saveNotes = new Map();
+
+function nextSaveSeq(key){ const n = (saveSeqCounters.get(key) || 0) + 1; saveSeqCounters.set(key, n); return n; }
+function isLatestSaveSeq(key, seq){ return (saveSeqCounters.get(key) || 0) === seq; }
+
+function publishStatusEl(id, productId){
+  const panel = document.getElementById('split-panel-' + id);
+  if (!panel) return null;
+  const row = panel.querySelector('[data-pub-row="' + CSS.escape(String(productId)) + '"]');
+  return row ? row.querySelector('.sp-pub-status') : null;
+}
+
+function swatchStatusEl(id, productId){
+  const panel = document.getElementById('split-panel-' + id);
+  if (!panel) return null;
+  const row = panel.querySelector('[data-swatch-product="' + CSS.escape(String(productId)) + '"]');
+  return row ? row.querySelector('.sp-swatch-status') : null;
+}
+
+/** Swap in a working image into a thumb container, replacing any 无图 placeholder. */
+function setThumbSrc(container, src){
+  if (!container || !src) return;
+  const ph = container.querySelector('span.ph')
+    || [...container.children].find((el) => el.tagName === 'SPAN' && el.classList.contains('muted') && el.textContent.trim() === '无图');
+  let img = container.querySelector('img');
+  if (!img) {
+    img = document.createElement('img');
+    img.setAttribute('loading', 'lazy');
+    img.setAttribute('referrerpolicy', 'no-referrer');
+    img.setAttribute('alt', '');
+    if (container.classList.contains('sp-pub-img')) {
+      img.setAttribute('draggable', 'false');
+      img.setAttribute('onerror', 'imgFallback(this)');
+      img.setAttribute('data-fallback', '');
+    } else {
+      img.setAttribute('onerror', "this.style.display='none'");
+    }
+    if (ph) ph.replaceWith(img); else container.insertBefore(img, container.firstChild);
   }
-  if (status) status.textContent = '同步仍在进行，稍后刷新查看';
-  return 'pending';
+  if (ph && ph.parentElement) ph.remove();
+  img.setAttribute('src', src);
+  img.style.display = '';
+}
+
+/** Apply the save response's ref→id/thumb mapping in place (no panel reload). */
+function patchPublishRefs(panelId, strip, resolved){
+  const imageMap = SPLIT_IMAGES.get(String(panelId));
+  for (const entry of (Array.isArray(resolved) ? resolved : [])) {
+    if (!entry || !entry.ref || !entry.id) continue;
+    if (imageMap && entry.thumb) imageMap.set(String(entry.id), entry.thumb);
+    const thumbEl = [...strip.querySelectorAll('.sp-pub-img')].find((el) => String(el.dataset.pubImg) === String(entry.ref));
+    if (!thumbEl) continue;
+    thumbEl.dataset.pubImg = String(entry.id);
+    const img = thumbEl.querySelector('img');
+    if (!img || !img.getAttribute('src')) setThumbSrc(thumbEl, entry.thumb);
+  }
+}
+
+/** Update one swatch item in place: image, 默认 button, no panel reload. */
+function patchSwatchRow(id, productId, colourSource, resolved, fallbackThumb, clearing){
+  const panel = document.getElementById('split-panel-' + id);
+  if (!panel) return;
+  const row = panel.querySelector('[data-swatch-product="' + CSS.escape(String(productId)) + '"]');
+  if (!row) return;
+  const replaceBtn = [...row.querySelectorAll('button[data-swatch-replace]')]
+    .find((b) => String(b.dataset.swatchColour) === String(colourSource));
+  const item = replaceBtn ? replaceBtn.closest('.sp-opt') : null;
+  if (!item) return;
+  let src = resolved && resolved.thumb ? resolved.thumb : (fallbackThumb || null);
+  if (clearing) {
+    const content = (SPLIT_CONTENTS.get(String(id))?.products ?? []).find((p) => String(p.id) === String(productId));
+    const colour = (content?.colours ?? []).find((c) => String(c.source ?? '') === String(colourSource));
+    src = colour?.thumb || null;
+  }
+  if (src) setThumbSrc(item, src);
+  const resetBtn = [...item.querySelectorAll('button[data-swatch-reset]')]
+    .find((b) => String(b.dataset.swatchColour) === String(colourSource));
+  if (clearing) {
+    if (resetBtn) resetBtn.remove();
+  } else if (!resetBtn && replaceBtn) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sp-pub-save';
+    btn.title = '恢复为默认 swatch';
+    btn.textContent = '默认';
+    btn.dataset.swatchReset = String(id);
+    btn.dataset.swatchProduct = String(productId);
+    btn.dataset.swatchColour = String(colourSource || '');
+    replaceBtn.after(btn);
+  }
 }
 
 async function savePublishSet(id, productId, button){
@@ -755,6 +833,8 @@ async function savePublishSet(id, productId, button){
   if (!strip) return;
   const imageIds = [...strip.querySelectorAll('.sp-pub-img')].map((el) => String(el.dataset.pubImg || '')).filter(Boolean);
   if (!imageIds.length) return;
+  const key = 'pub|' + id + '|' + productId;
+  const seq = nextSaveSeq(key);
   button.disabled = true;
   if (status) status.textContent = '保存中…';
   try {
@@ -764,20 +844,18 @@ async function savePublishSet(id, productId, button){
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
+    patchPublishRefs(id, strip, body && body.resolved);
     const noteParts = [];
     if (body && body.downloaded) noteParts.push('已补下载 ' + body.downloaded + ' 张');
     if (body && Array.isArray(body.skipped) && body.skipped.length) noteParts.push(body.skipped.length + ' 张图无法获取');
     if (body && Array.isArray(body.duplicates) && body.duplicates.length) noteParts.push(body.duplicates.length + ' 张与已发布图重复');
-    const skippedNote = noteParts.length ? '（' + noteParts.join('，') + '）' : '';
+    const note = noteParts.length ? '（' + noteParts.join('，') + '）' : '';
+    saveNotes.set(key, note);
     if (body && body.sync && body.sync.jobId) {
-      if (status) status.textContent = '已保存，正在同步到 WordPress…';
-      const done = await pollSplitOrderJob(body.sync.jobId, status);
-      await reloadSplitPanel(id);
-      setPublishStatus(id, productId, (done === 'completed' ? '已同步到 WordPress'
-        : done === 'failed' ? '同步失败' : '同步仍在进行，稍后刷新查看') + skippedNote);
-    } else {
-      await reloadSplitPanel(id);
-      setPublishStatus(id, productId, '已保存（未发布，发布时生效）' + skippedNote);
+      if (status) status.textContent = '已保存，正在同步到 WordPress…' + note;
+      void pollPublishJob(id, productId, body.sync.jobId, seq);
+    } else if (status) {
+      status.textContent = '已保存（未发布，发布时生效）' + note;
     }
   } catch (e) {
     if (status) status.textContent = '保存失败：' + String((e && e.message) || e).slice(0, 80);
@@ -786,12 +864,31 @@ async function savePublishSet(id, productId, button){
   }
 }
 
-function setPublishStatus(id, productId, text){
-  const panel = document.getElementById('split-panel-' + id);
-  if (!panel) return;
-  const row = panel.querySelector('[data-pub-row="' + CSS.escape(String(productId)) + '"]');
-  const status = row ? row.querySelector('.sp-pub-status') : null;
-  if (status) status.textContent = text;
+async function pollPublishJob(id, productId, jobId, seq){
+  const key = 'pub|' + id + '|' + productId;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (!isLatestSaveSeq(key, seq)) return; // superseded by a newer save
+    try {
+      const res = await fetch('/api/split-order-jobs/' + jobId, { headers: { accept: 'application/json' } });
+      if (!res.ok) continue;
+      const job = await res.json();
+      const note = saveNotes.get(key) || '';
+      const el = publishStatusEl(id, productId);
+      if (job.status === 'completed') {
+        if (el) el.textContent = '已同步到 WordPress' + note;
+        return 'completed';
+      }
+      if (job.status === 'failed') {
+        if (el) el.textContent = '同步失败：' + String(job.error || '').slice(0, 80);
+        return 'failed';
+      }
+      if (el) el.textContent = '已保存，正在同步到 WordPress…' + note;
+    } catch { /* keep polling */ }
+  }
+  const el = publishStatusEl(id, productId);
+  if (el) el.textContent = '同步仍在进行，可稍后点「刷新」查看';
+  return 'pending';
 }
 
 let addPick = null; // { id, productId, strip, assignedStrip, statusEl, button }
@@ -885,16 +982,10 @@ async function reloadSplitPanel(id){
   } catch { /* keep the current view */ }
 }
 
-function setSwatchStatus(id, productId, text){
-  const panel = document.getElementById('split-panel-' + id);
-  if (!panel) return;
-  const row = panel.querySelector('[data-swatch-product="' + CSS.escape(String(productId)) + '"]');
-  const status = row ? row.querySelector('.sp-swatch-status') : null;
-  if (status) status.textContent = text;
-}
-
-async function saveSwatch(id, productId, colourSource, imageId, statusEl){
+async function saveSwatch(id, productId, colourSource, imageId, statusEl, thumbSrc){
   endSwatchPick();
+  const key = 'swatch|' + id + '|' + productId + '|' + colourSource;
+  const seq = nextSaveSeq(key);
   if (statusEl) statusEl.textContent = '保存中…';
   try {
     const res = await fetch('/api/product-details/' + id + '/split-swatch', {
@@ -903,19 +994,36 @@ async function saveSwatch(id, productId, colourSource, imageId, statusEl){
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
+    patchSwatchRow(id, productId, colourSource, body && body.resolved, thumbSrc || null, imageId === null);
     if (body && body.sync && body.sync.jobId) {
       if (statusEl) statusEl.textContent = '已保存，正在同步到 WordPress…';
-      const done = await pollSplitOrderJob(body.sync.jobId, statusEl);
-      await reloadSplitPanel(id);
-      setSwatchStatus(id, productId, done === 'completed' ? '已同步到 WordPress'
-        : done === 'failed' ? '同步失败' : '同步仍在进行，稍后刷新查看');
-    } else {
-      await reloadSplitPanel(id);
-      setSwatchStatus(id, productId, '已保存（未发布，发布时生效）');
+      void pollSwatchJob(id, productId, colourSource, body.sync.jobId, seq);
+    } else if (statusEl) {
+      statusEl.textContent = '已保存（未发布，发布时生效）';
     }
   } catch (e) {
     if (statusEl) statusEl.textContent = '保存失败：' + String((e && e.message) || e).slice(0, 80);
   }
+}
+
+async function pollSwatchJob(id, productId, colourSource, jobId, seq){
+  const key = 'swatch|' + id + '|' + productId + '|' + colourSource;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (!isLatestSaveSeq(key, seq)) return;
+    try {
+      const res = await fetch('/api/split-order-jobs/' + jobId, { headers: { accept: 'application/json' } });
+      if (!res.ok) continue;
+      const job = await res.json();
+      const el = swatchStatusEl(id, productId);
+      if (job.status === 'completed') { if (el) el.textContent = '已同步到 WordPress'; return 'completed'; }
+      if (job.status === 'failed') { if (el) el.textContent = '同步失败：' + String(job.error || '').slice(0, 80); return 'failed'; }
+      if (el) el.textContent = '已保存，正在同步到 WordPress…';
+    } catch { /* keep polling */ }
+  }
+  const el = swatchStatusEl(id, productId);
+  if (el) el.textContent = '同步仍在进行，可稍后点「刷新」查看';
+  return 'pending';
 }
 
 async function saveSplitPlan(id){
@@ -1254,6 +1362,8 @@ document.addEventListener('click', (e) => {
     if (thumb) thumb.remove();
     return;
   }
+  const pubRefresh = e.target.closest('button[data-pub-refresh]');
+  if (pubRefresh) { void reloadSplitPanel(String(pubRefresh.dataset.pubRefresh)); return; }
   const swatchBtn = e.target.closest('button[data-swatch-replace]');
   if (swatchBtn) {
     const strip = publishStripFor(swatchBtn);
@@ -1299,13 +1409,17 @@ document.addEventListener('click', (e) => {
     const poolThumb = e.target.closest('.sp-pool-img[data-pool-ref]');
     if (poolThumb) {
       const pick = swatchPick;
-      void saveSwatch(pick.id, pick.productId, pick.colourSource, String(poolThumb.dataset.poolRef || ''), pick.statusEl);
+      const poolImg = poolThumb.querySelector('img');
+      void saveSwatch(pick.id, pick.productId, pick.colourSource, String(poolThumb.dataset.poolRef || ''), pick.statusEl,
+        poolImg ? poolImg.getAttribute('src') : null);
       return;
     }
     const img = e.target.closest('.sp-pub-img');
     if (img && img.parentElement === swatchPick.strip) {
       const pick = swatchPick;
-      void saveSwatch(pick.id, pick.productId, pick.colourSource, String(img.dataset.pubImg || ''), pick.statusEl);
+      const pubImg = img.querySelector('img');
+      void saveSwatch(pick.id, pick.productId, pick.colourSource, String(img.dataset.pubImg || ''), pick.statusEl,
+        pubImg ? pubImg.getAttribute('src') : null);
       return;
     }
   }
