@@ -177,7 +177,7 @@ function selectPublishingImages(detail, translation, imageMode = 'translated', a
   return kept;
 }
 
-function buildSkuMatrix(detail, translation, overrideIndex = null, normalizedColours = null, normalizedColourBySource = null) {
+function buildSkuMatrix(detail, translation, overrideIndex = null, normalizedColours = null, normalizedColourBySource = null, normalizedSizeBySource = null) {
   const droppedColours = droppedVariantColours(detail);
   const translatedRows = new Map(
     (translation?.sku_rows ?? []).map((row) => [clean(row.skuKey), row]),
@@ -197,17 +197,25 @@ function buildSkuMatrix(detail, translation, overrideIndex = null, normalizedCol
     const colorLabel = clean(normalizedColourBySource?.get(clean(colorOption))?.text)
       || clean(normalizedColours?.get(clean(colorOption))?.text)
       || resolveOptionDisplayLabel(overrideIndex, colorOption) || colorOption;
-    const sizeLabel = optionValue(translatedOptions, ['size', '尺码'])
-      || optionValue(sourceOptions, ['size', '尺码']);
+    const sizeSourceOption = optionValue(sourceOptions, ['size', '尺码']);
+    const sizeLabel = clean(normalizedSizeBySource?.get(clean(sizeSourceOption))?.text)
+      || optionValue(translatedOptions, ['size', '尺码'])
+      || sizeSourceOption;
     const translatedDisplayOptions = applyOptionMapOverrides(translatedOptions, overrideIndex);
-    // Some legacy translations carry no per-row option labels; fall back to the
-    // row's own display labels so the matrix never ships empty options.
-    const displayOptions = Object.keys(translatedDisplayOptions ?? {}).length
-      ? translatedDisplayOptions
-      : {
-        ...(colorLabel ? { Color: colorLabel } : {}),
-        ...(sizeLabel ? { Size: sizeLabel } : {}),
-      };
+    // Store-side option labels always use the normalized copy: the colour comes
+    // from the variant normalization, the size from the normalizer (falling
+    // back to the translation). Empty legacy translations inherit those labels.
+    const displayOptions = { ...(translatedDisplayOptions ?? {}) };
+    if (colorLabel) {
+      const colorKey = Object.keys(displayOptions)
+        .find((key) => ['color', 'colour', '颜色'].includes(key.trim().toLowerCase())) ?? 'Color';
+      displayOptions[colorKey] = colorLabel;
+    }
+    if (sizeLabel) {
+      const sizeKey = Object.keys(displayOptions)
+        .find((key) => ['size', '尺码'].includes(key.trim().toLowerCase())) ?? 'Size';
+      displayOptions[sizeKey] = sizeLabel;
+    }
     return {
       index,
       source_sku_key: clean(sku.sku_key),
@@ -351,7 +359,9 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
     .filter((image, index, values) => values.findIndex((candidate) => String(candidate.id) === String(image.id)) === index);
   const normalizedColourBySource = new Map((options.normalizedVariants?.colours ?? [])
     .map((colour) => [clean(colour?.source), colour]));
-  const skuMatrix = buildSkuMatrix(detail, translation, overrideIndex, normalizedColours, normalizedColourBySource);
+  const normalizedSizeBySource = new Map((options.normalizedVariants?.sizes ?? [])
+    .map((size) => [clean(size?.source), size]));
+  const skuMatrix = buildSkuMatrix(detail, translation, overrideIndex, normalizedColours, normalizedColourBySource, normalizedSizeBySource);
   const selection = resolveMerchandisingSelection({ options, merchandising, taxonomies });
   const material = selection.material || attributes.get('fabric composition')
     || attributes.get('fabric name') || 'Polyester';
