@@ -519,7 +519,7 @@ function renderSplitPanel(id, plan){
           + '<img src="' + esc(image.thumb || '') + '" loading="lazy" referrerpolicy="no-referrer" style="width:58px;height:58px" onerror="imgFallback(this)" data-fallback="" alt="">'
           + '<div class="sp-assign"><button type="button" title="从此产品移除" data-split-unassign="' + id + '" data-kind="' + image.kind + '" data-ref="' + esc(image.ref) + '" data-idx="' + index + '">×</button></div>'
           + '</div>').join('')
-        : '<span class="muted">（无，可在下方图片区勾选）</span>')
+        : '<span class="muted">（无）</span>')
       + '</span></div>';    const contentBlock = content
       ? '<div class="sp-row"><span class="sp-label">内容</span><span style="flex:1;min-width:0">'
         + (content.title ? '<div class="pp-title">' + esc(content.title) + '</div>' : '<span class="pp-muted">（无标题）</span>')
@@ -556,15 +556,6 @@ function renderSplitPanel(id, plan){
   const ignored = (plan.ignoredOptions || []).length
     ? plan.ignoredOptions.map((text) => chip(text, -1)).join('')
     : '<span class="muted">（无）</span>';
-  const images = (item.gallery || []).map((image) => {
-    const buttons = products.map((product, index) => {
-      const on = (product.imageIds || []).map(String).includes(String(image.id));
-      return '<button type="button"' + (on ? ' class="on"' : '')
-        + ' data-split-image="' + id + '" data-img="' + image.id + '" data-idx="' + index + '">' + (index + 1) + '</button>';
-    }).join('');
-    return '<div class="sp-img"><img src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">'
-      + '<div class="sp-assign">' + (buttons || '<span class="muted" style="font-size:10px">无产品</span>') + '</div></div>';
-  }).join('');
   const sourceLabel = plan.source === 'llm'
     ? '模型拆分' + (plan.model ? '（' + esc(plan.model) + '）' : '')
     : (plan.source === 'manual' ? '手动方案' : '方案');
@@ -577,8 +568,7 @@ function renderSplitPanel(id, plan){
     + '<span class="sp-status" id="split-status-' + id + '">' + sourceLabel + (plan.updatedAt ? ' · ' + esc(new Date(plan.updatedAt).toLocaleString()) : '') + '</span></div>'
     + '<div class="sp-products">' + cards + '</div>'
     + '<div class="sp-row sp-ignored"><span class="sp-label">未采用</span><span class="sp-opts">' + ignored + '</span></div>'
-    + '<div class="sp-row"><span class="sp-label">图片</span><span class="sp-imgs">' + images + '</span></div>'
-    + '<div class="sp-status">图片可同时属于多个产品（点数字切换）；选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算。</div>';
+    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算。</div>';
 }
 
 async function runSplitAnalysis(id){
@@ -607,18 +597,6 @@ function moveSplitOption(id, text, target){
   plan.ignoredOptions = (plan.ignoredOptions || []).filter((value) => value !== text);
   if (target >= 0 && plan.products[target]) plan.products[target].options = [...(plan.products[target].options || []), text];
   else plan.ignoredOptions = [...plan.ignoredOptions, text];
-  plan.source = 'manual';
-  renderSplitPanel(id, plan);
-}
-
-function toggleSplitImage(id, imageId, index){
-  const plan = SPLITS.get(String(id));
-  if (!plan || !plan.products[index]) return;
-  const product = plan.products[index];
-  const list = (product.imageIds || []).map(String);
-  product.imageIds = list.includes(String(imageId))
-    ? list.filter((value) => value !== String(imageId))
-    : [...list, String(imageId)];
   plan.source = 'manual';
   renderSplitPanel(id, plan);
 }
@@ -927,8 +905,6 @@ document.addEventListener('click', (e) => {
   }
   const save = e.target.closest('button[data-split-save]');
   if (save) { void saveSplitPlan(String(save.dataset.splitSave)); return; }
-  const imgBtn = e.target.closest('button[data-split-image]');
-  if (imgBtn) { toggleSplitImage(String(imgBtn.dataset.splitImage), String(imgBtn.dataset.img), Number(imgBtn.dataset.idx)); }
 });
 document.addEventListener('input', (e) => {
   const nameInput = e.target.closest('input[data-split-name]');
