@@ -207,6 +207,10 @@ function listingBadge(it){
 function row(it){
   const isBundle = it.status === 'bundle';
   const manual = it.bundleManual || null;
+  // The manual verdict wins over the automatic one; bundles go through the
+  // split flow, so the single-product publish preview only makes sense for
+  // regular products.
+  const effectiveBundle = manual === 'bundle' ? true : manual === 'clear' ? false : isBundle;
   const thumbs = (it.gallery || []).slice(0, 6);
   const overflow = (it.gallery || []).length - thumbs.length;
   const bundleBtn = (value, label, cls) =>
@@ -233,11 +237,10 @@ function row(it){
     + '<div class="bundle-actions"><span class="muted">判定：</span>'
     + bundleBtn('bundle', '捆绑', 'red') + bundleBtn('clear', '正常', 'green') + bundleBtn('auto', '自动', 'gray')
     + '<span class="bstate" data-bstate="' + it.id + '"></span></div>'
-    + (isBundle
+    + (effectiveBundle
       ? '<div class="line"><button type="button" class="split-toggle" data-split-id="' + it.id + '">拆分 ▾'
         + (it.hasSplitPlan ? '（已保存）' : '') + '</button></div>'
-      : '')
-    + '<div class="line"><button type="button" class="split-toggle" data-pp-id="' + it.id + '">发布预览 ▾</button></div>'
+      : '<div class="line"><button type="button" class="split-toggle" data-pp-id="' + it.id + '">发布预览 ▾</button></div>')
     + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
     + '</div></article>';
 }
