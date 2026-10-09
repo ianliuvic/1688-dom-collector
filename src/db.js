@@ -2761,6 +2761,24 @@ export function createDatabase(databaseUrl) {
     return { total: counts.rows[0]?.total ?? 0, limit: safeLimit, offset: safeOffset, items: result.rows };
   }
 
+  /** Latest 1688 sale quantity per style number / WordPress post id (shop scan data). */
+  async function listProductSaleQuantities({ styles = [], wpPostIds = [] } = {}) {
+    const styleList = [...new Set((styles ?? []).map((value) => String(value).trim()).filter(Boolean))];
+    const postList = [...new Set((wpPostIds ?? []).map((value) => String(value).trim()).filter((value) => /^\d+$/.test(value)))];
+    if (!styleList.length && !postList.length) return [];
+    const result = await pool.query(`SELECT DISTINCT ON (publications.style_no)
+      publications.style_no, publications.wp_post_id, products.offer_id,
+      products.sale_quantity, products.sale_quantity_text, products.availability_status,
+      shops.shop_name, products.last_crawled_at
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id=publications.product_detail_id
+      JOIN shop_products products ON products.offer_id=details.offer_id
+      JOIN shop_profiles shops ON shops.id=products.shop_id
+      WHERE publications.style_no = ANY($1) OR publications.wp_post_id = ANY($2::bigint[])
+      ORDER BY publications.style_no, products.last_crawled_at DESC NULLS LAST`, [styleList, postList]);
+    return result.rows;
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -2773,7 +2791,7 @@ export function createDatabase(databaseUrl) {
     listProductCatalog, listDetailsMissingBundleAudit, saveProductBundleStatus,
     setProductBundleManual, listBundleRecheckRows,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
-    summarizeWordPressPublications, listWordPressPublications,
+    summarizeWordPressPublications, listWordPressPublications, listProductSaleQuantities,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,

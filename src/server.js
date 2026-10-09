@@ -4056,6 +4056,28 @@ app.get('/api/product-details/:id/wordpress', { preHandler: requireApiKey }, asy
 // plus a filterable listing. Bearer or dashboard Basic auth.
 app.get('/api/wordpress/publications/summary', { preHandler: requireDashboardOrApiKey }, async () => db.summarizeWordPressPublications());
 
+// 1688 sale quantities for a set of style numbers and/or WordPress post ids
+// (latest shop scan per product); used by the portal catalog "Best selling" sort.
+app.get('/api/sales/by-styles', { preHandler: requireApiKey }, async (request, reply) => {
+  const styles = String(request.query?.styles ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+  const wpPostIds = String(request.query?.wpPostIds ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+  if (!styles.length && !wpPostIds.length) return reply.code(400).send({ error: 'styles_or_wp_post_ids_required' });
+  if (styles.length > 500 || wpPostIds.length > 500) return reply.code(400).send({ error: 'too_many_values', max: 500 });
+  const rows = await db.listProductSaleQuantities({ styles, wpPostIds });
+  return {
+    sales: rows.map((row) => ({
+      styleNo: row.style_no ?? null,
+      wpPostId: row.wp_post_id == null ? null : String(row.wp_post_id),
+      offerId: row.offer_id ?? null,
+      saleQuantity: row.sale_quantity == null ? null : Number(row.sale_quantity),
+      saleQuantityText: row.sale_quantity_text ?? null,
+      shopName: row.shop_name ?? null,
+      availability: row.availability_status ?? null,
+      lastCrawledAt: row.last_crawled_at ?? null,
+    })),
+  };
+});
+
 // Stock audit across published products: what each page claims (sample
 // available vs made to order) against the SKU stock stored in its payload.
 app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboardOrApiKey }, async (request) => ({
