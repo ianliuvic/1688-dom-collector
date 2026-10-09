@@ -371,6 +371,7 @@ export function createCollector({
       // page (works for shop offerlist pages that no longer expose the plugin
       // mtop API); optionally probe the "next page" control.
       const network = [];
+      const requests = [];
       const onResponse = async (response) => {
         try {
           const url = response.url();
@@ -382,7 +383,18 @@ export function createCollector({
           network.push({ url, status: response.status(), contentType, body: body.slice(0, 400000) });
         } catch { /* ignore */ }
       };
+      const onRequest = (request) => {
+        try {
+          const url = request.url();
+          if (!/1688\.com/.test(url) || !/(h5api|mtop)/i.test(url)) return;
+          requests.push({
+            method: request.method(), url: url.slice(0, 1300),
+            postData: String(request.postData() || '').slice(0, 2000),
+          });
+        } catch { /* ignore */ }
+      };
       page.on('response', onResponse);
+      page.on('request', onRequest);
       try {
         await page.goto(job.url, { waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(job.options.waitMs || 8000);
@@ -393,15 +405,9 @@ export function createCollector({
         await fs.writeFile(domPath, await page.content(), 'utf8');
         const offerAnchors = await page.evaluate(() => Array.from(document.querySelectorAll('a[href*="detail.1688.com/offer/"]')).map((a) => a.href))
           .catch(() => []);
-        const extractedData = {
-          offerAnchorCount: offerAnchors.length,
-          offerAnchors: offerAnchors.slice(0, 60),
-          networkCount: network.length,
-          network: network.slice(0, 150).map((entry) => ({
-            url: entry.url, status: entry.status, len: entry.body.length,
-            peek: /mtop|api|list|offer|async/i.test(entry.url) ? entry.body.slice(0, 800) : '',
-          })),
-        };
+        let nextInfo = null;
+        let afterNextUrl = null;
+        let afterNextIndicator = null;
         if (job.options.tryNext !== false) {
           const clicked = await page.evaluate(() => {
             const candidates = Array.from(document.querySelectorAll('a,button,li'));
@@ -413,18 +419,35 @@ export function createCollector({
             return info;
           }).catch(() => null);
           await page.waitForTimeout(6000);
-          const page2Anchors = await page.evaluate(() => Array.from(document.querySelectorAll('a[href*="detail.1688.com/offer/"]')).map((a) => a.href))
-            .catch(() => []);
-          extractedData.nextClick = clicked;
-          extractedData.afterNextUrl = page.url();
-          extractedData.afterNextOfferCount = page2Anchors.length;
-          extractedData.afterNextAnchors = page2Anchors.slice(0, 10);
+          const indicator = await page.evaluate(() => {
+            const el = Array.from(document.querySelectorAll('label,span,div'))
+              .find((node) => /^\d+\s*\/\s*\d+$/.test((node.textContent || '').trim()));
+            return el ? (el.parentElement?.textContent || el.textContent || '').trim().slice(0, 40) : null;
+          }).catch(() => null);
+          nextInfo = clicked;
+          afterNextUrl = page.url();
+          afterNextIndicator = indicator;
           await fs.writeFile(domPath.replace(/\.html$/, '-next.html'), await page.content(), 'utf8');
         }
+        const extractedData = {
+          offerAnchorCount: offerAnchors.length,
+          offerAnchors: offerAnchors.slice(0, 60),
+          networkCount: network.length,
+          requestCount: requests.length,
+          requests,
+          network: network.slice(0, 150).map((entry) => ({
+            url: entry.url, status: entry.status, len: entry.body.length,
+            peek: /mtop|api|list|offer|async/i.test(entry.url) ? entry.body.slice(0, 800) : '',
+          })),
+          nextClick: nextInfo,
+          afterNextUrl,
+          afterNextIndicator,
+        };
         await fs.writeFile(path.join(jobPath, 'network.json'), JSON.stringify(network, null, 1), 'utf8');
         return { status: 'completed', title, finalUrl, domPath, screenshotPath: null, extractedData, error: null };
       } finally {
         page.off('response', onResponse);
+        page.off('request', onRequest);
       }
     }
 
