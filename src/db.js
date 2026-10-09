@@ -110,15 +110,6 @@ export function createDatabase(databaseUrl) {
       ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS ingestion_eligible boolean NOT NULL DEFAULT true;
       ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS ingestion_policy text;
       ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS ingestion_reason text;
-      UPDATE shop_products products SET
-        ingestion_eligible = products.category IN ('沙滩防晒服', '沙滩裙、沙滩套装'),
-        ingestion_policy = 'yipin_swim_coverups_only',
-        ingestion_reason = CASE
-          WHEN products.category IN ('沙滩防晒服', '沙滩裙、沙滩套装') THEN NULL
-          ELSE 'source_category_is_not_swim_coverup'
-        END
-      FROM shop_profiles shops
-      WHERE shops.id=products.shop_id AND lower(shops.domain)='shop478x140nz9144.1688.com';
       CREATE INDEX IF NOT EXISTS shop_products_availability_idx
         ON shop_products (shop_id, availability_status);
       CREATE TABLE IF NOT EXISTS shop_product_snapshots (
@@ -137,6 +128,28 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS shop_product_snapshots_observed_idx
         ON shop_product_snapshots (observed_at);
+      -- Restore shop category names from historical scan snapshots for rows
+      -- whose category was cleared by a scan source that no longer reports it.
+      UPDATE shop_products products SET category = latest.category_name
+      FROM (
+        SELECT DISTINCT ON (snapshots.shop_product_id)
+          snapshots.shop_product_id,
+          NULLIF(COALESCE(snapshots.raw_data->>'categoryName', snapshots.raw_data->>'category'), '') AS category_name
+        FROM shop_product_snapshots snapshots
+        WHERE NULLIF(COALESCE(snapshots.raw_data->>'categoryName', snapshots.raw_data->>'category'), '') IS NOT NULL
+        ORDER BY snapshots.shop_product_id, snapshots.observed_at DESC
+      ) latest
+      WHERE products.id = latest.shop_product_id
+        AND (products.category IS NULL OR products.category = '');
+      UPDATE shop_products products SET
+        ingestion_eligible = COALESCE(products.category IN ('沙滩防晒服', '沙滩裙、沙滩套装'), false),
+        ingestion_policy = 'yipin_swim_coverups_only',
+        ingestion_reason = CASE
+          WHEN products.category IN ('沙滩防晒服', '沙滩裙、沙滩套装') THEN NULL
+          ELSE 'source_category_is_not_swim_coverup'
+        END
+      FROM shop_profiles shops
+      WHERE shops.id=products.shop_id AND lower(shops.domain)='shop478x140nz9144.1688.com';
       CREATE TABLE IF NOT EXISTS product_details (
         id bigserial PRIMARY KEY,
         offer_id text UNIQUE,
@@ -735,9 +748,11 @@ export function createDatabase(databaseUrl) {
     try {
       await client.query('BEGIN');
       const previousRows = await client.query(
-        'SELECT offer_id, availability_status FROM shop_products WHERE shop_id=$1 FOR UPDATE',
+        'SELECT offer_id, availability_status, category FROM shop_products WHERE shop_id=$1 FOR UPDATE',
         [shop.id],
       );
+      const previousCategoryById = new Map(previousRows.rows
+        .map((row) => [String(row.offer_id), row.category]));
       const knownBefore = new Set(previousRows.rows.map((row) => String(row.offer_id)));
       const activeBefore = new Set(previousRows.rows
         .filter((row) => row.availability_status !== 'delisted')
@@ -764,7 +779,10 @@ export function createDatabase(databaseUrl) {
         if (!knownBefore.has(offerId)) addedOfferIds.push(offerId);
         else if (!activeBefore.has(offerId)) relistedOfferIds.push(offerId);
         const product = normalizeOffer(offer);
-        const ingestion = evaluateShopProductPolicy([{ domain: shop.domain, category: product.category }]);
+        // Keep the previously known source category when a scan source stops
+        // reporting one, so shop policies stay stable across scans.
+        const effectiveCategory = product.category ?? previousCategoryById.get(offerId) ?? null;
+        const ingestion = evaluateShopProductPolicy([{ domain: shop.domain, category: effectiveCategory }]);
         const productResult = await client.query(`
           INSERT INTO shop_products (
             shop_id, offer_id, title, category, price, currency, image_url, product_url,
@@ -773,7 +791,7 @@ export function createDatabase(databaseUrl) {
             last_seen_in_scan_at, delisted_at, last_crawled_at
           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'active',$15,$16,$17,now(),NULL,now())
           ON CONFLICT (shop_id, offer_id) DO UPDATE SET
-            title=EXCLUDED.title, category=EXCLUDED.category, price=EXCLUDED.price,
+            title=EXCLUDED.title, category=COALESCE(EXCLUDED.category, shop_products.category), price=EXCLUDED.price,
             currency=EXCLUDED.currency, image_url=EXCLUDED.image_url, product_url=EXCLUDED.product_url,
             sale_quantity=EXCLUDED.sale_quantity, sale_quantity_text=EXCLUDED.sale_quantity_text,
             listing_time=COALESCE(EXCLUDED.listing_time, shop_products.listing_time),
