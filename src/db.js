@@ -104,6 +104,11 @@ export function createDatabase(databaseUrl) {
       CREATE INDEX IF NOT EXISTS shop_products_listing_idx ON shop_products (listing_time);
       CREATE INDEX IF NOT EXISTS shop_products_sales_idx ON shop_products (sale_quantity);
       CREATE INDEX IF NOT EXISTS shop_products_status_idx ON shop_products (status);
+      -- The page module API reports listing times as epoch-millisecond
+      -- strings; older inserts stored NULL. Recover them from the raw offer.
+      UPDATE shop_products SET listing_time = to_timestamp((raw_data->>'gmtCreate')::numeric / 1000.0)
+      WHERE listing_time IS NULL
+        AND raw_data->>'gmtCreate' ~ '^[0-9]{13}$';
       ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS availability_status text NOT NULL DEFAULT 'active';
       ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS last_seen_in_scan_at timestamptz;
       ALTER TABLE shop_products ADD COLUMN IF NOT EXISTS delisted_at timestamptz;
@@ -2832,6 +2837,12 @@ function parseNumber(value) {
 
 function parseTimestamp(value) {
   if (!value) return null;
+  const raw = String(value).trim();
+  if (/^\d{10,13}$/.test(raw)) {
+    // Epoch strings (seconds or milliseconds) are not valid Date strings.
+    const epoch = new Date(raw.length <= 10 ? Number(raw) * 1000 : Number(raw));
+    return Number.isNaN(epoch.getTime()) ? null : epoch.toISOString();
+  }
   const date = new Date(String(value).replace(/年|\//g, '-').replace(/月/g, '-').replace(/日/g, ''));
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
