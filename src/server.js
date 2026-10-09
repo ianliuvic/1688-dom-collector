@@ -4406,6 +4406,7 @@ app.post('/api/selection/products/:id/portal-publish', { preHandler: requireDash
       images: Array.isArray(request.body?.images) ? request.body.images : null,
       target: request.body?.target === 'production' ? 'production' : 'staging',
     });
+    portalStagingActiveCache = { at: 0, ids: null, warning: null };
     return {
       status: 'synced', productDetailId,
       portal: {
@@ -4454,6 +4455,7 @@ app.post('/api/selection/products/:id/portal-unpublish', { preHandler: requireDa
       return reply.code(502).send({ error: 'portal_unpublish_failed', message: String(message) });
     }
     await db.markPortalPublicationArchived(productDetailId);
+    portalStagingActiveCache = { at: 0, ids: null, warning: null };
     return {
       status: 'archived',
       productDetailId,
