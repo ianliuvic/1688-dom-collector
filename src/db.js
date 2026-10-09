@@ -2766,6 +2766,7 @@ export function createDatabase(databaseUrl) {
     shopId = '', category1688 = '', categoryWp = '',
     colorMin = null, colorMax = null, sizeMin = null, sizeMax = null,
     saleMin = null, monthlyMin = null, priceMin = null, priceMax = null,
+    listedFrom = '', listedTo = '',
     portal = '', sort = 'sales', dir = 'desc', limit = 100, offset = 0,
   } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
@@ -2793,6 +2794,14 @@ export function createDatabase(databaseUrl) {
     const minMonthly = num(monthlyMin); if (minMonthly !== null) { values.push(minMonthly); conditions.push(`coalesce(thirty_book_count, 0) >= $${values.length}`); }
     const minPrice = num(priceMin); if (minPrice !== null) { values.push(minPrice); conditions.push(`coalesce(price_min, 0) >= $${values.length}`); }
     const maxPrice = num(priceMax); if (maxPrice !== null) { values.push(maxPrice); conditions.push(`coalesce(price_min, 0) <= $${values.length}`); }
+    const dayValue = (value) => {
+      const text = String(value ?? '').trim().slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
+    };
+    const fromDay = dayValue(listedFrom);
+    if (fromDay) { values.push(fromDay); conditions.push(`listing_time >= $${values.length}::date`); }
+    const toDay = dayValue(listedTo);
+    if (toDay) { values.push(toDay); conditions.push(`listing_time < ($${values.length}::date + 1)`); }
     const portalFilter = ['none', 'published', 'failed'].includes(String(portal)) ? String(portal) : '';
     if (portalFilter === 'none') conditions.push(`portal_product_id IS NULL`);
     else if (portalFilter === 'published') conditions.push(`portal_product_id IS NOT NULL AND portal_error IS NULL`);

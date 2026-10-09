@@ -4240,6 +4240,7 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
     sizeMin: request.query?.sizeMin, sizeMax: request.query?.sizeMax,
     saleMin: request.query?.saleMin, monthlyMin: request.query?.monthlyMin,
     priceMin: request.query?.priceMin, priceMax: request.query?.priceMax,
+    listedFrom: request.query?.listedFrom, listedTo: request.query?.listedTo,
     portal: request.query?.portal,
     sort: request.query?.sort, dir: request.query?.dir,
     limit: request.query?.limit, offset: request.query?.offset,

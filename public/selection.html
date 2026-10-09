@@ -15,6 +15,7 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .filters label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--muted)}
 .filters select,.filters input{border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12.5px;background:#fff;color:var(--text);outline:none;min-width:88px}
 .filters input[type=number]{width:88px}
+.filters input[type=date]{width:138px}
 .filters .pair{display:flex;gap:4px}
 .filters button{border:1px solid var(--line);border-radius:8px;padding:6px 12px;background:#fff;cursor:pointer;font-size:12.5px}
 .filters button:hover{border-color:#98a2b3}
@@ -133,6 +134,8 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
     <option value="published">已发布</option>
     <option value="failed">发布失败</option>
   </select></label>
+  <label>上架时间 起<input id="listedFrom" type="date"></label>
+  <label>上架时间 止<input id="listedTo" type="date"></label>
   <label>每页<select id="pageSize"><option>100</option><option>200</option><option>300</option></select></label>
   <span class="spacer"></span>
   <button id="reset">重置</button>
@@ -174,6 +177,8 @@ function filterParams() {
   add('monthlyMin', $('monthlyMin').value.trim());
   add('priceMin', $('priceMin').value.trim());
   add('priceMax', $('priceMax').value.trim());
+  add('listedFrom', $('listedFrom').value);
+  add('listedTo', $('listedTo').value);
   add('portal', $('portalFilter').value);
   add('sort', $('sort').value);
   add('dir', state.dir);
@@ -516,6 +521,8 @@ $('shop').addEventListener('change', rerun);
 $('category').addEventListener('change', rerun);
 $('wpCategory').addEventListener('change', rerun);
 $('portalFilter').addEventListener('change', rerun);
+$('listedFrom').addEventListener('change', rerun);
+$('listedTo').addEventListener('change', rerun);
 $('sort').addEventListener('change', rerun);
 $('pageSize').addEventListener('change', () => { state.pageSize = Number($('pageSize').value) || 100; rerun(); });
 $('dir').addEventListener('click', () => { state.dir = state.dir === 'desc' ? 'asc' : 'desc'; $('dir').textContent = state.dir === 'desc' ? '降序 ↓' : '升序 ↑'; rerun(); });
@@ -523,7 +530,7 @@ $('prev').addEventListener('click', () => { if (state.page > 1) { state.page -= 
 $('next').addEventListener('click', () => { state.page += 1; void load(); });
 $('pageJump').addEventListener('change', () => { const value = Number($('pageJump').value); if (value >= 1) { state.page = value; void load(); } });
 $('reset').addEventListener('click', () => {
-  for (const id of ['shop', 'category', 'wpCategory', 'colorMin', 'colorMax', 'sizeMin', 'sizeMax', 'saleMin', 'monthlyMin', 'priceMin', 'priceMax', 'portalFilter']) $(id).value = '';
+  for (const id of ['shop', 'category', 'wpCategory', 'colorMin', 'colorMax', 'sizeMin', 'sizeMax', 'saleMin', 'monthlyMin', 'priceMin', 'priceMax', 'portalFilter', 'listedFrom', 'listedTo']) $(id).value = '';
   $('sort').value = 'sales'; state.dir = 'desc'; $('dir').textContent = '降序 ↓';
   $('pageJump').value = ''; rerun();
 });
