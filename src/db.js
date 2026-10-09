@@ -2943,6 +2943,39 @@ export function createDatabase(databaseUrl) {
     return { productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, wpImages, detailImages };
   }
 
+  /** Per-SKU stock (style-colour-size) captured from LinkFox / browser for the selection page. */
+  async function getSelectionProductSkus(productDetailId) {
+    const id = Number(productDetailId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const publication = await pool.query(`SELECT publications.style_no, details.offer_id, details.last_crawled_at::text AS captured_at
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id = publications.product_detail_id
+      WHERE publications.product_detail_id = $1`, [id]);
+    const row = publication.rows[0];
+    if (!row) return null;
+    const result = await pool.query(`SELECT sku_key, sku_text, variant_sku, stock::float8 AS stock, price::float8 AS price,
+        option_data, image_source_url, image_storage_path
+      FROM product_detail_skus WHERE product_detail_id = $1 ORDER BY id`, [id]);
+    const pick = (options, pattern) => {
+      for (const [key, value] of Object.entries(options ?? {})) {
+        if (pattern.test(String(key)) && value !== null && value !== undefined && String(value).trim() !== '') {
+          return String(value).trim();
+        }
+      }
+      return null;
+    };
+    const skus = result.rows.map((sku) => ({
+      skuKey: sku.sku_key,
+      variantSku: sku.variant_sku ?? null,
+      color: pick(sku.option_data, /(颜色|色|color|colour)/i),
+      size: pick(sku.option_data, /(尺码|尺寸|码数|size)/i),
+      stock: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock),
+      price: sku.price === null || sku.price === undefined ? null : Number(sku.price),
+      image: sku.image_storage_path ? selectionImageUrl(row.offer_id, sku.image_storage_path) : (sku.image_source_url ?? null),
+    }));
+    return { productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, capturedAt: row.captured_at, skus };
+  }
+
   /** Latest 1688 sale quantity per style number / WordPress post id (shop scan data). */
   async function listProductSaleQuantities({ styles = [], wpPostIds = [] } = {}) {
     const styleList = [...new Set((styles ?? []).map((value) => String(value).trim()).filter(Boolean))];
@@ -2974,7 +3007,7 @@ export function createDatabase(databaseUrl) {
     setProductBundleManual, listBundleRecheckRows,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     summarizeWordPressPublications, listWordPressPublications, listProductSaleQuantities,
-    listSelectionProducts, listSelectionFacets, getSelectionProductMedia,
+    listSelectionProducts, listSelectionFacets, getSelectionProductMedia, getSelectionProductSkus,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,

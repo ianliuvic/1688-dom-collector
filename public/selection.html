@@ -51,6 +51,16 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 .media .grid{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .media .grid img{width:84px;height:84px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:#f2f4f7;cursor:zoom-in;display:block}
 .media .empty{color:var(--muted);font-size:12px;padding:6px 0}
+.sku-wrap{max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fff;margin-bottom:10px}
+.sku-table{width:100%;border-collapse:collapse;font-size:12px}
+.sku-table th,.sku-table td{padding:4px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+.sku-table th{position:sticky;top:0;background:#f9fafb;color:var(--muted);font-weight:600;z-index:1}
+.sku-table tr:last-child td{border-bottom:none}
+.sku-table .num{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+.sku-table .num.zero{color:var(--danger)}
+.sku-code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;word-break:break-all}
+.sku-color{display:inline-flex;align-items:center;gap:6px}
+.sku-color img{width:22px;height:22px;object-fit:cover;border-radius:4px;border:1px solid var(--line);display:block;background:#f2f4f7}
 .side{display:flex;flex-direction:column;gap:4px;font-size:12.5px}
 .side .k{color:var(--muted);font-size:11.5px;font-weight:600}
 .side .sale{font-size:16px;font-weight:800}
@@ -68,7 +78,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 <body>
 <header>
   <h1>选品</h1>
-  <p class="sub">当前已在 wearhongxiu 发布的产品（未发布/下架不显示）。捆绑产品只显示 keeper。展开每行可查看 WP 已发布图片与 1688 详情图，点击图片可看大图。</p>
+  <p class="sub">当前已在 wearhongxiu 发布的产品（未发布/下架不显示）。捆绑产品只显示 keeper。展开每行可查看各 SKU 库存（款号-颜色-尺码）与 WP 已发布图片、1688 详情图，图片可点击看大图。</p>
   <div class="nav">
     <a href="/products">全部产品</a>
     <a href="/selection" class="on">选品</a>
@@ -180,7 +190,7 @@ function rowHtml(it) {
     '<div class="body">' +
       '<div class="chips"><span class="lbl">颜色</span><span class="chip count">' + it.colorCount + ' 个</span>' + chips(it.colors) + '</div>' +
       '<div class="chips"><span class="lbl">尺码</span><span class="chip count">' + it.sizeCount + ' 个</span>' + chips(it.sizes, 14) + '</div>' +
-      '<button class="expand" data-media="' + esc(it.productDetailId) + '">查看图片 ▾</button>' +
+      '<button class="expand" data-media="' + esc(it.productDetailId) + '">查看图片与库存 ▾</button>' +
       '<div class="media" hidden></div>' +
     '</div>' +
     '<div class="side">' +
@@ -221,23 +231,47 @@ async function toggleMedia(button) {
   const row = button.closest('.row');
   const box = row.querySelector('.media');
   const id = button.dataset.media;
-  if (!box.hidden) { box.hidden = true; button.textContent = '查看图片 ▾'; return; }
-  button.textContent = '收起图片 ▴';
+  if (!box.hidden) { box.hidden = true; button.textContent = '查看图片与库存 ▾'; return; }
+  button.textContent = '收起 ▴';
   box.hidden = false;
   if (box.dataset.loaded) return;
-  box.innerHTML = '<div class="empty">加载图片…</div>';
-  try {
-    const data = await (await fetch('/api/selection/products/' + encodeURIComponent(id) + '/media')).json();
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  const [mediaResult, skuResult] = await Promise.allSettled([
+    fetch('/api/selection/products/' + encodeURIComponent(id) + '/media').then((response) => response.json()),
+    fetch('/api/selection/products/' + encodeURIComponent(id) + '/skus').then((response) => response.json()),
+  ]);
+  let html = '';
+  if (skuResult.status === 'fulfilled' && skuResult.value && Array.isArray(skuResult.value.skus)) {
+    const data = skuResult.value;
+    const skus = data.skus;
+    const total = skus.reduce((sum, sku) => sum + (Number(sku.stock) || 0), 0);
+    html += '<h4>SKU 库存（' + skus.length + ' 个 · 合计 ' + total + (data.capturedAt ? ' · 采集于 ' + esc(String(data.capturedAt).slice(0, 10)) : '') + '）</h4>';
+    html += skus.length
+      ? '<div class="sku-wrap"><table class="sku-table"><thead><tr><th>款号</th><th>颜色</th><th>尺码</th><th class="num">库存</th><th class="num">单价</th></tr></thead><tbody>'
+        + skus.map((sku) => '<tr>' +
+            '<td class="sku-code">' + esc(sku.variantSku || sku.skuKey) + '</td>' +
+            '<td><span class="sku-color">' + (sku.image ? '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(sku.image) + '" alt="" onerror="this.style.display=\'none\'">' : '') + esc(sku.color || '-') + '</span></td>' +
+            '<td>' + esc(sku.size || '-') + '</td>' +
+            '<td class="num' + (sku.stock === 0 ? ' zero' : '') + '">' + (sku.stock === null ? '-' : sku.stock) + '</td>' +
+            '<td class="num">' + (sku.price === null ? '-' : '¥' + sku.price) + '</td>' +
+          '</tr>').join('')
+        + '</tbody></table></div>'
+      : '<div class="empty">（无 SKU 数据）</div>';
+  } else {
+    html += '<h4>SKU 库存</h4><div class="empty">SKU 数据加载失败</div>';
+  }
+  if (mediaResult.status === 'fulfilled' && mediaResult.value) {
+    const data = mediaResult.value;
     const grid = (items) => items.length
       ? '<div class="grid">' + items.map((image) => '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(image.url) + '" alt="' + esc(image.alt || '') + '" onclick="openLightbox(this.dataset.full || this.src)" data-full="' + esc(image.url) + '" onerror="this.style.opacity=.25">').join('') + '</div>'
       : '<div class="empty">（无）</div>';
-    box.innerHTML =
-      '<h4>WP 已发布图片（' + data.wpImages.length + '）</h4>' + grid(data.wpImages) +
+    html += '<h4>WP 已发布图片（' + data.wpImages.length + '）</h4>' + grid(data.wpImages) +
       '<h4>1688 详情图（' + data.detailImages.length + '，未下载也可预览）</h4>' + grid(data.detailImages);
-    box.dataset.loaded = '1';
-  } catch (error) {
-    box.innerHTML = '<div class="empty">图片加载失败：' + esc(error.message || error) + '</div>';
+  } else {
+    html += '<h4>图片</h4><div class="empty">图片加载失败</div>';
   }
+  box.innerHTML = html;
+  box.dataset.loaded = '1';
 }
 
 function openLightbox(src) { if (!src) return; $('lightboxImg').src = src; $('lightbox').classList.add('on'); }

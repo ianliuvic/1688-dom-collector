@@ -4151,6 +4151,12 @@ app.get('/api/selection/products/:id/media', { preHandler: requireDashboardOrApi
   return media;
 });
 
+app.get('/api/selection/products/:id/skus', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const data = await db.getSelectionProductSkus(request.params.id);
+  if (!data) return reply.code(404).send({ error: 'not_found' });
+  return data;
+});
+
 // Stock audit across published products: what each page claims (sample
 // available vs made to order) against the SKU stock stored in its payload.
 app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboardOrApiKey }, async (request) => ({
