@@ -599,8 +599,8 @@ async function updatePortalCatalogMedia(portal, portalProductId, product, images
   const requested = new Map();
   for (const entry of images.slice(0, 500)) {
     const url = typeof entry?.url === 'string' ? entry.url.trim() : '';
-    if (!url || requested.has(url)) continue;
-    requested.set(url, entry.visible !== false);
+    if (!url) continue;
+    requested.set(url, (requested.get(url) ?? false) || entry.visible !== false);
   }
   if (!requested.size) return null;
   const urlById = new Map(media.map((item) => [item.id, item.url ?? '']));
@@ -698,12 +698,27 @@ async function publishProductToPortal(productDetailId, options = {}) {
     const url = stored ?? (/^\//.test(entry.url) ? `${config.publicBaseUrl}${entry.url}` : entry.url);
     return { url, visible: entry.visible, kind: 'detail' };
   });
-  const detailMediaUrls = [...new Set(finalImages.filter((entry) => entry.kind === 'detail' && entry.visible).map((entry) => entry.url))];
+  // A downloaded detail image can reuse an already stored file URL; the same URL
+  // must only appear once, with visible winning over hidden.
+  const mergedImages = [];
+  const mergedByUrl = new Map();
+  for (const entry of finalImages) {
+    const existing = mergedByUrl.get(entry.url);
+    if (existing) {
+      if (entry.visible) existing.visible = true;
+      if (entry.kind === 'wp') existing.kind = 'wp';
+      continue;
+    }
+    const copy = { ...entry };
+    mergedByUrl.set(entry.url, copy);
+    mergedImages.push(copy);
+  }
+  const detailMediaUrls = [...new Set(mergedImages.filter((entry) => entry.kind === 'detail' && entry.visible).map((entry) => entry.url))];
   try {
     const product = await importWordPressProductToPortal(identifier, portal, { mediaUrls: detailMediaUrls });
     let media = null;
-    if (finalImages && finalImages.length && product?.id) {
-      media = await updatePortalCatalogMedia(portal, product.id, product, finalImages);
+    if (mergedImages.length && product?.id) {
+      media = await updatePortalCatalogMedia(portal, product.id, product, mergedImages);
     }
     const portalBase = portal.url.replace(/\/$/, '');
     const saved = await db.savePortalPublication(productDetailId, {
@@ -717,12 +732,12 @@ async function publishProductToPortal(productDetailId, options = {}) {
         id: product.id, status: product.status, title: product.title,
         styleNumber: product.styleNumber, variantCount: (product.variants ?? []).length,
         mediaCount: (product.media ?? []).length,
-        mediaImages: finalImages ?? null,
+        mediaImages: mergedImages ?? null,
         target,
       } : { target },
       lastError: null,
     });
-    return { product, publication: saved, media, target, images: finalImages };
+    return { product, publication: saved, media, target, images: mergedImages };
   } catch (error) {
     const message = String(error?.message || error);
     await db.failPortalPublication(productDetailId, message, {
