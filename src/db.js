@@ -2772,7 +2772,11 @@ export function createDatabase(databaseUrl) {
     const safeOffset = Math.max(Number(offset) || 0, 0);
     const sortKey = ['sales', 'monthly', 'price', 'listing'].includes(String(sort)) ? String(sort) : 'sales';
     const direction = String(dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-    const num = (value) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; };
+    const num = (value) => {
+      if (value === null || value === undefined || String(value).trim() === '') return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
     const values = [];
     const conditions = [];
     const shopTerm = /^\d+$/.test(String(shopId ?? '').trim()) ? String(shopId).trim() : '';
