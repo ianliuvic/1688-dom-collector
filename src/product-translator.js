@@ -111,7 +111,7 @@ function hasMatchingIndices(sourceItems, translatedItems) {
   return translatedItems.every((item, index) => Number(item?.index) === index);
 }
 
-export function validateProductTranslation(source, translated) {
+export function validateProductTranslation(source, translated, options = {}) {
   if (!translated || typeof translated !== 'object') throw new Error('Translation response is not a JSON object.');
   if (typeof translated.title !== 'string' || typeof translated.description !== 'string'
       || typeof translated.sellerName !== 'string') {
@@ -153,7 +153,7 @@ export function validateProductTranslation(source, translated) {
   if (translated.priceTextCandidates.some((value) => typeof value !== 'string')) {
     throw new Error('Translation response contains a non-text price candidate.');
   }
-  validateGeneratedCatalogCopy(translated);
+  validateGeneratedCatalogCopy(translated, options);
   return translated;
 }
 
@@ -262,7 +262,7 @@ export async function translateProductDetail({ detail, targetLanguage = 'en', co
   const visualPrompt = `你是专业的泳装和服装B2B商品内容编辑。综合全部Gallery图片识别同一个产品，只返回严格JSON：{"title":"","description":""}。
 title必须根据图片重新命名，不能直译1688中文标题。使用4至15个英文单词的稳定产品名称，必须清楚体现产品的核心特点（品类、轮廓、结构、剪裁、部件），不得过于笼统或过短；不得含年份、New Arrival、Hot Sale、Cross-Border、AliExpress、Amazon、Export、Wholesale 等词。
 ${singleVariant
-    ? `本商品只有一个颜色/印花变体（原文：${JSON.stringify(colourValues[0])}）：标题或描述中必须体现该颜色/印花（请准确翻译成英文）。`
+    ? `本商品只有一个颜色/印花变体（原文：${JSON.stringify(colourValues[0])}）：标题和描述中都必须体现该颜色/印花（请准确翻译成英文）。`
     : `本商品有 ${colourValues.length} 个颜色/印花变体：标题和描述中都不得出现任何颜色、印花或图案词。`}
 description必须是35至120个英文单词的单段产品级描述。只写多张图片共同体现的稳定可见特点，例如品类、轮廓、领型、肩带、罩杯结构、开合、覆盖度、剪裁和套装组成；颜色/印花规则同上。不得描述单个SKU、促销、年份、平台、SEO关键词、穿着效果、材质、功能或不可见信息。
 中文标题仅可作为产品类别的弱提示，图片证据优先。不要输出Markdown或JSON之外的内容。
@@ -314,7 +314,10 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
     translated = restoreTranslationIdentity(source,
       { title: visualCopy.title, description: visualCopy.description, ...(structured || {}) });
     try {
-      translated = validateProductTranslation(source, translated);
+      // Single-colour products must name their colour/print; multi-colour
+      // products must stay colour-neutral. The visual prompt follows the same
+      // split, so the final validation has to allow the same terms.
+      translated = validateProductTranslation(source, translated, { allowVariantTerms: singleVariant });
       break;
     } catch (error) {
       if (attempt === 2) throw error;

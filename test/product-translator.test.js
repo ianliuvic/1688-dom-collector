@@ -92,8 +92,32 @@ test('rejects keyword-stuffed titles and color or print-specific descriptions', 
   }), /color or print/);
 });
 
-test('accepts a concise two-word product title', () => {
+test('requires a descriptive title and rejects two-word product names', () => {
   assert.doesNotThrow(() => validateGeneratedCatalogCopy({
-    title: 'Triangle Bikini', description,
+    title: 'Triangle Bikini Set with Tie Straps', description,
   }));
+  assert.throws(() => validateGeneratedCatalogCopy({
+    title: 'Triangle Bikini', description,
+  }), /4 to 15 word/);
+});
+
+test('allows colour or print terms only when variant terms are permitted', () => {
+  const coloredTitle = 'Black Tie-Back Triangle Bikini Set';
+  assert.throws(() => validateGeneratedCatalogCopy({ title: coloredTitle, description }), /color or print/);
+  assert.doesNotThrow(() => validateGeneratedCatalogCopy(
+    { title: coloredTitle, description }, { allowVariantTerms: true },
+  ));
+
+  const source = buildProductTranslationSource(detail);
+  const translated = {
+    title: 'Black Tie-Back Triangle Bikini Set', description, sellerName: 'Test Factory',
+    attributes: [{ index: 0, name: 'Fabric', value: 'Polyester' }],
+    skuDimensions: [{ index: 0, name: 'Color', values: ['Black', 'Blue'] },
+      { index: 1, name: 'Size', values: ['S', 'M'] }],
+    skuOptions: [{ index: 0, dimensionName: '颜色', text: 'Black', imageUrl: 'https://img/black.jpg' }],
+    skuRows: [{ index: 0, skuKey: 'black-S', skuText: 'Black S', options: { Color: 'Black', Size: 'S' } }],
+    priceTextCandidates: ['Minimum order: 2 pieces'],
+  };
+  assert.throws(() => validateProductTranslation(source, translated), /color or print/);
+  assert.doesNotThrow(() => validateProductTranslation(source, translated, { allowVariantTerms: true }));
 });
