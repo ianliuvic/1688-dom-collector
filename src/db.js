@@ -3013,9 +3013,10 @@ export function createDatabase(databaseUrl) {
   async function listPortalDelistedProducts() {
     const result = await pool.query(`SELECT publications.style_no, publications.portal_product_id,
         publications.portal_status, publications.result->>'target' AS portal_target,
-        publications.wp_status, src.shop_name, src.delisted_at::text AS delisted_at
+        wp.wp_status, src.shop_name, src.delisted_at::text AS delisted_at
       FROM product_portal_publications publications
       JOIN product_details details ON details.id = publications.product_detail_id
+      LEFT JOIN product_wordpress_publications wp ON wp.product_detail_id = publications.product_detail_id
       JOIN LATERAL (
         SELECT coalesce(shops.shop_name, shops.domain) AS shop_name, products.availability_status,
           products.delisted_at
