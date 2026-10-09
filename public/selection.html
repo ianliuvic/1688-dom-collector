@@ -39,6 +39,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 .badge.keeper{background:var(--warn)}.badge.delisted{background:#667085}.badge.active{background:var(--good)}
 .portal-badge.portal-ok{background:var(--good)}
 .portal-badge.portal-none{background:#98a2b3}
+.portal-badge.portal-archived{background:#b54708}
 .portal-badge.portal-fail{background:var(--danger)}
 .portal-panel{border:1px solid var(--line);border-radius:10px;background:#fff;padding:10px;margin-bottom:12px}
 .portal-panel h4{margin:0 0 4px;font-size:12.5px}
@@ -58,6 +59,9 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 .portal-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .portal-actions button.primary{border:1px solid var(--info);background:var(--info);color:#fff;border-radius:8px;padding:5px 14px;font-size:12.5px;cursor:pointer}
 .portal-actions button.primary:disabled{opacity:.55;cursor:default}
+.portal-actions button.danger{border:1px solid var(--danger);background:#fff;color:var(--danger);border-radius:8px;padding:5px 14px;font-size:12.5px;cursor:pointer}
+.portal-actions button.danger:hover{background:#fef3f2}
+.portal-actions button.danger:disabled{opacity:.55;cursor:default}
 .portal-msg{font-size:12px;color:var(--muted)}
 .portal-msg.error{color:var(--danger)}
 .portal-msg.ok{color:var(--good)}
@@ -113,6 +117,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 </header>
 
 <div class="filters">
+  <label>搜索<input id="search" type="search" placeholder="款号 / 标题 / offer / WP#" style="min-width:200px"></label>
   <label>店铺<select id="shop"><option value="">全部店铺</option></select></label>
   <label>1688 类别<select id="category"><option value="">全部</option></select></label>
   <label>WP 类别<select id="wpCategory"><option value="">全部</option></select></label>
@@ -132,6 +137,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
     <option value="">全部</option>
     <option value="none">未发布</option>
     <option value="published">已发布</option>
+    <option value="archived">已归档（已移除）</option>
     <option value="failed">发布失败</option>
   </select></label>
   <label>上架时间 起<input id="listedFrom" type="date"></label>
@@ -143,6 +149,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 
 <div class="summary">
   <span>共 <b id="total">-</b> 个产品</span>
+  <span>已发布到 Portal：<b id="portalPublished">-</b> 个</span>
   <span id="range"></span>
   <span id="freshness" class="freshness"></span>
   <div class="pager">
@@ -166,6 +173,7 @@ const fmtSale = (value) => value == null ? '-' : String(value);
 function filterParams() {
   const params = new URLSearchParams();
   const add = (key, value) => { if (value !== '' && value != null) params.set(key, value); };
+  add('q', $('search').value.trim());
   add('shop', $('shop').value);
   add('category', $('category').value);
   add('wpCategory', $('wpCategory').value);
@@ -210,9 +218,11 @@ function rowHtml(it) {
   const title = it.wpTitle || ('1688 ' + (it.offerId || ''));
   const portalBadge = it.portalState === 'published'
     ? '<span class="badge portal-badge portal-ok" data-portal-badge="' + esc(it.productDetailId) + '">Portal 已发布' + (it.portalTarget ? ' · ' + esc(it.portalTarget === 'staging' ? 'staging' : 'prod') : '') + '</span>'
-    : it.portalState === 'failed'
-      ? '<span class="badge portal-badge portal-fail" data-portal-badge="' + esc(it.productDetailId) + '">Portal 失败</span>'
-      : '<span class="badge portal-badge portal-none" data-portal-badge="' + esc(it.productDetailId) + '">未发布</span>';
+    : it.portalState === 'archived'
+      ? '<span class="badge portal-badge portal-archived" data-portal-badge="' + esc(it.productDetailId) + '">Portal 已归档</span>'
+      : it.portalState === 'failed'
+        ? '<span class="badge portal-badge portal-fail" data-portal-badge="' + esc(it.productDetailId) + '">Portal 失败</span>'
+        : '<span class="badge portal-badge portal-none" data-portal-badge="' + esc(it.productDetailId) + '">未发布</span>';
   const badges = [
     it.bundleKeeper ? '<span class="badge keeper">keeper</span>' : '',
     it.availability && it.availability !== 'active' ? '<span class="badge delisted">1688 已下架</span>' : '',
@@ -251,9 +261,11 @@ async function load() {
   try {
     const data = await (await fetch('/api/selection/products?' + filterParams())).json();
     state.total = data.total || 0;
+    state.portalPublished = data.portalPublished || 0;
     const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
     if (state.page > totalPages) { state.page = totalPages; state.loading = false; return load(); }
     $('total').textContent = state.total;
+    $('portalPublished').textContent = state.portalPublished;
     $('pageLabel').textContent = state.page;
     $('pageTotal').textContent = totalPages;
     const start = state.total === 0 ? 0 : (state.page - 1) * state.pageSize + 1;
@@ -302,11 +314,14 @@ function portalPanelHtml(id) {
   const draft = portalDrafts[id];
   if (!draft) return '';
   const portal = draft.portal;
+  const isArchived = Boolean(portal && portal.productId && String(portal.status || '').toUpperCase() === 'ARCHIVED');
   const targetName = portal && portal.target ? (portal.target === 'staging' ? 'staging' : '生产') : '';
   const stateText = portal && portal.error
     ? '上次发布失败'
     : portal && portal.productId
-      ? '已发布' + (targetName ? ' · ' + targetName : '') + ' · ' + esc(portal.status || 'ACTIVE') + (portal.syncedAt ? ' · ' + esc(String(portal.syncedAt).slice(0, 16).replace('T', ' ')) : '')
+      ? (isArchived
+        ? '已从 Portal 移除（归档）' + (portal.syncedAt ? ' · ' + esc(String(portal.syncedAt).slice(0, 16).replace('T', ' ')) : '')
+        : '已发布' + (targetName ? ' · ' + targetName : '') + ' · ' + esc(portal.status || 'ACTIVE') + (portal.syncedAt ? ' · ' + esc(String(portal.syncedAt).slice(0, 16).replace('T', ' ')) : ''))
       : '未发布';
   const selected = draft.images.filter((image) => image.visible).length;
   const tiles = draft.images.map((image, index) =>
@@ -323,7 +338,8 @@ function portalPanelHtml(id) {
     (draft.images.length ? '<div class="portal-grid">' + tiles + '</div>' : '<div class="empty">该产品没有可选图片</div>') +
     '<div class="portal-actions">' +
       '<button type="button" class="primary" data-portal-publish="' + esc(id) + '"' + (draft.saving ? ' disabled' : '') + '>' +
-        (draft.saving ? '发布中…' : portal && portal.productId ? '更新发布到 Portal' : '发布到 Portal') + '</button>' +
+        (draft.saving ? '发布中…' : portal && portal.productId && !isArchived ? '更新发布到 Portal' : portal && portal.productId ? '重新发布到 Portal' : '发布到 Portal') + '</button>' +
+      (portal && portal.productId && !isArchived ? '<button type="button" class="danger" data-portal-unpublish="' + esc(id) + '"' + (draft.saving ? ' disabled' : '') + '>从 Portal 移除（归档）</button>' : '') +
       (draft.message ? '<span class="portal-msg ok">' + esc(draft.message) + '</span>' : '') +
       (draft.error ? '<span class="portal-msg error">' + esc(draft.error) + '</span>' : '') +
     '</div></div>';
@@ -338,6 +354,7 @@ function updatePortalBadge(id, stateName, label) {
   const badge = document.querySelector('[data-portal-badge="' + id + '"]');
   if (!badge) return;
   if (stateName === 'published') { badge.className = 'badge portal-badge portal-ok'; badge.textContent = 'Portal 已发布' + (label ? ' · ' + label : ''); }
+  else if (stateName === 'archived') { badge.className = 'badge portal-badge portal-archived'; badge.textContent = 'Portal 已归档'; }
   else if (stateName === 'failed') { badge.className = 'badge portal-badge portal-fail'; badge.textContent = 'Portal 失败'; }
   else { badge.className = 'badge portal-badge portal-none'; badge.textContent = '未发布'; }
 }
@@ -378,6 +395,29 @@ async function publishPortal(id) {
   }
 }
 
+async function unpublishPortal(id) {
+  const draft = portalDrafts[id];
+  if (!draft || draft.saving) return;
+  if (!window.confirm('确定从 Portal（staging）移除该产品吗？产品将被归档，可随时重新发布恢复。')) return;
+  draft.saving = true; draft.message = ''; draft.error = '';
+  refreshPortalSlot(id);
+  try {
+    const response = await fetch('/api/selection/products/' + encodeURIComponent(id) + '/portal-unpublish', { method: 'POST' });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) throw new Error((data && (data.message || data.error)) || ('HTTP ' + response.status));
+    draft.portal = { ...(draft.portal || {}), status: 'ARCHIVED', error: null, syncedAt: new Date().toISOString() };
+    draft.message = '已从 Portal 移除（归档）';
+    updatePortalBadge(id, 'archived', null);
+    state.portalPublished = Math.max(0, (state.portalPublished || 0) - 1);
+    $('portalPublished').textContent = state.portalPublished;
+  } catch (error) {
+    draft.error = String((error && error.message) || error);
+  } finally {
+    draft.saving = false;
+    refreshPortalSlot(id);
+  }
+}
+
 document.addEventListener('click', (event) => {
   const toggle = event.target.closest('input[data-portal-toggle]');
   if (toggle) {
@@ -406,7 +446,9 @@ document.addEventListener('click', (event) => {
     return;
   }
   const publish = event.target.closest('button[data-portal-publish]');
-  if (publish) { void publishPortal(publish.dataset.portalPublish); }
+  if (publish) { void publishPortal(publish.dataset.portalPublish); return; }
+  const unpublish = event.target.closest('button[data-portal-unpublish]');
+  if (unpublish) { void unpublishPortal(unpublish.dataset.portalUnpublish); return; }
 });
 
 document.addEventListener('dragstart', (event) => {
@@ -530,12 +572,12 @@ $('prev').addEventListener('click', () => { if (state.page > 1) { state.page -= 
 $('next').addEventListener('click', () => { state.page += 1; void load(); });
 $('pageJump').addEventListener('change', () => { const value = Number($('pageJump').value); if (value >= 1) { state.page = value; void load(); } });
 $('reset').addEventListener('click', () => {
-  for (const id of ['shop', 'category', 'wpCategory', 'colorMin', 'colorMax', 'sizeMin', 'sizeMax', 'saleMin', 'monthlyMin', 'priceMin', 'priceMax', 'portalFilter', 'listedFrom', 'listedTo']) $(id).value = '';
+  for (const id of ['search', 'shop', 'category', 'wpCategory', 'colorMin', 'colorMax', 'sizeMin', 'sizeMax', 'saleMin', 'monthlyMin', 'priceMin', 'priceMax', 'portalFilter', 'listedFrom', 'listedTo']) $(id).value = '';
   $('sort').value = 'sales'; state.dir = 'desc'; $('dir').textContent = '降序 ↓';
   $('pageJump').value = ''; rerun();
 });
 let debounce = null;
-for (const id of ['colorMin', 'colorMax', 'sizeMin', 'sizeMax', 'saleMin', 'monthlyMin', 'priceMin', 'priceMax']) {
+for (const id of ['search', 'colorMin', 'colorMax', 'sizeMin', 'sizeMax', 'saleMin', 'monthlyMin', 'priceMin', 'priceMax']) {
   $(id).addEventListener('input', () => { window.clearTimeout(debounce); debounce = window.setTimeout(rerun, 450); });
 }
 

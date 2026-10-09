@@ -4233,6 +4233,7 @@ app.get('/api/selection/facets', { preHandler: requireDashboardOrApiKey }, async
 
 app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, async (request) => {
   const result = await db.listSelectionProducts({
+    q: request.query?.q,
     shopId: request.query?.shop,
     category1688: request.query?.category,
     categoryWp: request.query?.wpCategory,
@@ -4256,6 +4257,7 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
   };
   return {
     total: result.total, limit: result.limit, offset: result.offset,
+    portalPublished: result.portalPublished ?? 0,
     items: result.items.map((row) => ({
       productDetailId: row.product_detail_id,
       offerId: row.offer_id,
@@ -4279,7 +4281,7 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
       listingTime: row.listing_time ?? null,
       availability: row.availability_status ?? null,
       bundleKeeper: Boolean(row.is_bundle_keeper),
-      portalState: row.portal_error ? 'failed' : (row.portal_product_id ? 'published' : 'none'),
+      portalState: row.portal_error ? 'failed' : (row.portal_product_id ? (String(row.portal_status ?? '').toUpperCase() === 'ARCHIVED' ? 'archived' : 'published') : 'none'),
       portalProductId: row.portal_product_id ?? null,
       portalStatus: row.portal_status ?? null,
       portalTarget: row.portal_target ?? null,
@@ -4375,6 +4377,47 @@ app.post('/api/selection/products/:id/portal-publish', { preHandler: requireDash
   } catch (error) {
     const status = Number(error?.status) || 502;
     return reply.code(status).send({ error: error?.code || 'portal_publish_failed', message: String(error?.message || error) });
+  }
+});
+
+// Remove (archive) one product from the staging portal catalog and mark the
+// collector-side publication as archived; re-publishing restores it.
+app.post('/api/selection/products/:id/portal-unpublish', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const productDetailId = Number(request.params.id);
+  if (!Number.isInteger(productDetailId) || productDetailId <= 0) {
+    return reply.code(400).send({ error: 'invalid_product_id' });
+  }
+  const publication = await db.getPortalPublication(productDetailId);
+  if (!publication?.portal_product_id) {
+    return reply.code(409).send({ error: 'portal_product_not_linked', message: '该产品没有已发布到 Portal 的记录' });
+  }
+  const target = publication.result?.target ?? null;
+  if (target === 'production') {
+    return reply.code(409).send({ error: 'portal_target_not_staging', message: '该产品的发布目标是生产环境，不能从 staging 移除' });
+  }
+  if (!config.portalStagingApiUrl || !config.portalStagingAdminSecret) {
+    return reply.code(503).send({ error: 'portal_not_configured' });
+  }
+  try {
+    const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(publication.portal_product_id)}`, config.portalStagingApiUrl), {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${config.portalStagingAdminSecret}` },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok && response.status !== 404) {
+      const body = await response.json().catch(() => null);
+      const message = body?.error?.message ?? `Portal returned HTTP ${response.status}`;
+      return reply.code(502).send({ error: 'portal_unpublish_failed', message: String(message) });
+    }
+    await db.markPortalPublicationArchived(productDetailId);
+    return {
+      status: 'archived',
+      productDetailId,
+      portalProductId: publication.portal_product_id,
+      alreadyRemoved: response.status === 404,
+    };
+  } catch (error) {
+    return reply.code(502).send({ error: 'portal_unpublish_failed', message: String(error?.message || error) });
   }
 });
 

@@ -2401,6 +2401,17 @@ export function createDatabase(databaseUrl) {
     return saved.rows[0];
   }
 
+  /** Marks a portal publication as archived after the product was removed from the portal. */
+  async function markPortalPublicationArchived(productDetailId) {
+    const saved = await pool.query(`
+      UPDATE product_portal_publications
+      SET portal_status='ARCHIVED', last_error=NULL, last_synced_at=now(), updated_at=now()
+      WHERE product_detail_id=$1
+      RETURNING *
+    `, [productDetailId]);
+    return saved.rows[0] ?? null;
+  }
+
   /** Saved bundle split plan for one product detail (manual or LLM). */
   async function getProductSplitPlan(productDetailId) {    const result = await pool.query(
       'SELECT * FROM product_split_plans WHERE product_detail_id=$1', [productDetailId]);
@@ -2763,7 +2774,7 @@ export function createDatabase(databaseUrl) {
 
   /** Shortlist of published products for the selection page (filters + paging). */
   async function listSelectionProducts({
-    shopId = '', category1688 = '', categoryWp = '',
+    q = '', shopId = '', category1688 = '', categoryWp = '',
     colorMin = null, colorMax = null, sizeMin = null, sizeMax = null,
     saleMin = null, monthlyMin = null, priceMin = null, priceMax = null,
     listedFrom = '', listedTo = '',
@@ -2780,6 +2791,13 @@ export function createDatabase(databaseUrl) {
     };
     const values = [];
     const conditions = [];
+    // Free-text search across style number, WP title, 1688 offer id, WP post id and shop name.
+    const searchTerm = String(q ?? '').trim().slice(0, 120);
+    if (searchTerm) {
+      values.push(`%${searchTerm.replace(/[\\%_]/g, '\\$&')}%`);
+      const pattern = `$${values.length}`;
+      conditions.push(`(coalesce(style_no, '') ILIKE ${pattern} OR coalesce(offer_id::text, '') ILIKE ${pattern} OR coalesce(wp_post_id::text, '') ILIKE ${pattern} OR coalesce(wp_title, '') ILIKE ${pattern} OR coalesce(shop_name, '') ILIKE ${pattern})`);
+    }
     const shopTerm = /^\d+$/.test(String(shopId ?? '').trim()) ? String(shopId).trim() : '';
     if (shopTerm) { values.push(shopTerm); conditions.push(`shop_id::text = $${values.length}`); }
     const cat1688 = String(category1688 ?? '').trim().slice(0, 120);
@@ -2802,9 +2820,10 @@ export function createDatabase(databaseUrl) {
     if (fromDay) { values.push(fromDay); conditions.push(`listing_time >= $${values.length}::date`); }
     const toDay = dayValue(listedTo);
     if (toDay) { values.push(toDay); conditions.push(`listing_time < ($${values.length}::date + 1)`); }
-    const portalFilter = ['none', 'published', 'failed'].includes(String(portal)) ? String(portal) : '';
+    const portalFilter = ['none', 'published', 'archived', 'failed'].includes(String(portal)) ? String(portal) : '';
     if (portalFilter === 'none') conditions.push(`portal_product_id IS NULL`);
-    else if (portalFilter === 'published') conditions.push(`portal_product_id IS NOT NULL AND portal_error IS NULL`);
+    else if (portalFilter === 'published') conditions.push(`portal_product_id IS NOT NULL AND portal_error IS NULL AND coalesce(portal_status, '') <> 'ARCHIVED'`);
+    else if (portalFilter === 'archived') conditions.push(`portal_product_id IS NOT NULL AND portal_error IS NULL AND portal_status = 'ARCHIVED'`);
     else if (portalFilter === 'failed') conditions.push(`portal_error IS NOT NULL`);
     const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const orderSql = {
@@ -2862,13 +2881,15 @@ export function createDatabase(databaseUrl) {
         LEFT JOIN product_portal_publications portal ON portal.product_detail_id = pubs.product_detail_id
       )
       SELECT *, count(*) OVER()::int AS total,
+        count(*) FILTER (WHERE portal_product_id IS NOT NULL AND portal_error IS NULL AND coalesce(portal_status, '') <> 'ARCHIVED') OVER()::int AS portal_published,
         sale_quantity::float8 AS sale_quantity_float, thirty_book_count::float8 AS thirty_book_float,
         price_min::float8 AS price_min_float, price_max::float8 AS price_max_float
       FROM joined ${whereSql}
       ORDER BY ${orderSql}, product_detail_id DESC
       LIMIT ${limitParam} OFFSET ${offsetParam}`, values);
     const total = result.rows[0]?.total ?? 0;
-    return { items: result.rows, total, limit: safeLimit, offset: safeOffset };
+    const portalPublished = result.rows[0]?.portal_published ?? 0;
+    return { items: result.rows, total, limit: safeLimit, offset: safeOffset, portalPublished };
   }
 
   /** Distinct shop / category options for the selection page filters. */
@@ -3086,7 +3107,7 @@ export function createDatabase(databaseUrl) {
     listRefreshablePublications, listSplitPublishableBundles, mergeSplitContentWpResults,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
-    getPortalPublication, savePortalPublication, failPortalPublication, ping };
+    getPortalPublication, savePortalPublication, failPortalPublication, markPortalPublicationArchived, ping };
 }
 
 function parseScore(value) {
