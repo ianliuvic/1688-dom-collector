@@ -239,6 +239,7 @@ export async function fetchShopOfferPage({
     offers = findOfferArrayDeep(payload.data ?? payload) ?? [];
     matchedBy = offers.length ? 'scored' : null;
   }
+  offers = offers.map(normalizeShopOffer);
   const candidates = offers.length
     ? []
     : collectCandidateArrays(payload.data ?? payload, [])
@@ -277,6 +278,35 @@ function shopOfferId(offer) {
     if (value != null && /^\d{6,}$/.test(String(value))) return String(value);
   }
   return null;
+}
+
+// The page module API returns OfferStdModel records (id/subject/offerPrice/
+// offerImages/...). Normalize them to the field names the shop scan pipeline
+// stores and diffs on.
+function normalizeShopOffer(offer) {
+  if (!offer || typeof offer !== 'object') return offer;
+  const id = shopOfferId(offer);
+  const image = Array.isArray(offer.offerImages) ? offer.offerImages[0] : null;
+  const imageUri = typeof image === 'string'
+    ? image
+    : (image?.imageURI ?? image?.summImageURI ?? null);
+  const imageUrl = imageUri
+    ? (String(imageUri).startsWith('http') ? String(imageUri)
+      : `https://cbu01.alicdn.com/${String(imageUri).replace(/^\//, '')}`)
+    : null;
+  const price = offer.offerPrice ?? offer.consignPrice ?? offer.underLinePrice ?? offer.price ?? null;
+  return {
+    ...offer,
+    offerId: id,
+    title: offer.subject ?? offer.title ?? null,
+    price,
+    currency: offer.currency || 'CNY',
+    imageUrl,
+    productUrl: id ? `https://detail.1688.com/offer/${id}.html` : (offer.productUrl ?? null),
+    saleQuantity: offer.saleQuantity ?? null,
+    saleQuantityText: offer.vagueSaleQuantity ?? null,
+    listingTime: offer.gmtCreate ?? offer.listingTime ?? null,
+  };
 }
 
 export async function fetchAllShopOffers({
