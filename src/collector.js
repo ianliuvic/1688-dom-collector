@@ -366,6 +366,68 @@ export function createCollector({
       };
     }
 
+    if (job.options?.mode === 'page_probe') {
+      // Diagnostic: dump the rendered DOM plus a network summary for one 1688
+      // page (works for shop offerlist pages that no longer expose the plugin
+      // mtop API); optionally probe the "next page" control.
+      const network = [];
+      const onResponse = async (response) => {
+        try {
+          const url = response.url();
+          if (!/1688\.com/.test(url)) return;
+          const contentType = String(response.headers()['content-type'] || '');
+          if (!/json|javascript|text/.test(contentType)) return;
+          const body = await response.text().catch(() => '');
+          if (!body) return;
+          network.push({ url, status: response.status(), contentType, body: body.slice(0, 400000) });
+        } catch { /* ignore */ }
+      };
+      page.on('response', onResponse);
+      try {
+        await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(job.options.waitMs || 8000);
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+        await page.waitForTimeout(4000);
+        const title = await page.title();
+        const finalUrl = page.url();
+        await fs.writeFile(domPath, await page.content(), 'utf8');
+        const offerAnchors = await page.evaluate(() => Array.from(document.querySelectorAll('a[href*="detail.1688.com/offer/"]')).map((a) => a.href))
+          .catch(() => []);
+        const extractedData = {
+          offerAnchorCount: offerAnchors.length,
+          offerAnchors: offerAnchors.slice(0, 60),
+          networkCount: network.length,
+          network: network.slice(0, 150).map((entry) => ({
+            url: entry.url, status: entry.status, len: entry.body.length,
+            peek: /mtop|api|list|offer|async/i.test(entry.url) ? entry.body.slice(0, 800) : '',
+          })),
+        };
+        if (job.options.tryNext !== false) {
+          const clicked = await page.evaluate(() => {
+            const candidates = Array.from(document.querySelectorAll('a,button,li'));
+            const next = candidates.find((el) => /下一页|下页/.test(el.textContent || '')
+              || /pageNum=2|beginPage=2|page=2/.test(el.getAttribute?.('href') || ''));
+            if (!next) return null;
+            const info = { text: (next.textContent || '').trim().slice(0, 30), href: next.getAttribute?.('href') || null };
+            next.click();
+            return info;
+          }).catch(() => null);
+          await page.waitForTimeout(6000);
+          const page2Anchors = await page.evaluate(() => Array.from(document.querySelectorAll('a[href*="detail.1688.com/offer/"]')).map((a) => a.href))
+            .catch(() => []);
+          extractedData.nextClick = clicked;
+          extractedData.afterNextUrl = page.url();
+          extractedData.afterNextOfferCount = page2Anchors.length;
+          extractedData.afterNextAnchors = page2Anchors.slice(0, 10);
+          await fs.writeFile(domPath.replace(/\.html$/, '-next.html'), await page.content(), 'utf8');
+        }
+        await fs.writeFile(path.join(jobPath, 'network.json'), JSON.stringify(network, null, 1), 'utf8');
+        return { status: 'completed', title, finalUrl, domPath, screenshotPath: null, extractedData, error: null };
+      } finally {
+        page.off('response', onResponse);
+      }
+    }
+
     if (job.options?.mode === 'plugin_login') {
       try {
         await page.goto(job.url, { waitUntil: 'domcontentloaded' });

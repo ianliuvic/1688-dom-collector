@@ -5246,6 +5246,19 @@ app.post('/api/plugin-session/check', { preHandler: [requireApiKey, requireColle
   return reply.code(202).send(job);
 });
 
+app.post('/api/page-probe', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
+  const url = request.body?.url;
+  if (typeof url !== 'string' || !isAllowed1688Url(url)) {
+    return reply.code(400).send({ error: 'A valid HTTPS 1688 URL is required.' });
+  }
+  const job = await db.createJob(crypto.randomUUID(), url, {
+    mode: 'page_probe',
+    waitMs: Number.isInteger(request.body?.waitMs) ? request.body.waitMs : 8000,
+    tryNext: request.body?.tryNext !== false,
+  });
+  return reply.code(202).send(job);
+});
+
 app.post('/api/shop-contact-link', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const url = request.body?.url;
   if (typeof url !== 'string' || !isAllowed1688Url(url)) {
