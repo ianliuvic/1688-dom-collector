@@ -1,10 +1,6 @@
 import crypto from 'node:crypto';
-import { buildExtensionSecret } from './plugin-crypto.js';
 
 const APP_KEY = '12574478';
-const PLUGIN_ORIGIN = 'https://air.1688.com';
-const SHOP_API = 'mtop.1688.pc.plugin.shop.offerlist.query';
-const SHOP_VERSION = '1.1';
 const LOGIN_API = 'mtop.1688.pc.plugin.user.login.get';
 const LOGIN_VERSION = '1.0';
 const HEARTBEAT_API = 'mtop.1688.pc.plugin.safe.heartbeat.key.get';
@@ -15,15 +11,16 @@ function tokenValue(cookies) {
   return cookie?.value?.split('_')[0] ?? '';
 }
 
-function signedUrl(token, api, version, dataText, query = {}) {
+function signedUrl(token, api, version, dataText, query = {}, includeDataInQuery = true) {
   const timestamp = String(Date.now());
   const sign = crypto.createHash('md5')
     .update(`${token}&${timestamp}&${APP_KEY}&${dataText}`)
     .digest('hex');
   const params = new URLSearchParams({
     jsv: '2.7.2', appKey: APP_KEY, t: timestamp, sign,
-    dataType: 'json', api, v: version, type: 'originaljson', ...query, data: dataText,
+    dataType: 'json', api, v: version, type: 'originaljson', ...query,
   });
+  if (includeDataInQuery) params.set('data', dataText);
   return `https://h5api.m.1688.com/h5/${api}/${version}/?${params}`;
 }
 
@@ -48,25 +45,31 @@ function shouldRefreshToken(payload) {
   return retMessages(payload).some((message) => /TOKEN|ILLEGAL_ACCESS|SESSION/i.test(message));
 }
 
-async function callMtop({ context, page, api, version, data, extraHeaders = {}, query = {} }) {
+async function callMtop({
+  context, page, api, version, data, extraHeaders = {}, query = {},
+  method = 'GET', includeDataInQuery = true,
+}) {
   let payload;
   let httpStatus;
   const dataText = JSON.stringify(data);
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const cookies = await context.cookies('https://h5api.m.1688.com');
-    const response = await page.evaluate(async ({ url, headers }) => {
+    const response = await page.evaluate(async ({ url, headers, method: requestMethod, body }) => {
       const fetched = await fetch(url, {
-        method: 'GET',
+        method: requestMethod,
         credentials: 'include',
         cache: 'no-store',
         signal: AbortSignal.timeout(30000),
         headers: { accept: '*/*', ...headers },
+        ...(body ? { body } : {}),
       });
       return { status: fetched.status, text: await fetched.text() };
     }, {
-      url: signedUrl(tokenValue(cookies), api, version, dataText, query),
+      url: signedUrl(tokenValue(cookies), api, version, dataText, query, includeDataInQuery),
       headers: extraHeaders,
+      method,
+      body: method === 'POST' ? `data=${encodeURIComponent(dataText)}` : null,
     });
     httpStatus = response.status;
     payload = parseJson(response.text);
@@ -122,42 +125,85 @@ function findTotal(value, depth = 0) {
   return null;
 }
 
-export async function fetchShopOfferPage({
-  context, page, pluginCrypto, memberId, pageNum, pageSize, sortType,
-}) {
-  const data = { memberId, sortType, pageNum, pageSize };
-  const dataText = JSON.stringify(data);
-  let payload;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const metaInfo = await pluginCrypto.getToken({ context, page, force: attempt > 0 });
-    const extensionSecret = buildExtensionSecret(metaInfo, dataText);
-    try {
-      payload = await callMtop({
-        context,
-        page,
-        api: SHOP_API,
-        version: SHOP_VERSION,
-        data,
-        extraHeaders: { 'x-1688extension-secret': extensionSecret },
-      });
-      break;
-    } catch (error) {
-      pluginCrypto.clearToken();
-      if (attempt > 0) throw error;
+// The shop offerlist page loads its data through the page's own mtop module
+// API (no plugin extension secret involved). 1688 retired the previous plugin
+// API (mtop.1688.pc.plugin.shop.offerlist.query rejected every caller from
+// 2026-10-09) and upgraded the official extension to 1.2.0, which enumerates a
+// store through this module endpoint as well.
+const SHOP_MODULE_API = 'mtop.alibaba.alisite.cbu.server.ModuleAsyncService';
+const SHOP_MODULE_VERSION = '1.0';
+const SHOP_MODULE_COUNT_MAX = 30;
+
+function collectCandidateArrays(value, out = [], depth = 0, limit = 12) {
+  if (depth > 9 || value == null || out.length >= limit) return out;
+  if (Array.isArray(value)) {
+    if (value.length && value.every((item) => item && typeof item === 'object' && !Array.isArray(item))) {
+      const keys = Object.keys(value[0]);
+      if (keys.length >= 3) {
+        out.push({
+          count: value.length,
+          keys: keys.slice(0, 30),
+          hasOfferId: keys.some((key) => /offerid/i.test(key)),
+          hasTitle: keys.some((key) => /^(subject|title)$/i.test(key)),
+          sample: JSON.stringify(value[0]).slice(0, 600),
+        });
+      }
     }
+    for (const item of value) collectCandidateArrays(item, out, depth + 1, limit);
+    return out;
   }
-  const offers = findOfferArray(payload) ?? [];
+  if (typeof value === 'object') {
+    for (const item of Object.values(value)) collectCandidateArrays(item, out, depth + 1, limit);
+  }
+  return out;
+}
+
+export async function fetchShopOfferPage({
+  context, page, memberId, pageNum, pageSize, sortType,
+}) {
+  const count = Math.min(Math.max(Number(pageSize) || SHOP_MODULE_COUNT_MAX, 1), SHOP_MODULE_COUNT_MAX);
+  const data = {
+    componentKey: 'Wp_pc_common_offerlist',
+    params: JSON.stringify({
+      memberId,
+      appdata: {
+        sortType: sortType || 'wangpu_score',
+        sellerRecommendFilter: false,
+        mixFilter: false,
+        tradenumFilter: false,
+        quantityBegin: null,
+        pageNum,
+        count,
+      },
+    }),
+  };
+  const payload = await callMtop({
+    context,
+    page,
+    api: SHOP_MODULE_API,
+    version: SHOP_MODULE_VERSION,
+    data,
+    method: 'POST',
+    includeDataInQuery: false,
+    extraHeaders: { 'content-type': 'application/x-www-form-urlencoded' },
+    query: { type: 'json', valueType: 'string', dataType: 'json', timeout: '10000' },
+  });
+  const offers = findOfferArray(payload.data ?? payload) ?? [];
   return {
     payload,
     result: {
       schemaVersion: 1,
       pageType: 'shop-offer-batch',
       source: '1688',
-      request: { memberId, pageNum, pageSize, sortType },
+      request: { memberId, pageNum, pageSize: count, sortType },
       totalCount: findTotal(payload),
       offerCount: offers.length,
       offerFields: [...new Set(offers.flatMap((item) => Object.keys(item ?? {})))].sort(),
       offers,
+      ...(offers.length ? {} : {
+        candidates: collectCandidateArrays(payload.data ?? payload, []),
+        payloadPeek: JSON.stringify(payload).slice(0, 1800),
+      }),
       mtopRet: retMessages(payload),
       parsedAt: new Date().toISOString(),
     },
@@ -169,7 +215,7 @@ function delay(ms) {
 }
 
 export async function fetchAllShopOffers({
-  context, page, pluginCrypto, memberId, pageNum = 1, pageSize = 300,
+  context, page, memberId, pageNum = 1, pageSize = 300,
   sortType = 'wangpu_score', maxPages = 1000,
 }) {
   const startedAt = Date.now();
@@ -183,7 +229,7 @@ export async function fetchAllShopOffers({
   for (let offset = 0; offset < maxPages; offset += 1) {
     const currentPage = pageNum + offset;
     const pageResult = await fetchShopOfferPage({
-      context, page, pluginCrypto, memberId, pageNum: currentPage, pageSize, sortType,
+      context, page, memberId, pageNum: currentPage, pageSize, sortType,
     });
     pagePayloads.push(pageResult.payload);
     totalCount ??= pageResult.result.totalCount;
@@ -202,10 +248,11 @@ export async function fetchAllShopOffers({
     });
 
     const received = pageResult.result.offerCount;
+    const effectivePageSize = pageResult.result.request?.pageSize || pageSize;
     if (received === 0
         || (offset > 0 && added === 0)
         || (totalCount !== null && offers.length >= totalCount)
-        || received < pageSize) break;
+        || received < effectivePageSize) break;
     if (offset === maxPages - 1) {
       truncated = true;
       break;
