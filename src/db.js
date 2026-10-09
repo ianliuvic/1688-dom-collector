@@ -2761,6 +2761,175 @@ export function createDatabase(databaseUrl) {
     return { total: counts.rows[0]?.total ?? 0, limit: safeLimit, offset: safeOffset, items: result.rows };
   }
 
+  /** Shortlist of published products for the selection page (filters + paging). */
+  async function listSelectionProducts({
+    shopId = '', category1688 = '', categoryWp = '',
+    colorMin = null, colorMax = null, sizeMin = null, sizeMax = null,
+    saleMin = null, monthlyMin = null, priceMin = null, priceMax = null,
+    sort = 'sales', dir = 'desc', limit = 100, offset = 0,
+  } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const sortKey = ['sales', 'monthly', 'price', 'listing'].includes(String(sort)) ? String(sort) : 'sales';
+    const direction = String(dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const num = (value) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; };
+    const values = [];
+    const conditions = [];
+    const shopTerm = /^\d+$/.test(String(shopId ?? '').trim()) ? String(shopId).trim() : '';
+    if (shopTerm) { values.push(shopTerm); conditions.push(`shop_id::text = $${values.length}`); }
+    const cat1688 = String(category1688 ?? '').trim().slice(0, 120);
+    if (cat1688) { values.push(cat1688); conditions.push(`shop_category = $${values.length}`); }
+    const catWp = String(categoryWp ?? '').trim().slice(0, 120);
+    if (catWp) { values.push(catWp); conditions.push(`wp_category = $${values.length}`); }
+    const cMin = num(colorMin); if (cMin !== null) { values.push(cMin); conditions.push(`color_count >= $${values.length}`); }
+    const cMax = num(colorMax); if (cMax !== null) { values.push(cMax); conditions.push(`color_count <= $${values.length}`); }
+    const sMin = num(sizeMin); if (sMin !== null) { values.push(sMin); conditions.push(`size_count >= $${values.length}`); }
+    const sMax = num(sizeMax); if (sMax !== null) { values.push(sMax); conditions.push(`size_count <= $${values.length}`); }
+    const minSale = num(saleMin); if (minSale !== null) { values.push(minSale); conditions.push(`coalesce(sale_quantity, 0) >= $${values.length}`); }
+    const minMonthly = num(monthlyMin); if (minMonthly !== null) { values.push(minMonthly); conditions.push(`coalesce(thirty_book_count, 0) >= $${values.length}`); }
+    const minPrice = num(priceMin); if (minPrice !== null) { values.push(minPrice); conditions.push(`coalesce(price_min, 0) >= $${values.length}`); }
+    const maxPrice = num(priceMax); if (maxPrice !== null) { values.push(maxPrice); conditions.push(`coalesce(price_min, 0) <= $${values.length}`); }
+    const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const orderSql = {
+      sales: `sale_quantity ${direction} NULLS LAST`,
+      monthly: `thirty_book_count ${direction} NULLS LAST`,
+      price: `price_min ${direction} NULLS LAST`,
+      listing: `listing_time ${direction} NULLS LAST`,
+    }[sortKey];
+    values.push(safeLimit);
+    const limitParam = `$${values.length}`;
+    values.push(safeOffset);
+    const offsetParam = `$${values.length}`;
+    const result = await pool.query(`WITH pubs AS (
+        SELECT publications.product_detail_id, publications.style_no, publications.wp_post_id, publications.wp_url,
+          publications.payload, details.offer_id, details.price_min, details.price_max, details.currency,
+          CASE WHEN jsonb_typeof(publications.payload->'colors'->'colors') = 'array'
+            THEN jsonb_array_length(publications.payload->'colors'->'colors') ELSE 0 END AS color_count,
+          COALESCE((SELECT count(*)::int FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(publications.payload->'sizes'->'sizes') = 'array'
+                THEN publications.payload->'sizes'->'sizes' ELSE '[]'::jsonb END) AS s
+            WHERE NOT (coalesce(s->>'label', s->>'value', '') ~* '(均码|one[[:space:]]*size|free[[:space:]]*size)')), 0) AS size_count,
+          publications.payload->'meta'->>'primary_category' AS wp_category,
+          publications.payload->>'title' AS wp_title,
+          publications.payload->'colors'->'colors' AS colors_json,
+          publications.payload->'sizes'->'sizes' AS sizes_json,
+          EXISTS (SELECT 1 FROM product_split_plans plans WHERE plans.product_detail_id = publications.product_detail_id) AS is_bundle_keeper
+        FROM product_wordpress_publications publications
+        JOIN product_details details ON details.id = publications.product_detail_id
+        WHERE publications.wp_status = 'publish' AND publications.wp_post_id IS NOT NULL
+      ), joined AS (
+        SELECT pubs.*,
+          src.shop_id, src.shop_name, src.shop_category, src.sale_quantity, src.thirty_book_count,
+          src.listing_time, src.availability_status, img.storage_path AS main_storage, img.source_url AS main_source_url
+        FROM pubs
+        LEFT JOIN LATERAL (
+          SELECT products.shop_id, products.category AS shop_category, products.sale_quantity,
+            CASE WHEN products.raw_data->>'thirtyBookCount' ~ '^[0-9]+([.][0-9]+)?$'
+              THEN (products.raw_data->>'thirtyBookCount')::float8 END AS thirty_book_count,
+            products.listing_time, products.availability_status,
+            coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name
+          FROM shop_products products
+          LEFT JOIN shop_profiles shops ON shops.id = products.shop_id
+          WHERE products.offer_id = pubs.offer_id
+          ORDER BY products.last_crawled_at DESC
+          LIMIT 1
+        ) src ON true
+        LEFT JOIN LATERAL (
+          SELECT images.storage_path, images.source_url FROM product_detail_images images
+          WHERE images.product_detail_id = pubs.product_detail_id AND images.image_type = 'main'
+          ORDER BY images.sort_order ASC
+          LIMIT 1
+        ) img ON true
+      )
+      SELECT *, count(*) OVER()::int AS total,
+        sale_quantity::float8 AS sale_quantity_float, thirty_book_count::float8 AS thirty_book_float,
+        price_min::float8 AS price_min_float, price_max::float8 AS price_max_float
+      FROM joined ${whereSql}
+      ORDER BY ${orderSql}, product_detail_id DESC
+      LIMIT ${limitParam} OFFSET ${offsetParam}`, values);
+    const total = result.rows[0]?.total ?? 0;
+    return { items: result.rows, total, limit: safeLimit, offset: safeOffset };
+  }
+
+  /** Distinct shop / category options for the selection page filters. */
+  async function listSelectionFacets() {
+    const shops = await pool.query(`SELECT DISTINCT src.shop_id, src.shop_name
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id = publications.product_detail_id
+      JOIN LATERAL (
+        SELECT products.shop_id, coalesce(shops.shop_name, shops.domain) AS shop_name
+        FROM shop_products products
+        LEFT JOIN shop_profiles shops ON shops.id = products.shop_id
+        WHERE products.offer_id = details.offer_id
+        ORDER BY products.last_crawled_at DESC LIMIT 1
+      ) src ON true
+      WHERE publications.wp_status = 'publish' AND publications.wp_post_id IS NOT NULL
+      ORDER BY src.shop_name`);
+    const categories1688 = await pool.query(`SELECT DISTINCT products.category
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id = publications.product_detail_id
+      JOIN shop_products products ON products.offer_id = details.offer_id
+      WHERE publications.wp_status = 'publish' AND publications.wp_post_id IS NOT NULL
+        AND products.category IS NOT NULL AND products.category <> ''
+      ORDER BY 1`);
+    const categoriesWp = await pool.query(`SELECT DISTINCT publications.payload->'meta'->>'primary_category' AS category
+      FROM product_wordpress_publications publications
+      WHERE publications.wp_status = 'publish' AND publications.wp_post_id IS NOT NULL
+        AND publications.payload->'meta'->>'primary_category' IS NOT NULL
+      ORDER BY 1`);
+    return {
+      shops: shops.rows.map((row) => ({ id: row.shop_id === null ? null : String(row.shop_id), name: row.shop_name })),
+      categories1688: categories1688.rows.map((row) => row.category),
+      categoriesWp: categoriesWp.rows.map((row) => row.category),
+    };
+  }
+
+  function selectionImageUrl(offerId, storagePath) {
+    const parts = String(storagePath ?? '').split(/[\\/]/).filter(Boolean);
+    const fileName = parts.pop() || '';
+    let folder = parts.pop() || '';
+    if (!/^[A-Za-z0-9._-]{1,180}$/.test(fileName) || fileName.includes('..')) return null;
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(folder)) folder = /^[A-Za-z0-9_-]{1,64}$/.test(String(offerId ?? '')) ? String(offerId) : '';
+    if (!folder) return null;
+    return `/api/product-images/${encodeURIComponent(folder)}/${encodeURIComponent(fileName)}`;
+  }
+
+  /** Published WP images plus 1688 detail images (stored copies and not-downloaded URLs). */
+  async function getSelectionProductMedia(productDetailId) {
+    const id = Number(productDetailId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const result = await pool.query(`SELECT publications.style_no, details.offer_id, publications.payload, details.raw_data
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id = publications.product_detail_id
+      WHERE publications.product_detail_id = $1`, [id]);
+    const row = result.rows[0];
+    if (!row) return null;
+    const payload = row.payload ?? {};
+    const wpImages = (Array.isArray(payload.images) ? payload.images : [])
+      .map((image) => ({ url: image?.url ?? null, sourceUrl: image?.source_url ?? null, alt: image?.alt ?? null }))
+      .filter((image) => image.url || image.sourceUrl);
+    const stored = await pool.query(`SELECT source_url, storage_path FROM product_detail_images
+      WHERE product_detail_id = $1 AND image_type = 'description' ORDER BY sort_order ASC`, [id]);
+    const detailImages = [];
+    const seen = new Set();
+    for (const image of stored.rows) {
+      const url = selectionImageUrl(row.offer_id, image.storage_path) ?? image.source_url ?? null;
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      detailImages.push({ url, sourceUrl: image.source_url ?? null, stored: true });
+    }
+    const html = row.raw_data?.linkfox?.raw?.description;
+    if (typeof html === 'string' && html) {
+      for (const match of html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) {
+        const url = match[1];
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        detailImages.push({ url, sourceUrl: url, stored: false });
+      }
+    }
+    return { productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, wpImages, detailImages };
+  }
+
   /** Latest 1688 sale quantity per style number / WordPress post id (shop scan data). */
   async function listProductSaleQuantities({ styles = [], wpPostIds = [] } = {}) {
     const styleList = [...new Set((styles ?? []).map((value) => String(value).trim()).filter(Boolean))];
@@ -2792,6 +2961,7 @@ export function createDatabase(databaseUrl) {
     setProductBundleManual, listBundleRecheckRows,
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     summarizeWordPressPublications, listWordPressPublications, listProductSaleQuantities,
+    listSelectionProducts, listSelectionFacets, getSelectionProductMedia,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,

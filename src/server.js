@@ -4078,6 +4078,79 @@ app.get('/api/sales/by-styles', { preHandler: requireApiKey }, async (request, r
   };
 });
 
+// Product selection shortlist page (published products with sales/colour/size
+// filters) for curating the portal catalog. Same HTTP Basic gate as /products.
+app.get('/selection', { preHandler: requireDashboardAuth }, async (_request, reply) => {
+  const html = await fs.readFile(new URL('../public/selection.html', import.meta.url), 'utf8');
+  return reply.type('text/html; charset=utf-8').send(html);
+});
+
+let selectionFacetsCache = null;
+app.get('/api/selection/facets', { preHandler: requireDashboardOrApiKey }, async () => {
+  const now = Date.now();
+  if (selectionFacetsCache && now - selectionFacetsCache.at < 10 * 60_000) return selectionFacetsCache.value;
+  const value = await db.listSelectionFacets();
+  selectionFacetsCache = { at: now, value };
+  return value;
+});
+
+app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, async (request) => {
+  const result = await db.listSelectionProducts({
+    shopId: request.query?.shop,
+    category1688: request.query?.category,
+    categoryWp: request.query?.wpCategory,
+    colorMin: request.query?.colorMin, colorMax: request.query?.colorMax,
+    sizeMin: request.query?.sizeMin, sizeMax: request.query?.sizeMax,
+    saleMin: request.query?.saleMin, monthlyMin: request.query?.monthlyMin,
+    priceMin: request.query?.priceMin, priceMax: request.query?.priceMax,
+    sort: request.query?.sort, dir: request.query?.dir,
+    limit: request.query?.limit, offset: request.query?.offset,
+  });
+  const coverUrl = (row) => {
+    const parts = String(row.main_storage ?? '').split(/[\\/]/).filter(Boolean);
+    const fileName = parts.pop() || '';
+    let folder = parts.pop() || '';
+    if (!/^[A-Za-z0-9._-]{1,180}$/.test(fileName) || fileName.includes('..')) return row.main_source_url ?? null;
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(folder)) folder = /^[A-Za-z0-9_-]{1,64}$/.test(String(row.offer_id ?? '')) ? String(row.offer_id) : '';
+    if (!folder) return row.main_source_url ?? null;
+    return `/api/product-images/${encodeURIComponent(folder)}/${encodeURIComponent(fileName)}?w=160`;
+  };
+  return {
+    total: result.total, limit: result.limit, offset: result.offset,
+    items: result.items.map((row) => ({
+      productDetailId: row.product_detail_id,
+      offerId: row.offer_id,
+      styleNo: row.style_no,
+      wpPostId: row.wp_post_id === null || row.wp_post_id === undefined ? null : String(row.wp_post_id),
+      wpUrl: row.wp_url ?? null,
+      wpTitle: row.wp_title ?? null,
+      wpCategory: row.wp_category ?? null,
+      shopId: row.shop_id === null || row.shop_id === undefined ? null : String(row.shop_id),
+      shopName: row.shop_name ?? null,
+      category: row.shop_category ?? null,
+      colorCount: row.color_count ?? 0,
+      sizeCount: row.size_count ?? 0,
+      colors: (Array.isArray(row.colors_json) ? row.colors_json : []).map((c) => c?.label ?? c?.code ?? c?.value ?? null).filter(Boolean),
+      sizes: (Array.isArray(row.sizes_json) ? row.sizes_json : []).map((s) => s?.label ?? s?.value ?? null).filter(Boolean),
+      saleQuantity: row.sale_quantity_float === null || row.sale_quantity_float === undefined ? null : Number(row.sale_quantity_float),
+      thirtyBookCount: row.thirty_book_float === null || row.thirty_book_float === undefined ? null : Number(row.thirty_book_float),
+      priceMin: row.price_min_float === null || row.price_min_float === undefined ? null : Number(row.price_min_float),
+      priceMax: row.price_max_float === null || row.price_max_float === undefined ? null : Number(row.price_max_float),
+      currency: row.currency ?? null,
+      listingTime: row.listing_time ?? null,
+      availability: row.availability_status ?? null,
+      bundleKeeper: Boolean(row.is_bundle_keeper),
+      cover: coverUrl(row),
+    })),
+  };
+});
+
+app.get('/api/selection/products/:id/media', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const media = await db.getSelectionProductMedia(request.params.id);
+  if (!media) return reply.code(404).send({ error: 'not_found' });
+  return media;
+});
+
 // Stock audit across published products: what each page claims (sample
 // available vs made to order) against the SKU stock stored in its payload.
 app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboardOrApiKey }, async (request) => ({
