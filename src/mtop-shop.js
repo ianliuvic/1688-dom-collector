@@ -134,26 +134,71 @@ const SHOP_MODULE_API = 'mtop.alibaba.alisite.cbu.server.ModuleAsyncService';
 const SHOP_MODULE_VERSION = '1.0';
 const SHOP_MODULE_COUNT_MAX = 30;
 
-function collectCandidateArrays(value, out = [], depth = 0, limit = 12) {
-  if (depth > 9 || value == null || out.length >= limit) return out;
+function tryParseJson(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return null;
+  try { return JSON.parse(trimmed); } catch { return null; }
+}
+
+function offerItemScore(keys) {
+  let score = 0;
+  if (keys.some((key) => /^offer.*id$/i.test(key))) score += 3;
+  else if (keys.some((key) => /^id$/i.test(key))) score += 1;
+  if (keys.some((key) => /^(subject|title)$/i.test(key))) score += 2;
+  if (keys.some((key) => /price/i.test(key))) score += 1;
+  if (keys.some((key) => /(detailurl|offerurl|offerpic|url)/i.test(key))) score += 1;
+  return score;
+}
+
+function findOfferArrayDeep(value, depth = 0) {
+  if (depth > 12 || value == null) return null;
+  if (typeof value === 'string') {
+    const parsed = tryParseJson(value);
+    return parsed ? findOfferArrayDeep(parsed, depth + 1) : null;
+  }
+  if (Array.isArray(value)) {
+    if (value.length >= 3 && value.every((item) => item && typeof item === 'object' && !Array.isArray(item))) {
+      const score = offerItemScore(Object.keys(value[0]));
+      if (score >= 4) return value;
+    }
+    for (const item of value) {
+      const found = findOfferArrayDeep(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value === 'object') {
+    for (const item of Object.values(value)) {
+      const found = findOfferArrayDeep(item, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function collectCandidateArrays(value, out = [], depth = 0, path = '$', limit = 40) {
+  if (depth > 12 || value == null || out.length >= limit) return out;
+  if (typeof value === 'string') {
+    const parsed = tryParseJson(value);
+    if (parsed) collectCandidateArrays(parsed, out, depth + 1, `${path}(json)`, limit);
+    return out;
+  }
   if (Array.isArray(value)) {
     if (value.length && value.every((item) => item && typeof item === 'object' && !Array.isArray(item))) {
       const keys = Object.keys(value[0]);
-      if (keys.length >= 3) {
-        out.push({
-          count: value.length,
-          keys: keys.slice(0, 30),
-          hasOfferId: keys.some((key) => /offerid/i.test(key)),
-          hasTitle: keys.some((key) => /^(subject|title)$/i.test(key)),
-          sample: JSON.stringify(value[0]).slice(0, 600),
-        });
-      }
+      out.push({
+        path, count: value.length, keys: keys.slice(0, 30),
+        score: offerItemScore(keys),
+        sample: JSON.stringify(value[0]).slice(0, 500),
+      });
     }
-    for (const item of value) collectCandidateArrays(item, out, depth + 1, limit);
+    value.forEach((item, index) => collectCandidateArrays(item, out, depth + 1, `${path}[${index}]`, limit));
     return out;
   }
   if (typeof value === 'object') {
-    for (const item of Object.values(value)) collectCandidateArrays(item, out, depth + 1, limit);
+    for (const [key, item] of Object.entries(value)) {
+      collectCandidateArrays(item, out, depth + 1, `${path}.${key}`, limit);
+    }
   }
   return out;
 }
@@ -188,7 +233,17 @@ export async function fetchShopOfferPage({
     extraHeaders: { 'content-type': 'application/x-www-form-urlencoded' },
     query: { type: 'json', valueType: 'string', dataType: 'json', timeout: '10000' },
   });
-  const offers = findOfferArray(payload.data ?? payload) ?? [];
+  let offers = findOfferArray(payload.data ?? payload) ?? [];
+  let matchedBy = offers.length ? 'offerId' : null;
+  if (!offers.length) {
+    offers = findOfferArrayDeep(payload.data ?? payload) ?? [];
+    matchedBy = offers.length ? 'scored' : null;
+  }
+  const candidates = offers.length
+    ? []
+    : collectCandidateArrays(payload.data ?? payload, [])
+      .sort((a, b) => (b.score - a.score) || (b.count - a.count))
+      .slice(0, 12);
   return {
     payload,
     result: {
@@ -200,9 +255,10 @@ export async function fetchShopOfferPage({
       offerCount: offers.length,
       offerFields: [...new Set(offers.flatMap((item) => Object.keys(item ?? {})))].sort(),
       offers,
+      matchedBy,
       ...(offers.length ? {} : {
-        candidates: collectCandidateArrays(payload.data ?? payload, []),
-        payloadPeek: JSON.stringify(payload).slice(0, 1800),
+        candidates,
+        payloadPeek: JSON.stringify(payload).slice(0, 3000),
       }),
       mtopRet: retMessages(payload),
       parsedAt: new Date().toISOString(),
@@ -212,6 +268,15 @@ export async function fetchShopOfferPage({
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shopOfferId(offer) {
+  if (!offer || typeof offer !== 'object') return null;
+  for (const key of ['offerId', 'offerID', 'id', 'itemId']) {
+    const value = offer[key];
+    if (value != null && /^\d{6,}$/.test(String(value))) return String(value);
+  }
+  return null;
 }
 
 export async function fetchAllShopOffers({
@@ -235,7 +300,7 @@ export async function fetchAllShopOffers({
     totalCount ??= pageResult.result.totalCount;
     let added = 0;
     for (const offer of pageResult.result.offers) {
-      const id = offer?.offerId != null ? String(offer.offerId) : null;
+      const id = shopOfferId(offer);
       if (id && seenOfferIds.has(id)) continue;
       if (id) seenOfferIds.add(id);
       offers.push(offer);
