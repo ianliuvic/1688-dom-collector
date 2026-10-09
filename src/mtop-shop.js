@@ -1,10 +1,18 @@
 import crypto from 'node:crypto';
+import { buildExtensionSecret } from './plugin-crypto.js';
 
 const APP_KEY = '12574478';
 const LOGIN_API = 'mtop.1688.pc.plugin.user.login.get';
 const LOGIN_VERSION = '1.0';
 const HEARTBEAT_API = 'mtop.1688.pc.plugin.safe.heartbeat.key.get';
 const HEARTBEAT_VERSION = '1.0';
+// The official extension's export panel ("全店商品导出", air.1688.com export-goods
+// page) calls this exact endpoint name. The previous all-lowercase name
+// (mtop.1688.pc.plugin.shop.offerlist.query) was retired by 1688 on 2026-10-09;
+// this capital-L variant is the live one and is signed with the extension
+// secret built from the heartbeat token.
+const PLUGIN_SHOP_API = 'mtop.1688.pc.plugin.shop.offerList.query';
+const PLUGIN_SHOP_VERSION = '1.1';
 
 function tokenValue(cookies) {
   const cookie = cookies.find((item) => item.name === '_m_h5_tk');
@@ -125,11 +133,10 @@ function findTotal(value, depth = 0) {
   return null;
 }
 
-// The shop offerlist page loads its data through the page's own mtop module
-// API (no plugin extension secret involved). 1688 retired the previous plugin
-// API (mtop.1688.pc.plugin.shop.offerlist.query rejected every caller from
-// 2026-10-09) and upgraded the official extension to 1.2.0, which enumerates a
-// store through this module endpoint as well.
+// Fallback enumeration path: the shop offerlist page loads its data through the
+// page's own mtop module API (no plugin extension secret involved). It returns
+// OfferStdModel records without category/sales fields, so it is only used when
+// the official plugin endpoint is unavailable.
 const SHOP_MODULE_API = 'mtop.alibaba.alisite.cbu.server.ModuleAsyncService';
 const SHOP_MODULE_VERSION = '1.0';
 const SHOP_MODULE_COUNT_MAX = 30;
@@ -203,7 +210,7 @@ function collectCandidateArrays(value, out = [], depth = 0, path = '$', limit = 
   return out;
 }
 
-export async function fetchShopOfferPage({
+async function fetchShopOfferPageViaModule({
   context, page, memberId, pageNum, pageSize, sortType,
 }) {
   const count = Math.min(Math.max(Number(pageSize) || SHOP_MODULE_COUNT_MAX, 1), SHOP_MODULE_COUNT_MAX);
@@ -251,6 +258,7 @@ export async function fetchShopOfferPage({
       schemaVersion: 1,
       pageType: 'shop-offer-batch',
       source: '1688',
+      scanSource: 'offerlist-module',
       request: { memberId, pageNum, pageSize: count, sortType },
       totalCount: findTotal(payload),
       offerCount: offers.length,
@@ -309,8 +317,82 @@ function normalizeShopOffer(offer) {
   };
 }
 
+// Official plugin endpoint — the same call the 1688 purchase-assistant
+// extension's "全店商品导出" panel makes: mtop.1688.pc.plugin.shop.offerList.query
+// v1.1, signed with the x-1688extension-secret header built from the heartbeat
+// token. Returns full records including categoryName/gmtCreate/saleQuantity.
+async function fetchShopOfferPageViaPlugin({
+  context, page, pluginCrypto, memberId, pageNum, pageSize, sortType,
+}) {
+  const count = Math.min(Math.max(Number(pageSize) || 300, 1), 300);
+  const data = { memberId, sortType: sortType || 'wangpu_score', pageNum, pageSize: count };
+  const dataText = JSON.stringify(data);
+  let payload;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const metaInfo = await pluginCrypto.getToken({ context, page, force: attempt > 0 });
+    const extensionSecret = buildExtensionSecret(metaInfo, dataText);
+    try {
+      payload = await callMtop({
+        context,
+        page,
+        api: PLUGIN_SHOP_API,
+        version: PLUGIN_SHOP_VERSION,
+        data,
+        extraHeaders: { 'x-1688extension-secret': extensionSecret },
+      });
+      break;
+    } catch (error) {
+      pluginCrypto.clearToken();
+      if (attempt > 0) throw error;
+    }
+  }
+  const offers = findOfferArray(payload) ?? [];
+  return {
+    payload,
+    result: {
+      schemaVersion: 1,
+      pageType: 'shop-offer-batch',
+      source: '1688',
+      scanSource: 'plugin-offerList',
+      request: { memberId, pageNum, pageSize: count, sortType },
+      totalCount: findTotal(payload),
+      offerCount: offers.length,
+      offerFields: [...new Set(offers.flatMap((item) => Object.keys(item ?? {})))].sort(),
+      offers,
+      matchedBy: offers.length ? 'offerId' : null,
+      mtopRet: retMessages(payload),
+      parsedAt: new Date().toISOString(),
+    },
+  };
+}
+
+// Shop batch scan source selector: the official plugin endpoint first (full
+// fields), the page's module API (no category/sales fields) as fallback.
+// `source` lets the all-pages loop pin whichever source worked for page one.
+export async function fetchShopOfferPage({
+  context, page, pluginCrypto, memberId, pageNum, pageSize, sortType,
+  source = 'auto',
+}) {
+  if (pluginCrypto && (source === 'auto' || source === 'plugin')) {
+    try {
+      return await fetchShopOfferPageViaPlugin({
+        context, page, pluginCrypto, memberId, pageNum, pageSize, sortType,
+      });
+    } catch (error) {
+      if (source === 'plugin') throw error;
+      const fallback = await fetchShopOfferPageViaModule({
+        context, page, memberId, pageNum, pageSize, sortType,
+      });
+      fallback.result.scanSource = 'offerlist-module-fallback';
+      fallback.result.pluginError = String(error?.message || error).slice(0, 500);
+      return fallback;
+    }
+  }
+  return fetchShopOfferPageViaModule({ context, page, memberId, pageNum, pageSize, sortType });
+}
+
 export async function fetchAllShopOffers({
-  context, page, memberId, pageNum = 1, pageSize = 300,
+  context, page, pluginCrypto, memberId, pageNum = 1, pageSize = 300,
   sortType = 'wangpu_score', maxPages = 1000,
 }) {
   const startedAt = Date.now();
@@ -320,12 +402,30 @@ export async function fetchAllShopOffers({
   const pages = [];
   let totalCount = null;
   let truncated = false;
+  let scanSource = 'auto';
 
   for (let offset = 0; offset < maxPages; offset += 1) {
     const currentPage = pageNum + offset;
-    const pageResult = await fetchShopOfferPage({
-      context, page, memberId, pageNum: currentPage, pageSize, sortType,
-    });
+    let pageResult;
+    try {
+      pageResult = await fetchShopOfferPage({
+        context, page, pluginCrypto, memberId, pageNum: currentPage, pageSize, sortType,
+        source: scanSource,
+      });
+    } catch (error) {
+      if (scanSource !== 'plugin') throw error;
+      // The plugin endpoint hiccuped mid-run: finish the scan through the
+      // module API instead of failing the whole sync.
+      scanSource = 'module';
+      pageResult = await fetchShopOfferPage({
+        context, page, pluginCrypto, memberId, pageNum: currentPage, pageSize, sortType,
+        source: 'module',
+      });
+      pageResult.result.pluginError = String(error?.message || error).slice(0, 500);
+    }
+    if (scanSource === 'auto') {
+      scanSource = pageResult.result.scanSource === 'plugin-offerList' ? 'plugin' : 'module';
+    }
     pagePayloads.push(pageResult.payload);
     totalCount ??= pageResult.result.totalCount;
     let added = 0;
@@ -340,6 +440,7 @@ export async function fetchAllShopOffers({
       pageNum: currentPage,
       received: pageResult.result.offerCount,
       added,
+      source: pageResult.result.scanSource,
     });
 
     const received = pageResult.result.offerCount;
@@ -361,6 +462,7 @@ export async function fetchAllShopOffers({
       schemaVersion: 1,
       pageType: 'shop-offer-collection',
       source: '1688',
+      scanSource,
       request: { memberId, pageNum, pageSize, sortType, maxPages },
       totalCount,
       offerCount: offers.length,
