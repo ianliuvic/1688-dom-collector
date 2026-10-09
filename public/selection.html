@@ -292,7 +292,7 @@ function portalDraftFor(id, media) {
     }
   }
   for (const image of all) {
-    if (available.has(image.url)) images.push({ url: image.url, visible: true, kind: image.kind });
+    if (available.has(image.url)) images.push({ url: image.url, visible: image.kind === 'wp', kind: image.kind });
   }
   portalDrafts[id] = { images, portal: media.portal || null, message: '', error: '', saving: false };
   return portalDrafts[id];
@@ -319,7 +319,7 @@ function portalPanelHtml(id) {
     '</div>').join('');
   return '<div class="portal-panel" data-portal-panel="' + esc(id) + '">' +
     '<h4>发布到 Portal <span class="portal-msg">（' + stateText + '）</span></h4>' +
-    '<div class="portal-note">勾选要发布到 Portal 的图片（共 ' + draft.images.length + ' 张，已选 ' + selected + ' 张；带「详情」标记的是 1688 详情图，会在发布时自动下载）；拖拽图片或用 ◀ ▶ 调整顺序，顺序即 Portal 客户侧的展示顺序；未勾选的图片不会展示。</div>' +
+    '<div class="portal-note">勾选要发布到 Portal 的图片（共 ' + draft.images.length + ' 张，已选 ' + selected + ' 张）；WP 产品图默认勾选，1688 详情图默认不勾选（带「详情」标记，勾选后会在发布时自动下载）；拖拽图片或用 ◀ ▶ 调整顺序，顺序即 Portal 客户侧的展示顺序；未勾选的图片不会展示。</div>' +
     (draft.images.length ? '<div class="portal-grid">' + tiles + '</div>' : '<div class="empty">该产品没有可选图片</div>') +
     '<div class="portal-actions">' +
       '<button type="button" class="primary" data-portal-publish="' + esc(id) + '"' + (draft.saving ? ' disabled' : '') + '>' +
