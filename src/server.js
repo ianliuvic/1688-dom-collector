@@ -4315,27 +4315,30 @@ app.post('/api/product-details/:id/shopify', { preHandler: requireApiKey }, asyn
 
 // Split siblings of a bundle are separate WordPress posts tracked in the saved
 // split contents (not in product_wordpress_publications), so a bundle deletion
-// must take its siblings down as well or the family stays half-published.
+// must take its whole family down — keeper and siblings — or it stays
+// half-published. The stored split-content statuses are updated to match.
 async function unpublishSplitSiblingPosts(productDetailId, targetStatus) {
   const results = [];
   try {
     const contents = await db.getSplitContents(productDetailId);
-    const siblings = (contents?.result?.products ?? [])
-      .filter((product) => product?.wp?.role === 'split' && product?.wp?.postId);
-    if (!siblings.length) return results;
+    const family = (contents?.result?.products ?? [])
+      .filter((product) => product?.wp?.postId
+        && (product.wp.role === 'split' || product.wp.role === 'keeper'));
+    if (!family.length) return results;
     const updates = [];
-    for (const sibling of siblings) {
+    for (const member of family) {
       try {
-        await setWordPressProductStatus({ postId: sibling.wp.postId, status: targetStatus, config });
-        updates.push({ productId: sibling.id, wp: { ...sibling.wp, status: targetStatus } });
-        results.push({ postId: sibling.wp.postId, styleNo: sibling.wp.styleNo ?? null, status: targetStatus });
+        await setWordPressProductStatus({ postId: member.wp.postId, status: targetStatus, config });
+        updates.push({ productId: member.id, wp: { ...member.wp, status: targetStatus } });
+        results.push({ postId: member.wp.postId, styleNo: member.wp.styleNo ?? null,
+          role: member.wp.role, status: targetStatus });
       } catch (error) {
-        results.push({ postId: sibling.wp.postId, styleNo: sibling.wp.styleNo ?? null,
-          error: String(error?.message || error).slice(0, 120) });
+        results.push({ postId: member.wp.postId, styleNo: member.wp.styleNo ?? null,
+          role: member.wp.role, error: String(error?.message || error).slice(0, 120) });
       }
     }
     if (updates.length) await db.mergeSplitContentWpResults(productDetailId, updates).catch(() => null);
-  } catch { /* sibling cleanup is best effort */ }
+  } catch { /* family cleanup is best effort */ }
   return results;
 }
 
