@@ -4313,14 +4313,42 @@ app.post('/api/product-details/:id/shopify', { preHandler: requireApiKey }, asyn
   return reply.code(200).send(saved);
 });
 
+// Split siblings of a bundle are separate WordPress posts tracked in the saved
+// split contents (not in product_wordpress_publications), so a bundle deletion
+// must take its siblings down as well or the family stays half-published.
+async function unpublishSplitSiblingPosts(productDetailId, targetStatus) {
+  const results = [];
+  try {
+    const contents = await db.getSplitContents(productDetailId);
+    const siblings = (contents?.result?.products ?? [])
+      .filter((product) => product?.wp?.role === 'split' && product?.wp?.postId);
+    if (!siblings.length) return results;
+    const updates = [];
+    for (const sibling of siblings) {
+      try {
+        await setWordPressProductStatus({ postId: sibling.wp.postId, status: targetStatus, config });
+        updates.push({ productId: sibling.id, wp: { ...sibling.wp, status: targetStatus } });
+        results.push({ postId: sibling.wp.postId, styleNo: sibling.wp.styleNo ?? null, status: targetStatus });
+      } catch (error) {
+        results.push({ postId: sibling.wp.postId, styleNo: sibling.wp.styleNo ?? null,
+          error: String(error?.message || error).slice(0, 120) });
+      }
+    }
+    if (updates.length) await db.mergeSplitContentWpResults(productDetailId, updates).catch(() => null);
+  } catch { /* sibling cleanup is best effort */ }
+  return results;
+}
+
 app.post('/api/product-details/:id/wordpress/unpublish', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const targetStatus = request.body?.status === 'private' ? 'private' : 'draft';
   const publication = await db.getWordPressPublication(detail.id);
   if (!publication?.wp_post_id) {
-    return { status: 'not_published', productDetailId: detail.id, ragDeactivationScheduled: false };
+    const splitSiblings = await unpublishSplitSiblingPosts(detail.id, targetStatus);
+    return { status: 'not_published', productDetailId: detail.id,
+      ragDeactivationScheduled: false, splitSiblings };
   }
-  const targetStatus = request.body?.status === 'private' ? 'private' : 'draft';
   try {
     const wordpress = await setWordPressProductStatus({
       postId: publication.wp_post_id, status: targetStatus, config,
@@ -4341,10 +4369,11 @@ app.post('/api/product-details/:id/wordpress/unpublish', { preHandler: requireAp
       result,
       lastError: null,
     });
+    const splitSiblings = await unpublishSplitSiblingPosts(detail.id, targetStatus);
     const rag = await scheduleProductRagSync(detail.id, { trigger: 'source_delisted' });
     return {
       status: 'unpublished', productDetailId: detail.id,
-      wordpressStatus: saved.wp_status, ragDeactivationScheduled: rag.scheduled,
+      wordpressStatus: saved.wp_status, ragDeactivationScheduled: rag.scheduled, splitSiblings,
     };
   } catch (error) {
     request.log.error({ err: error, productDetailId: detail.id }, 'WordPress unpublish failed');
