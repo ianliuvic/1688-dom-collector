@@ -2779,6 +2779,7 @@ export function createDatabase(databaseUrl) {
     saleMin = null, monthlyMin = null, priceMin = null, priceMax = null,
     listedFrom = '', listedTo = '',
     portal = '', sort = 'sales', dir = 'desc', limit = 100, offset = 0,
+    portalActiveIds = null,
   } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
     const safeOffset = Math.max(Number(offset) || 0, 0);
@@ -2836,6 +2837,17 @@ export function createDatabase(databaseUrl) {
     const limitParam = `$${values.length}`;
     values.push(safeOffset);
     const offsetParam = `$${values.length}`;
+    // When the staging portal catalog is reachable, "published to portal" means
+    // the product id is currently active there; otherwise fall back to the
+    // staging-target publication records.
+    const activeIds = Array.isArray(portalActiveIds) ? portalActiveIds.filter((id) => typeof id === 'string' && id) : null;
+    let activeParam = null;
+    if (activeIds) { values.push(activeIds); activeParam = `$${values.length}`; }
+    const portalColumns = activeParam
+      ? `(portal_product_id IS NOT NULL AND portal_product_id = ANY(${activeParam}::text[])) AS portal_active,
+        count(*) FILTER (WHERE portal_product_id = ANY(${activeParam}::text[])) OVER()::int AS portal_published,`
+      : `NULL::boolean AS portal_active,
+        count(*) FILTER (WHERE portal_product_id IS NOT NULL AND portal_error IS NULL AND coalesce(portal_status, '') <> 'ARCHIVED' AND portal_target = 'staging') OVER()::int AS portal_published,`;
     const result = await pool.query(`WITH pubs AS (
         SELECT publications.product_detail_id, publications.style_no, publications.wp_post_id, publications.wp_url,
           publications.payload, details.offer_id, details.price_min, details.price_max, details.currency,
@@ -2881,7 +2893,7 @@ export function createDatabase(databaseUrl) {
         LEFT JOIN product_portal_publications portal ON portal.product_detail_id = pubs.product_detail_id
       )
       SELECT *, count(*) OVER()::int AS total,
-        count(*) FILTER (WHERE portal_product_id IS NOT NULL AND portal_error IS NULL AND coalesce(portal_status, '') <> 'ARCHIVED') OVER()::int AS portal_published,
+        ${portalColumns}
         sale_quantity::float8 AS sale_quantity_float, thirty_book_count::float8 AS thirty_book_float,
         price_min::float8 AS price_min_float, price_max::float8 AS price_max_float
       FROM joined ${whereSql}

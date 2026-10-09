@@ -4231,7 +4231,47 @@ app.get('/api/selection/facets', { preHandler: requireDashboardOrApiKey }, async
   return value;
 });
 
+// Currently-active product ids in the staging portal catalog, cached briefly so
+// the selection page can show a truthful "published to portal" count/state.
+let portalStagingActiveCache = { at: 0, ids: null, warning: null };
+async function getPortalStagingActiveIds() {
+  const now = Date.now();
+  if (portalStagingActiveCache.ids && now - portalStagingActiveCache.at < 60_000) return portalStagingActiveCache;
+  if (!config.portalStagingApiUrl || !config.portalStagingAdminSecret) {
+    portalStagingActiveCache = { at: now, ids: null, warning: 'portal staging is not configured' };
+    return portalStagingActiveCache;
+  }
+  try {
+    const response = await fetch(new URL('/api/v1/admin/catalog', config.portalStagingApiUrl), {
+      headers: { authorization: `Bearer ${config.portalStagingAdminSecret}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(body?.error?.message ?? `Portal returned HTTP ${response.status}`);
+    const ids = new Set((body?.products ?? []).map((product) => product.id));
+    portalStagingActiveCache = { at: now, ids, warning: null };
+  } catch (error) {
+    portalStagingActiveCache = { at: now, ids: null, warning: String(error?.message || error) };
+  }
+  return portalStagingActiveCache;
+}
+
+/** Selection-page portal state; prefers the live staging catalog when available. */
+function portalStateOf(row) {
+  if (row.portal_error) return 'failed';
+  if (!row.portal_product_id) return 'none';
+  if (String(row.portal_status ?? '').toUpperCase() === 'ARCHIVED') return 'archived';
+  if (row.portal_active === true) return 'published';
+  if (row.portal_active === false) {
+    // Not active in the staging catalog: removed there, or a historical
+    // production publication that never belonged to staging.
+    return row.portal_target === 'staging' ? 'archived' : 'published';
+  }
+  return 'published';
+}
+
 app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, async (request) => {
+  const staging = await getPortalStagingActiveIds();
   const result = await db.listSelectionProducts({
     q: request.query?.q,
     shopId: request.query?.shop,
@@ -4245,6 +4285,7 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
     portal: request.query?.portal,
     sort: request.query?.sort, dir: request.query?.dir,
     limit: request.query?.limit, offset: request.query?.offset,
+    portalActiveIds: staging.ids ? [...staging.ids] : null,
   });
   const coverUrl = (row) => {
     const parts = String(row.main_storage ?? '').split(/[\\/]/).filter(Boolean);
@@ -4258,6 +4299,8 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
   return {
     total: result.total, limit: result.limit, offset: result.offset,
     portalPublished: result.portalPublished ?? 0,
+    portalCheck: staging.ids ? 'ok' : 'failed',
+    portalWarning: staging.warning ?? null,
     items: result.items.map((row) => ({
       productDetailId: row.product_detail_id,
       offerId: row.offer_id,
@@ -4281,7 +4324,8 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
       listingTime: row.listing_time ?? null,
       availability: row.availability_status ?? null,
       bundleKeeper: Boolean(row.is_bundle_keeper),
-      portalState: row.portal_error ? 'failed' : (row.portal_product_id ? (String(row.portal_status ?? '').toUpperCase() === 'ARCHIVED' ? 'archived' : 'published') : 'none'),
+      portalActive: row.portal_active === null || row.portal_active === undefined ? null : Boolean(row.portal_active),
+      portalState: portalStateOf(row),
       portalProductId: row.portal_product_id ?? null,
       portalStatus: row.portal_status ?? null,
       portalTarget: row.portal_target ?? null,
@@ -4392,8 +4436,8 @@ app.post('/api/selection/products/:id/portal-unpublish', { preHandler: requireDa
     return reply.code(409).send({ error: 'portal_product_not_linked', message: '该产品没有已发布到 Portal 的记录' });
   }
   const target = publication.result?.target ?? null;
-  if (target === 'production') {
-    return reply.code(409).send({ error: 'portal_target_not_staging', message: '该产品的发布目标是生产环境，不能从 staging 移除' });
+  if (target !== 'staging') {
+    return reply.code(409).send({ error: 'portal_target_not_staging', message: '只有发布到 staging 的产品才能从这里移除' });
   }
   if (!config.portalStagingApiUrl || !config.portalStagingAdminSecret) {
     return reply.code(503).send({ error: 'portal_not_configured' });
