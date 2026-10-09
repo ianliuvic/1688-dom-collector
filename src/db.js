@@ -2792,6 +2792,11 @@ export function createDatabase(databaseUrl) {
     };
     const values = [];
     const conditions = [];
+    // Live staging catalog ids (when provided) define what "published to portal"
+    // means for both the filter and the count.
+    const activeIds = Array.isArray(portalActiveIds) ? portalActiveIds.filter((id) => typeof id === 'string' && id) : null;
+    let activeParam = null;
+    if (activeIds) { values.push(activeIds); activeParam = `$${values.length}`; }
     // Free-text search across style number, WP title, 1688 offer id, WP post id and shop name.
     const searchTerm = String(q ?? '').trim().slice(0, 120);
     if (searchTerm) {
@@ -2823,8 +2828,12 @@ export function createDatabase(databaseUrl) {
     if (toDay) { values.push(toDay); conditions.push(`listing_time < ($${values.length}::date + 1)`); }
     const portalFilter = ['none', 'published', 'archived', 'failed'].includes(String(portal)) ? String(portal) : '';
     if (portalFilter === 'none') conditions.push(`portal_product_id IS NULL`);
-    else if (portalFilter === 'published') conditions.push(`portal_product_id IS NOT NULL AND portal_error IS NULL AND coalesce(portal_status, '') <> 'ARCHIVED'`);
-    else if (portalFilter === 'archived') conditions.push(`portal_product_id IS NOT NULL AND portal_error IS NULL AND portal_status = 'ARCHIVED'`);
+    else if (portalFilter === 'published') conditions.push(activeParam
+      ? `portal_product_id = ANY(${activeParam}::text[])`
+      : `portal_product_id IS NOT NULL AND portal_error IS NULL AND coalesce(portal_status, '') <> 'ARCHIVED' AND portal_target = 'staging'`);
+    else if (portalFilter === 'archived') conditions.push(activeParam
+      ? `portal_product_id IS NOT NULL AND portal_error IS NULL AND portal_target = 'staging' AND NOT (portal_product_id = ANY(${activeParam}::text[]))`
+      : `portal_product_id IS NOT NULL AND portal_error IS NULL AND portal_status = 'ARCHIVED'`);
     else if (portalFilter === 'failed') conditions.push(`portal_error IS NOT NULL`);
     const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const orderSql = {
@@ -2837,12 +2846,6 @@ export function createDatabase(databaseUrl) {
     const limitParam = `$${values.length}`;
     values.push(safeOffset);
     const offsetParam = `$${values.length}`;
-    // When the staging portal catalog is reachable, "published to portal" means
-    // the product id is currently active there; otherwise fall back to the
-    // staging-target publication records.
-    const activeIds = Array.isArray(portalActiveIds) ? portalActiveIds.filter((id) => typeof id === 'string' && id) : null;
-    let activeParam = null;
-    if (activeIds) { values.push(activeIds); activeParam = `$${values.length}`; }
     const portalColumns = activeParam
       ? `(portal_product_id IS NOT NULL AND portal_product_id = ANY(${activeParam}::text[])) AS portal_active,
         count(*) FILTER (WHERE portal_product_id = ANY(${activeParam}::text[])) OVER()::int AS portal_published,`
