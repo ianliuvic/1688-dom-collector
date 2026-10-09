@@ -49,7 +49,8 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 .portal-tile.drop-after{box-shadow:3px 0 0 var(--info)}
 .portal-tile img{width:84px;height:84px;object-fit:cover;border-radius:5px;display:block;background:#f2f4f7;cursor:zoom-in}
 .portal-tile .ord{position:absolute;top:5px;left:5px;background:var(--info);color:#fff;font-size:10.5px;font-weight:700;border-radius:999px;padding:0 6px;line-height:17px;min-width:17px;text-align:center}
-.portal-tile input{position:absolute;top:5px;right:5px;margin:0;cursor:pointer}
+.portal-tile input{position:absolute;top:5px;right:5px;margin:0;cursor:pointer;width:17px;height:17px;accent-color:#175cd3}
+.portal-tile .kind{position:absolute;left:5px;bottom:27px;background:#475467;color:#fff;font-size:10px;border-radius:4px;padding:0 5px;line-height:15px;opacity:.92}
 .portal-tile .moves{display:flex;gap:3px;justify-content:center;margin-top:3px}
 .portal-tile .moves button{width:24px;height:20px;border:1px solid var(--line);background:#fff;border-radius:4px;font-size:10px;cursor:pointer;padding:0;line-height:1}
 .portal-tile:not(.is-on) img{opacity:.35}
@@ -271,17 +272,22 @@ let dropPortalIndex = null;
 function portalDraftFor(id, media) {
   if (portalDrafts[id]) return portalDrafts[id];
   const wp = Array.isArray(media.wpImages) ? media.wpImages : [];
+  const detail = Array.isArray(media.detailImages) ? media.detailImages : [];
   const saved = media.portal && Array.isArray(media.portal.images) ? media.portal.images : [];
-  const available = new Map(wp.filter((image) => image.url).map((image) => [image.url, image]));
+  const all = [
+    ...wp.filter((image) => image.url).map((image) => ({ url: image.url, kind: 'wp' })),
+    ...detail.filter((image) => image.url).map((image) => ({ url: image.url, kind: 'detail' })),
+  ];
+  const available = new Map(all.map((image) => [image.url, image]));
   const images = [];
   for (const entry of saved) {
     if (entry && entry.url && available.has(entry.url)) {
-      images.push({ url: entry.url, visible: entry.visible !== false });
+      images.push({ url: entry.url, visible: entry.visible !== false, kind: entry.kind || available.get(entry.url).kind });
       available.delete(entry.url);
     }
   }
-  for (const image of wp) {
-    if (image.url && available.has(image.url)) images.push({ url: image.url, visible: true });
+  for (const image of all) {
+    if (available.has(image.url)) images.push({ url: image.url, visible: true, kind: image.kind });
   }
   portalDrafts[id] = { images, portal: media.portal || null, message: '', error: '', saving: false };
   return portalDrafts[id];
@@ -299,15 +305,16 @@ function portalPanelHtml(id) {
       : '未发布';
   const selected = draft.images.filter((image) => image.visible).length;
   const tiles = draft.images.map((image, index) =>
-    '<div class="portal-tile' + (image.visible ? ' is-on' : '') + '" draggable="true" data-portal-tile="' + index + '">' +
+    '<div class="portal-tile' + (image.visible ? ' is-on' : '') + '" data-portal-tile="' + index + '">' +
       '<span class="ord">' + (index + 1) + '</span>' +
+      (image.kind === 'detail' ? '<span class="kind">详情</span>' : '') +
       '<input type="checkbox" ' + (image.visible ? 'checked' : '') + ' data-portal-toggle="' + index + '" title="勾选后发布到 Portal">' +
-      '<img loading="lazy" referrerpolicy="no-referrer" draggable="false" src="' + esc(image.url) + '" alt="" onclick="openLightbox(this.src)" onerror="this.style.opacity=.25">' +
+      '<img loading="lazy" referrerpolicy="no-referrer" draggable="true" src="' + esc(image.url) + '" alt="" onclick="openLightbox(this.src)" onerror="this.style.opacity=.25">' +
       '<span class="moves"><button type="button" data-portal-move="' + index + '" data-portal-dir="-1" title="前移">◀</button><button type="button" data-portal-move="' + index + '" data-portal-dir="1" title="后移">▶</button></span>' +
     '</div>').join('');
   return '<div class="portal-panel" data-portal-panel="' + esc(id) + '">' +
     '<h4>发布到 Portal <span class="portal-msg">（' + stateText + '）</span></h4>' +
-    '<div class="portal-note">勾选要发布到 Portal 的图片（共 ' + draft.images.length + ' 张，已选 ' + selected + ' 张）；拖拽或用 ◀ ▶ 调整顺序，顺序即 Portal 客户侧的展示顺序；未勾选的图片不会展示。</div>' +
+    '<div class="portal-note">勾选要发布到 Portal 的图片（共 ' + draft.images.length + ' 张，已选 ' + selected + ' 张；带「详情」标记的是 1688 详情图，会在发布时自动下载）；拖拽图片或用 ◀ ▶ 调整顺序，顺序即 Portal 客户侧的展示顺序；未勾选的图片不会展示。</div>' +
     (draft.images.length ? '<div class="portal-grid">' + tiles + '</div>' : '<div class="empty">该产品没有可选图片</div>') +
     '<div class="portal-actions">' +
       '<button type="button" class="primary" data-portal-publish="' + esc(id) + '"' + (draft.saving ? ' disabled' : '') + '>' +
@@ -343,6 +350,9 @@ async function publishPortal(id) {
     });
     const data = await response.json().catch(() => null);
     if (!response.ok) throw new Error((data && (data.message || data.error)) || ('HTTP ' + response.status));
+    if (data.portal && Array.isArray(data.portal.images) && data.portal.images.length) {
+      draft.images = data.portal.images.map((entry) => ({ url: entry.url, visible: entry.visible !== false, kind: entry.kind || null }));
+    }
     const visibleCount = draft.images.filter((image) => image.visible).length;
     draft.portal = {
       productId: (data.portal && data.portal.productId) || null,
@@ -395,8 +405,9 @@ document.addEventListener('click', (event) => {
 });
 
 document.addEventListener('dragstart', (event) => {
-  const tile = event.target.closest('.portal-tile');
-  if (!tile) return;
+  const image = event.target.closest('.portal-tile img');
+  if (!image) return;
+  const tile = image.closest('.portal-tile');
   dragPortalIndex = Number(tile.dataset.portalTile);
   tile.classList.add('dragging');
   event.dataTransfer.effectAllowed = 'move';

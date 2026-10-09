@@ -563,14 +563,16 @@ app.get('/api/shops-overview/products', { preHandler: requireDashboardAuth }, as
   return { total, limit: options.limit, offset: options.offset, items };
 });
 
-async function importWordPressProductToPortal(identifier, portalApiUrl = config.portalApiUrl) {
-  const response = await fetch(new URL('/api/v1/admin/catalog/import/wordpress', portalApiUrl), {
+async function importWordPressProductToPortal(identifier, portal = { url: config.portalApiUrl, secret: config.portalAdminSecret }, options = {}) {
+  const requestBody = { identifiers: [identifier] };
+  if (Array.isArray(options.mediaUrls) && options.mediaUrls.length) requestBody.mediaUrls = options.mediaUrls;
+  const response = await fetch(new URL('/api/v1/admin/catalog/import/wordpress', portal.url), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.portalAdminSecret}`,
+      Authorization: `Bearer ${portal.secret}`,
     },
-    body: JSON.stringify({ identifiers: [identifier] }),
+    body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(120_000),
   });
   const body = await response.json().catch(() => ({}));
@@ -666,11 +668,42 @@ async function publishProductToPortal(productDetailId, options = {}) {
     ? options.images
     : (Array.isArray(previous?.result?.mediaImages) && previous.result.mediaImages.length ? previous.result.mediaImages : null);
   const identifier = String(publication.wp_post_id ?? publication.style_no);
+  // WordPress media comes in through the import itself; 1688 detail images (not
+  // part of the WordPress set) are downloaded to the collector on demand and
+  // passed to the portal as extra media URLs.
+  const wpImageSet = new Set((Array.isArray(publication.payload?.images) ? publication.payload.images : [])
+    .map((image) => normalizedImageUrl(image?.url)).filter(Boolean));
+  const chosenList = Array.isArray(chosenImages)
+    ? chosenImages.map((entry) => ({ url: String(entry?.url ?? '').trim(), visible: entry?.visible !== false }))
+      .filter((entry) => entry.url)
+    : null;
+  const remoteDetailUrls = (chosenList ?? []).filter((entry) => entry.visible
+    && !wpImageSet.has(normalizedImageUrl(entry.url))
+    && /^https?:\/\//i.test(entry.url)
+    && !entry.url.startsWith(config.publicBaseUrl)).map((entry) => entry.url);
+  let detailForImages = detail;
+  if (remoteDetailUrls.length) {
+    await ensureDescriptionImages(detail, remoteDetailUrls).catch(() => {});
+    detailForImages = await db.getProductDetail(productDetailId).catch(() => detail);
+  }
+  const storedDetailByUrl = new Map();
+  for (const image of (detailForImages?.images ?? []).filter((item) => item.image_type === 'description')) {
+    const publicPath = imagePublicPath(image.storage_path);
+    if (publicPath) storedDetailByUrl.set(normalizedImageUrl(image.source_url), `${config.publicBaseUrl}${publicPath}`);
+  }
+  const finalImages = (chosenList ?? []).map((entry) => {
+    const normalized = normalizedImageUrl(entry.url);
+    if (wpImageSet.has(normalized)) return { url: entry.url, visible: entry.visible, kind: 'wp' };
+    const stored = storedDetailByUrl.get(normalized);
+    const url = stored ?? (/^\//.test(entry.url) ? `${config.publicBaseUrl}${entry.url}` : entry.url);
+    return { url, visible: entry.visible, kind: 'detail' };
+  });
+  const detailMediaUrls = [...new Set(finalImages.filter((entry) => entry.kind === 'detail' && entry.visible).map((entry) => entry.url))];
   try {
-    const product = await importWordPressProductToPortal(identifier, portal.url);
+    const product = await importWordPressProductToPortal(identifier, portal, { mediaUrls: detailMediaUrls });
     let media = null;
-    if (chosenImages && product?.id) {
-      media = await updatePortalCatalogMedia(portal, product.id, product, chosenImages);
+    if (finalImages && finalImages.length && product?.id) {
+      media = await updatePortalCatalogMedia(portal, product.id, product, finalImages);
     }
     const portalBase = portal.url.replace(/\/$/, '');
     const saved = await db.savePortalPublication(productDetailId, {
@@ -684,12 +717,12 @@ async function publishProductToPortal(productDetailId, options = {}) {
         id: product.id, status: product.status, title: product.title,
         styleNumber: product.styleNumber, variantCount: (product.variants ?? []).length,
         mediaCount: (product.media ?? []).length,
-        mediaImages: chosenImages ?? null,
+        mediaImages: finalImages ?? null,
         target,
       } : { target },
       lastError: null,
     });
-    return { product, publication: saved, media, target };
+    return { product, publication: saved, media, target, images: finalImages };
   } catch (error) {
     const message = String(error?.message || error);
     await db.failPortalPublication(productDetailId, message, {
@@ -4244,7 +4277,13 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
 app.get('/api/selection/products/:id/media', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const media = await db.getSelectionProductMedia(request.params.id);
   if (!media) return reply.code(404).send({ error: 'not_found' });
-  return media;
+  return {
+    ...media,
+    detailImages: (media.detailImages ?? []).map((image) => ({
+      ...image,
+      url: typeof image.url === 'string' && image.url.startsWith('/') ? `${config.publicBaseUrl}${image.url}` : image.url,
+    })),
+  };
 });
 
 app.get('/api/selection/products/:id/skus', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
@@ -4273,6 +4312,7 @@ app.post('/api/selection/products/:id/portal-publish', { preHandler: requireDash
         target: result.target ?? null,
         media: result.media,
         mediaCount: (result.product?.media ?? []).length,
+        images: result.images ?? null,
       },
       publication: result.publication,
     };
