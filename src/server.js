@@ -73,6 +73,8 @@ const config = {
   detailCaptureConcurrency: Math.min(Math.max(Number(process.env.DETAIL_CAPTURE_CONCURRENCY) || 1, 1), 5),
   portalApiUrl: process.env.PORTAL_API_URL?.trim() || '',
   portalAdminSecret: process.env.PORTAL_ADMIN_SECRET || '',
+  portalStagingApiUrl: process.env.PORTAL_STAGING_API_URL?.trim() || '',
+  portalStagingAdminSecret: process.env.PORTAL_STAGING_ADMIN_SECRET || '',
   linkfoxApiKey: process.env.LINKFOX_API_KEY?.trim() || process.env.LINKFOX_AGENT_API_KEY?.trim() || '',
   linkfoxGateway: process.env.LINKFOX_TOOL_GATEWAY?.trim() || 'https://tool-gateway.linkfox.com',
   feishuAppId: process.env.FEISHU_APP_ID?.trim() || '',
@@ -561,8 +563,8 @@ app.get('/api/shops-overview/products', { preHandler: requireDashboardAuth }, as
   return { total, limit: options.limit, offset: options.offset, items };
 });
 
-async function importWordPressProductToPortal(identifier) {
-  const response = await fetch(new URL('/api/v1/admin/catalog/import/wordpress', config.portalApiUrl), {
+async function importWordPressProductToPortal(identifier, portalApiUrl = config.portalApiUrl) {
+  const response = await fetch(new URL('/api/v1/admin/catalog/import/wordpress', portalApiUrl), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -588,24 +590,89 @@ function sizeCountFromSkuDimensions(skuDimensions) {
     .filter((value) => value && !/(均码|one\s*size|free\s*size)/i.test(value)))].length;
 }
 
-app.post('/api/portal/publish', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
-  const productDetailId = Number(request.body?.productDetailId);
-  if (!Number.isInteger(productDetailId) || productDetailId <= 0) {
-    return reply.code(400).send({ error: 'product_detail_id_required' });
+/** Apply a chosen portal image set (order + visibility) to one portal catalog product. */
+async function updatePortalCatalogMedia(portal, portalProductId, product, images) {
+  const media = Array.isArray(product?.media) ? product.media : [];
+  if (!portalProductId || !media.length || !Array.isArray(images) || !images.length) return null;
+  const requested = new Map();
+  for (const entry of images.slice(0, 500)) {
+    const url = typeof entry?.url === 'string' ? entry.url.trim() : '';
+    if (!url || requested.has(url)) continue;
+    requested.set(url, entry.visible !== false);
   }
-  if (!config.portalApiUrl || !config.portalAdminSecret) {
-    return reply.code(503).send({ error: 'portal_not_configured' });
+  if (!requested.size) return null;
+  const urlById = new Map(media.map((item) => [item.id, item.url ?? '']));
+  const expectedOrder = new Map([...requested.keys()].map((url, index) => [url, index]));
+  const visibleIds = [];
+  const hiddenIds = [];
+  const mediaVisibility = [];
+  for (const item of media) {
+    const explicit = requested.has(item.url ?? '');
+    const visible = explicit ? requested.get(item.url ?? '') : true;
+    mediaVisibility.push({ id: item.id, visible });
+    (visible ? visibleIds : hiddenIds).push(item.id);
+  }
+  visibleIds.sort((left, right) => {
+    const leftIndex = expectedOrder.has(urlById.get(left)) ? expectedOrder.get(urlById.get(left)) : expectedOrder.size;
+    const rightIndex = expectedOrder.has(urlById.get(right)) ? expectedOrder.get(urlById.get(right)) : expectedOrder.size;
+    return leftIndex - rightIndex;
+  });
+  const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(portalProductId)}`, portal.url), {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${portal.secret}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ mediaVisibility, mediaOrder: [...visibleIds, ...hiddenIds] }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = payload?.error?.message ?? (typeof payload?.error === 'string' ? payload.error : null)
+      ?? `Portal media update returned HTTP ${response.status}`;
+    const error = new Error(String(message));
+    error.status = 502;
+    error.code = 'portal_media_update_failed';
+    throw error;
+  }
+  return { visible: visibleIds.length, hidden: hiddenIds.length };
+}
+
+/** Import one collector product into the portal catalog, optionally applying image order/selection. */
+async function publishProductToPortal(productDetailId, options = {}) {
+  const target = options.target === 'production' ? 'production' : 'staging';
+  const portal = target === 'production'
+    ? { name: 'production', url: config.portalApiUrl, secret: config.portalAdminSecret }
+    : { name: 'staging', url: config.portalStagingApiUrl, secret: config.portalStagingAdminSecret };
+  if (!portal.url || !portal.secret) {
+    const error = new Error(`${target}_portal_not_configured`);
+    error.status = 503;
+    error.code = 'portal_not_configured';
+    throw error;
   }
   const detail = await db.getProductDetail(productDetailId);
-  if (!detail) return reply.code(404).send({ error: 'product_not_found' });
+  if (!detail) {
+    const error = new Error('product_not_found');
+    error.status = 404;
+    error.code = 'product_not_found';
+    throw error;
+  }
   const publication = await db.getWordPressPublication(productDetailId);
   if (!publication?.wp_post_id && !publication?.style_no) {
-    return reply.code(409).send({ error: 'wordpress_publication_required' });
+    const error = new Error('wordpress_publication_required');
+    error.status = 409;
+    error.code = 'wordpress_publication_required';
+    throw error;
   }
+  const previous = await db.getPortalPublication(productDetailId);
+  const chosenImages = Array.isArray(options.images) && options.images.length
+    ? options.images
+    : (Array.isArray(previous?.result?.mediaImages) && previous.result.mediaImages.length ? previous.result.mediaImages : null);
   const identifier = String(publication.wp_post_id ?? publication.style_no);
   try {
-    const product = await importWordPressProductToPortal(identifier);
-    const portalBase = config.portalApiUrl.replace(/\/$/, '');
+    const product = await importWordPressProductToPortal(identifier, portal.url);
+    let media = null;
+    if (chosenImages && product?.id) {
+      media = await updatePortalCatalogMedia(portal, product.id, product, chosenImages);
+    }
+    const portalBase = portal.url.replace(/\/$/, '');
     const saved = await db.savePortalPublication(productDetailId, {
       wpPostId: publication.wp_post_id ?? null,
       styleNo: publication.style_no ?? product?.styleNumber ?? null,
@@ -617,17 +684,39 @@ app.post('/api/portal/publish', { preHandler: requireDashboardOrApiKey }, async 
         id: product.id, status: product.status, title: product.title,
         styleNumber: product.styleNumber, variantCount: (product.variants ?? []).length,
         mediaCount: (product.media ?? []).length,
-      } : {},
+        mediaImages: chosenImages ?? null,
+        target,
+      } : { target },
       lastError: null,
     });
-    return { status: 'synced', productDetailId, portalProduct: product, publication: saved };
+    return { product, publication: saved, media, target };
   } catch (error) {
     const message = String(error?.message || error);
     await db.failPortalPublication(productDetailId, message, {
       wpPostId: publication.wp_post_id ?? null,
       styleNo: publication.style_no ?? null,
     }).catch(() => {});
-    return reply.code(502).send({ error: 'portal_publish_failed', message });
+    throw error;
+  }
+}
+
+app.post('/api/portal/publish', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const productDetailId = Number(request.body?.productDetailId);
+  if (!Number.isInteger(productDetailId) || productDetailId <= 0) {
+    return reply.code(400).send({ error: 'product_detail_id_required' });
+  }
+  try {
+    const result = await publishProductToPortal(productDetailId, {
+      images: Array.isArray(request.body?.images) ? request.body.images : null,
+      target: request.body?.target === 'staging' ? 'staging' : 'production',
+    });
+    return {
+      status: 'synced', productDetailId,
+      portalProduct: result.product, publication: result.publication, media: result.media,
+    };
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    return reply.code(status).send({ error: error?.code || 'portal_publish_failed', message: String(error?.message || error) });
   }
 });
 
@@ -4103,6 +4192,7 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
     sizeMin: request.query?.sizeMin, sizeMax: request.query?.sizeMax,
     saleMin: request.query?.saleMin, monthlyMin: request.query?.monthlyMin,
     priceMin: request.query?.priceMin, priceMax: request.query?.priceMax,
+    portal: request.query?.portal,
     sort: request.query?.sort, dir: request.query?.dir,
     limit: request.query?.limit, offset: request.query?.offset,
   });
@@ -4140,6 +4230,12 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
       listingTime: row.listing_time ?? null,
       availability: row.availability_status ?? null,
       bundleKeeper: Boolean(row.is_bundle_keeper),
+      portalState: row.portal_error ? 'failed' : (row.portal_product_id ? 'published' : 'none'),
+      portalProductId: row.portal_product_id ?? null,
+      portalStatus: row.portal_status ?? null,
+      portalTarget: row.portal_target ?? null,
+      portalSyncedAt: row.portal_synced_at ?? null,
+      portalError: row.portal_error ?? null,
       cover: coverUrl(row),
     })),
   };
@@ -4155,6 +4251,35 @@ app.get('/api/selection/products/:id/skus', { preHandler: requireDashboardOrApiK
   const data = await db.getSelectionProductSkus(request.params.id);
   if (!data) return reply.code(404).send({ error: 'not_found' });
   return data;
+});
+
+// Publish (or refresh) one selection product into the portal catalog, applying
+// the chosen image set (visibility + order) to the portal product.
+app.post('/api/selection/products/:id/portal-publish', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const productDetailId = Number(request.params.id);
+  if (!Number.isInteger(productDetailId) || productDetailId <= 0) {
+    return reply.code(400).send({ error: 'invalid_product_id' });
+  }
+  try {
+    const result = await publishProductToPortal(productDetailId, {
+      images: Array.isArray(request.body?.images) ? request.body.images : null,
+      target: request.body?.target === 'production' ? 'production' : 'staging',
+    });
+    return {
+      status: 'synced', productDetailId,
+      portal: {
+        productId: result.product?.id ?? null,
+        status: result.product?.status ?? null,
+        target: result.target ?? null,
+        media: result.media,
+        mediaCount: (result.product?.media ?? []).length,
+      },
+      publication: result.publication,
+    };
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    return reply.code(status).send({ error: error?.code || 'portal_publish_failed', message: String(error?.message || error) });
+  }
 });
 
 // Stock audit across published products: what each page claims (sample

@@ -2766,7 +2766,7 @@ export function createDatabase(databaseUrl) {
     shopId = '', category1688 = '', categoryWp = '',
     colorMin = null, colorMax = null, sizeMin = null, sizeMax = null,
     saleMin = null, monthlyMin = null, priceMin = null, priceMax = null,
-    sort = 'sales', dir = 'desc', limit = 100, offset = 0,
+    portal = '', sort = 'sales', dir = 'desc', limit = 100, offset = 0,
   } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
     const safeOffset = Math.max(Number(offset) || 0, 0);
@@ -2793,6 +2793,10 @@ export function createDatabase(databaseUrl) {
     const minMonthly = num(monthlyMin); if (minMonthly !== null) { values.push(minMonthly); conditions.push(`coalesce(thirty_book_count, 0) >= $${values.length}`); }
     const minPrice = num(priceMin); if (minPrice !== null) { values.push(minPrice); conditions.push(`coalesce(price_min, 0) >= $${values.length}`); }
     const maxPrice = num(priceMax); if (maxPrice !== null) { values.push(maxPrice); conditions.push(`coalesce(price_min, 0) <= $${values.length}`); }
+    const portalFilter = ['none', 'published', 'failed'].includes(String(portal)) ? String(portal) : '';
+    if (portalFilter === 'none') conditions.push(`portal_product_id IS NULL`);
+    else if (portalFilter === 'published') conditions.push(`portal_product_id IS NOT NULL AND portal_error IS NULL`);
+    else if (portalFilter === 'failed') conditions.push(`portal_error IS NOT NULL`);
     const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const orderSql = {
       sales: `sale_quantity ${direction} NULLS LAST`,
@@ -2824,7 +2828,9 @@ export function createDatabase(databaseUrl) {
       ), joined AS (
         SELECT pubs.*,
           src.shop_id, src.shop_name, src.shop_category, src.sale_quantity, src.thirty_book_count,
-          src.listing_time, src.availability_status, img.storage_path AS main_storage, img.source_url AS main_source_url
+          src.listing_time, src.availability_status, img.storage_path AS main_storage, img.source_url AS main_source_url,
+          portal.portal_product_id, portal.portal_status, portal.last_error AS portal_error,
+          portal.last_synced_at::text AS portal_synced_at, portal.result->>'target' AS portal_target
         FROM pubs
         LEFT JOIN LATERAL (
           SELECT products.shop_id, products.category AS shop_category, products.sale_quantity,
@@ -2844,6 +2850,7 @@ export function createDatabase(databaseUrl) {
           ORDER BY images.sort_order ASC
           LIMIT 1
         ) img ON true
+        LEFT JOIN product_portal_publications portal ON portal.product_detail_id = pubs.product_detail_id
       )
       SELECT *, count(*) OVER()::int AS total,
         sale_quantity::float8 AS sale_quantity_float, thirty_book_count::float8 AS thirty_book_float,
@@ -2940,7 +2947,24 @@ export function createDatabase(databaseUrl) {
         detailImages.push({ url, sourceUrl: url, stored: false });
       }
     }
-    return { productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, wpImages, detailImages };
+    const portalRow = await pool.query(`SELECT portal_product_id, portal_status, last_error,
+        last_synced_at::text AS last_synced_at, result
+      FROM product_portal_publications WHERE product_detail_id = $1`, [id]);
+    const portalPub = portalRow.rows[0] ?? null;
+    const savedImages = Array.isArray(portalPub?.result?.mediaImages) && portalPub.result.mediaImages.length
+      ? portalPub.result.mediaImages
+      : null;
+    return {
+      productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, wpImages, detailImages,
+      portal: portalPub ? {
+        productId: portalPub.portal_product_id ?? null,
+        status: portalPub.portal_status ?? null,
+        error: portalPub.last_error ?? null,
+        syncedAt: portalPub.last_synced_at ?? null,
+        target: portalPub.result?.target ?? null,
+        images: savedImages,
+      } : null,
+    };
   }
 
   /** Per-SKU stock (style-colour-size) captured from LinkFox / browser for the selection page. */
