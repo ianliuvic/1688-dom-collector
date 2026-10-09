@@ -4302,6 +4302,46 @@ app.get('/api/selection/products/:id/media', { preHandler: requireDashboardOrApi
   };
 });
 
+// Portal-published products whose 1688 listing was delisted by a shop scan.
+// The daily scan task reports these so the portal copy can be handled promptly.
+app.get('/api/portal/delisted', { preHandler: requireDashboardOrApiKey }, async () => {
+  const candidates = await db.listPortalDelistedProducts();
+  let activeIds = null;
+  let warning = null;
+  if (config.portalStagingApiUrl && config.portalStagingAdminSecret) {
+    try {
+      const response = await fetch(new URL('/api/v1/admin/catalog', config.portalStagingApiUrl), {
+        headers: { authorization: `Bearer ${config.portalStagingAdminSecret}` },
+        signal: AbortSignal.timeout(60_000),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.error?.message ?? `Portal returned HTTP ${response.status}`);
+      activeIds = new Set((body?.products ?? []).map((product) => product.id));
+    } catch (error) {
+      warning = String(error?.message || error);
+    }
+  } else {
+    warning = 'portal staging is not configured';
+  }
+  const products = (activeIds ? candidates.filter((row) => activeIds.has(row.portal_product_id)) : candidates)
+    .map((row) => ({
+      styleNo: row.style_no,
+      shopName: row.shop_name,
+      portalProductId: row.portal_product_id,
+      portalTarget: row.portal_target ?? null,
+      portalStatus: row.portal_status ?? null,
+      wpStatus: row.wp_status ?? null,
+      delistedAt: row.delisted_at ?? null,
+    }));
+  return {
+    checkedAt: new Date().toISOString(),
+    portalCheck: activeIds ? 'ok' : 'failed',
+    warning,
+    checkedCount: candidates.length,
+    products,
+  };
+});
+
 app.get('/api/selection/products/:id/skus', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const data = await db.getSelectionProductSkus(request.params.id);
   if (!data) return reply.code(404).send({ error: 'not_found' });

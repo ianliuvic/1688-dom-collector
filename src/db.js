@@ -3009,6 +3009,28 @@ export function createDatabase(databaseUrl) {
     return { productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, capturedAt: row.captured_at, skus };
   }
 
+  /** Portal-published products whose 1688 listing is now delisted (from shop scans). */
+  async function listPortalDelistedProducts() {
+    const result = await pool.query(`SELECT publications.style_no, publications.portal_product_id,
+        publications.portal_status, publications.result->>'target' AS portal_target,
+        publications.wp_status, src.shop_name, src.delisted_at::text AS delisted_at
+      FROM product_portal_publications publications
+      JOIN product_details details ON details.id = publications.product_detail_id
+      JOIN LATERAL (
+        SELECT coalesce(shops.shop_name, shops.domain) AS shop_name, products.availability_status,
+          products.delisted_at
+        FROM shop_products products
+        LEFT JOIN shop_profiles shops ON shops.id = products.shop_id
+        WHERE products.offer_id = details.offer_id
+        ORDER BY products.last_crawled_at DESC
+        LIMIT 1
+      ) src ON true
+      WHERE publications.portal_product_id IS NOT NULL
+        AND src.availability_status = 'delisted'
+      ORDER BY src.delisted_at DESC NULLS LAST`);
+    return result.rows;
+  }
+
   /** Latest 1688 sale quantity per style number / WordPress post id (shop scan data). */
   async function listProductSaleQuantities({ styles = [], wpPostIds = [] } = {}) {
     const styleList = [...new Set((styles ?? []).map((value) => String(value).trim()).filter(Boolean))];
@@ -3041,6 +3063,7 @@ export function createDatabase(databaseUrl) {
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     summarizeWordPressPublications, listWordPressPublications, listProductSaleQuantities,
     listSelectionProducts, listSelectionFacets, getSelectionProductMedia, getSelectionProductSkus,
+    listPortalDelistedProducts,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
