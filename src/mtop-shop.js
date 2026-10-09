@@ -72,7 +72,8 @@ async function callMtop({ context, page, api, version, data, extraHeaders = {}, 
     payload = parseJson(response.text);
     if (isSuccess(payload)) return payload;
     if (attempt === 0 && shouldRefreshToken(payload)) continue;
-    throw new Error(`1688 MTop rejected the request: ${retMessages(payload).join('; ') || httpStatus}`);
+    throw new Error(`1688 MTop rejected the request: ${retMessages(payload).join('; ') || httpStatus}`
+      + ` | response=${JSON.stringify(payload).slice(0, 400)}`);
   }
 
   throw new Error(`1688 MTop request failed: ${retMessages(payload).join('; ') || httpStatus}`);

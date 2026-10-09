@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-export const PLUGIN_VERSION = '1.1.9';
+export const PLUGIN_VERSION = '1.2.0';
 
 const AES_KEY = Buffer.from('ABCD16881688ABCD', 'ascii');
 const AES_IV = Buffer.from('1688168816881688', 'ascii');
