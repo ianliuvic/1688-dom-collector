@@ -26,6 +26,7 @@ const CHALLENGE_TEXT = [
   '安全验证',
   '验证码',
   '滑动验证',
+  '滑块',
   '异常访问',
 ];
 
@@ -491,12 +492,28 @@ export function createCollector({
     if (job.options?.mode === 'shop_mtop') {
       try {
         await page.goto(job.url, { waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(3000);
-        const finalUrl = page.url();
+        await page.waitForTimeout(5000);
         const title = await page.title();
-        const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
-        const shopData = await parse1688Shop(page).catch(() => null);
-        const memberId = job.options.memberId || shopData?.company?.memberId;
+        let bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+        let shopData = await parse1688Shop(page).catch(() => null);
+        let memberId = job.options.memberId || shopData?.company?.memberId;
+        // Some shops render no pageData on the offerlist page itself; fall back
+        // to parsing the shop home (skipping captcha pages, which the classify
+        // check below reports as requires_auth).
+        if (!memberId && !/滑块|验证码|安全验证|异常访问/.test(bodyText)) {
+          await page.goto(new URL(job.url).origin + '/', { waitUntil: 'domcontentloaded' });
+          await page.waitForTimeout(4000);
+          const homeText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+          const homeData = await parse1688Shop(page).catch(() => null);
+          if (homeData) shopData = homeData;
+          memberId = homeData?.company?.memberId ?? null;
+          if (!memberId) bodyText = `${bodyText} ${homeText}`;
+          if (memberId) {
+            await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+            await page.waitForTimeout(2500);
+          }
+        }
+        const finalUrl = page.url();
         sessionState = classifySession(finalUrl, bodyText);
         lastCheckedAt = new Date().toISOString();
         await fs.writeFile(domPath, await page.content(), 'utf8');
