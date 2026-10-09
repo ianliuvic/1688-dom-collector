@@ -22,6 +22,7 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .filters .spacer{flex:1}
 .summary{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:10px 24px 0;max-width:1600px;margin:0 auto;font-size:13px;color:var(--muted)}
 .summary b{color:var(--text)}
+.summary .freshness{color:#475467}
 .pager{display:flex;gap:8px;align-items:center}
 .pager button{border:1px solid var(--line);border-radius:8px;padding:4px 12px;background:#fff;cursor:pointer;font-size:12.5px}
 .pager button:disabled{opacity:.45;cursor:default}
@@ -100,6 +101,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 <div class="summary">
   <span>共 <b id="total">-</b> 个产品</span>
   <span id="range"></span>
+  <span id="freshness" class="freshness"></span>
   <div class="pager">
     <button id="prev">上一页</button>
     <span>第 <b id="pageLabel">1</b> / <span id="pageTotal">1</span> 页</span>
@@ -143,9 +145,11 @@ async function loadFacets() {
   try {
     const data = await (await fetch('/api/selection/facets')).json();
     const fill = (id, rows, mapper) => { const select = $(id); for (const row of rows) { const option = document.createElement('option'); option.value = mapper(row).value; option.textContent = mapper(row).label; select.appendChild(option); } };
-    fill('shop', data.shops || [], (row) => ({ value: row.id ?? '', label: row.name ?? row.id }));
+    fill('shop', data.shops || [], (row) => ({ value: row.id ?? '', label: (row.name ?? row.id) + (row.lastScanAt ? ' · ' + String(row.lastScanAt).slice(5, 10) : '') }));
     fill('category', data.categories1688 || [], (value) => ({ value, label: value }));
     fill('wpCategory', data.categoriesWp || [], (value) => ({ value, label: value }));
+    const latest = data.lastScanAt ? String(data.lastScanAt).replace('T', ' ').slice(0, 16) : '';
+    if (latest) $('freshness').textContent = '数据截至 ' + latest + '（随每日店铺扫描自动更新：销量/类目/上下架/新增与移除）';
   } catch { /* filters stay empty */ }
 }
 

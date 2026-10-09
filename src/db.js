@@ -2869,6 +2869,14 @@ export function createDatabase(databaseUrl) {
       ) src ON true
       WHERE publications.wp_status = 'publish' AND publications.wp_post_id IS NOT NULL
       ORDER BY src.shop_name`);
+    const scans = await pool.query(`SELECT shop_id, max(last_crawled_at)::text AS last_scan FROM shop_products GROUP BY shop_id`);
+    const scanByShop = new Map(scans.rows.map((row) => [String(row.shop_id), row.last_scan]));
+    const shopsList = shops.rows.map((row) => ({
+      id: row.shop_id === null ? null : String(row.shop_id),
+      name: row.shop_name,
+      lastScanAt: scanByShop.get(String(row.shop_id)) ?? null,
+    }));
+    const overall = await pool.query(`SELECT max(last_crawled_at)::text AS last_scan FROM shop_products`);
     const categories1688 = await pool.query(`SELECT DISTINCT products.category
       FROM product_wordpress_publications publications
       JOIN product_details details ON details.id = publications.product_detail_id
@@ -2882,9 +2890,10 @@ export function createDatabase(databaseUrl) {
         AND publications.payload->'meta'->>'primary_category' IS NOT NULL
       ORDER BY 1`);
     return {
-      shops: shops.rows.map((row) => ({ id: row.shop_id === null ? null : String(row.shop_id), name: row.shop_name })),
+      shops: shopsList,
       categories1688: categories1688.rows.map((row) => row.category),
       categoriesWp: categoriesWp.rows.map((row) => row.category),
+      lastScanAt: overall.rows[0]?.last_scan ?? null,
     };
   }
 
