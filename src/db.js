@@ -1265,10 +1265,10 @@ export function createDatabase(databaseUrl) {
       LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object('id', images.id, 'type', images.image_type,
           'sort', images.sort_order, 'path', images.storage_path, 'source', images.source_url)
-          ORDER BY CASE images.image_type WHEN 'main' THEN 0 WHEN 'gallery' THEN 1 ELSE 2 END,
+          ORDER BY CASE images.image_type WHEN 'main' THEN 0 WHEN 'gallery' THEN 1 WHEN 'sku' THEN 2 ELSE 3 END,
             images.sort_order, images.id) AS images
         FROM product_detail_images images
-        WHERE images.product_detail_id=base.id AND images.image_type IN ('main','gallery','sku')
+        WHERE images.product_detail_id=base.id AND images.image_type IN ('main','gallery','sku','description')
       ) media ON true
       WHERE ${itemsQ.where}
       ORDER BY base.id DESC
@@ -2170,6 +2170,17 @@ export function createDatabase(databaseUrl) {
       'SELECT * FROM product_shopify_publications WHERE product_detail_id=$1 ORDER BY last_synced_at DESC',
       [productDetailId]);
     return result.rows;
+  }
+
+  /** Raw LinkFox description HTML for the given captures (description image URLs). */
+  async function getLinkfoxDescriptionHtml(ids) {
+    const list = [...new Set((ids ?? []).map(Number).filter((value) => Number.isInteger(value) && value > 0))];
+    if (!list.length) return new Map();
+    const result = await pool.query(`SELECT id, raw_data->'linkfox'->'raw'->>'description' AS description
+      FROM product_details
+      WHERE id = ANY($1::bigint[])
+        AND raw_data->'linkfox'->'raw'->>'description' IS NOT NULL`, [list]);
+    return new Map(result.rows.map((row) => [Number(row.id), String(row.description)]));
   }
 
   async function createProductRagSync(productDetailId, values = {}) {
@@ -3362,6 +3373,7 @@ export function createDatabase(databaseUrl) {
     pruneWordpressStatusEvents,
     isOfferBlocked, listBlockedOfferIds, listProductBlocklist, upsertProductBlocklist,
     removeProductBlocklist, listBlockedProductDetailIds, listShopifyPublicationsForDetail,
+    getLinkfoxDescriptionHtml,
     createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,

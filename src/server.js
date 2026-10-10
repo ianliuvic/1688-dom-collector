@@ -6053,7 +6053,16 @@ function toProductCatalogItem(row) {
     .map((image) => {
       const base = imagePublicPath(image.path);
       return { id: String(image.id), type: image.type,
-        thumb: base ? `${base}?w=160` : (image.source || null) };
+        thumb: base ? `${base}?w=160` : (image.source || null),
+        source: image.source || null };
+    });
+  const detailImages = images
+    .filter((image) => image?.type === 'description')
+    .map((image) => {
+      const base = imagePublicPath(image.path);
+      return { id: String(image.id),
+        thumb: base ? `${base}?w=160` : (image.source || null),
+        source: image.source || null };
     });
   return {
     id: row.id,
@@ -6085,15 +6094,40 @@ function toProductCatalogItem(row) {
     portalSyncedAt: row.portal_synced_at || null,
     cover: gallery.length ? gallery[0].thumb : null,
     gallery,
+    detailImages,
     dims: dimOrder.map((name) => ({ name, options: dimMap.get(name) })),
   };
+}
+
+// Source-image helpers for the catalog row strip: dedupe keys ignore CDN
+// re-encoding suffixes, and the LinkFox description HTML yields the original
+// detail-image URLs even before they are downloaded.
+function normalizedDetailImageKey(value) {
+  return String(value ?? '').trim()
+    .replace(/^http:/i, 'https:').replace(/[?#].*$/, '').replace(/_\.webp$/i, '')
+    .replace(/_\d+x\d+[^/]*$/i, '');
+}
+
+function extractDescriptionImageUrls(html) {
+  const urls = [];
+  const seen = new Set();
+  for (const match of String(html ?? '').matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) {
+    let url = match[1].trim();
+    if (url.startsWith('//')) url = `https:${url}`;
+    if (!/^https:\/\//i.test(url)) continue;
+    const key = normalizedDetailImageKey(url);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    urls.push(url);
+    if (urls.length >= 60) break;
+  }
+  return urls;
 }
 
 // Portal staging state for a catalog row, mirroring the selection page: the
 // live staging catalog (60s cache) decides published-vs-removed; the stored
 // record covers failures and archived entries.
-function catalogPortalState(row, liveIds) {
-  if (row.portal_error) return 'failed';
+function catalogPortalState(row, liveIds) {  if (row.portal_error) return 'failed';
   if (!row.portal_product_id) return 'none';
   if (String(row.portal_status ?? '').toUpperCase() === 'ARCHIVED') return 'archived';
   if (liveIds) {
@@ -6125,6 +6159,34 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
     getPortalStagingActiveIds(),
   ]);
   const liveIds = staging.ids ? new Set([...staging.ids].map(String)) : null;
+  const items = result.items.map((row) => ({
+    ...toProductCatalogItem(row),
+    portalState: catalogPortalState(row, liveIds),
+    portalLive: row.portal_product_id && liveIds ? liveIds.has(String(row.portal_product_id)) : null,
+  }));
+  // Merge the original description images from the LinkFox raw HTML so the row
+  // strip shows every source image even before it has been downloaded. Only
+  // captures without any stored detail images need the (larger) raw HTML read.
+  const idsNeedingRaw = items.filter((item) => !(item.detailImages ?? []).length)
+    .map((item) => Number(item.id));
+  if (idsNeedingRaw.length) {
+    const htmlById = await db.getLinkfoxDescriptionHtml(idsNeedingRaw).catch(() => new Map());
+    if (htmlById.size) {
+      for (const item of items) {
+        const html = htmlById.get(Number(item.id));
+        if (!html) continue;
+        const seen = new Set((item.detailImages ?? [])
+          .map((image) => normalizedDetailImageKey(image.source || image.thumb)));
+        for (const url of extractDescriptionImageUrls(html)) {
+          const key = normalizedDetailImageKey(url);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          item.detailImages.push({ id: null, thumb: url, source: url });
+          if (item.detailImages.length >= 60) break;
+        }
+      }
+    }
+  }
   return {
     count: result.filteredTotal, total: result.total,
     colorCounts: result.colorCounts,
@@ -6135,11 +6197,7 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
     limit: result.limit, offset: result.offset,
     portalCheck: staging.ids ? 'ok' : 'failed',
     portalWarning: staging.warning ?? null,
-    items: result.items.map((row) => ({
-      ...toProductCatalogItem(row),
-      portalState: catalogPortalState(row, liveIds),
-      portalLive: row.portal_product_id && liveIds ? liveIds.has(String(row.portal_product_id)) : null,
-    })),
+    items,
   };
 });
 

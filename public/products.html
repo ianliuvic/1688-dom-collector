@@ -166,6 +166,10 @@ img.zoomable{cursor:zoom-in}
 .side .muted{font-size:12px;color:var(--muted)}
 .thumbs{display:flex;flex-wrap:wrap;gap:5px}
 .thumbs img{width:44px;height:44px;object-fit:cover;border-radius:4px;border:1px solid var(--line);background:#f2f4f7;display:block}
+.src-images{margin-top:6px}
+.src-images-caption{font-size:11.5px;color:var(--muted);margin-bottom:4px}
+.src-strip{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;max-width:100%;scrollbar-width:thin}
+.src-strip img{height:78px;width:auto;min-width:56px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:#f2f4f7;flex:0 0 auto;display:block}
 .empty{padding:28px;text-align:center;color:var(--muted);font-size:13px}
 .pager{display:flex;align-items:center;gap:12px;padding:10px 24px 0;max-width:1500px;margin:0 auto}
 .pager button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 14px;font-size:13px;cursor:pointer;color:var(--text)}
@@ -303,6 +307,24 @@ function portalBadge(it){
   const live = it.portalState === 'published' && it.portalLive === true ? ' ·live' : '';
   return '<span class="badge ' + cls + '" title="' + esc(tips.join(' · ')) + '">' + label + esc(live) + '</span>';
 }
+function sourceImagesStrip(it){
+  const seen = new Set();
+  const images = [];
+  for (const group of [it.gallery || [], it.detailImages || []]) {
+    for (const image of group) {
+      if (!image || !image.thumb) continue;
+      const key = String(image.source || image.thumb);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      images.push(image);
+    }
+  }
+  if (!images.length) return '';
+  const galleryCount = (it.gallery || []).length;
+  const detailCount = (it.detailImages || []).length;
+  return '<div class="src-images"><div class="src-images-caption">原1688图（图库 ' + galleryCount + ' · 详情 ' + detailCount + '，点击看大图）</div>'
+    + '<div class="src-strip">' + images.map((image) => '<img class="zoomable" loading="lazy" referrerpolicy="no-referrer" src="' + esc(image.thumb) + '" alt="">').join('') + '</div></div>';
+}
 function row(it){
   const isBundle = it.status === 'bundle';
   const manual = it.bundleManual || null;
@@ -310,8 +332,6 @@ function row(it){
   // split flow, so the single-product publish preview only makes sense for
   // regular products.
   const effectiveBundle = manual === 'bundle' ? true : manual === 'clear' ? false : isBundle;
-  const thumbs = (it.gallery || []).slice(0, 6);
-  const overflow = (it.gallery || []).length - thumbs.length;
   const bundleBtn = (value, label, cls) =>
     '<button type="button" class="bbtn' + (manual === value || (!manual && value === 'auto') ? ' on ' + cls : '') + '"'
     + ' data-bundle-id="' + it.id + '" data-bundle-value="' + value + '">' + label + '</button>';
@@ -330,7 +350,8 @@ function row(it){
     + wpBadge(it) + listingBadge(it) + portalBadge(it)
     + '</div>'
     + '<div class="body"><div class="title">' + esc(it.title || '') + '</div>'
-    + '<div class="dims">' + (it.dims.length ? it.dims.map(dimRow).join('') : '<div class="muted" style="font-size:12px;color:var(--muted)">（无变体选项）</div>') + '</div></div>'
+    + '<div class="dims">' + (it.dims.length ? it.dims.map(dimRow).join('') : '<div class="muted" style="font-size:12px;color:var(--muted)">（无变体选项）</div>') + '</div>'
+    + sourceImagesStrip(it) + '</div>'
     + '<div class="side">'
     + '<div class="line"><b>' + priceText(it) + '</b>' + (it.moq != null ? ' <span class="muted">· 起订 ' + it.moq + '</span>' : '') + '</div>'
     + '<div class="line">颜色 <b>' + (it.colorCount || 0) + '</b> · 变体组合 <b>' + it.skuRows + '</b> 条 · 图库 ' + (it.gallery || []).length + ' 张</div>'
@@ -343,7 +364,6 @@ function row(it){
         + (it.hasSplitPlan ? '（已保存）' : '') + '</button></div>'
       : '<div class="line"><button type="button" class="split-toggle" data-pp-id="' + it.id + '">发布预览 ▾</button></div>')
     + '<div class="line"><button type="button" class="purge-btn" data-purge-id="' + it.id + '" title="从采集器、WordPress 与 RAG 删除，并禁止后续采集">删除…</button></div>'
-    + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img class="zoomable" loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
     + '</div></article>';
 }
 function renderStats(){
