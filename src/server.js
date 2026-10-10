@@ -4452,7 +4452,7 @@ app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKe
 
   // 5) Blocklist: future scans and every capture entry point reject the offer.
   let blockedEntry = null;
-  if (addToBlocklist) {
+  if (addToBlocklist && detail.offer_id) {
     blockedEntry = await db.upsertProductBlocklist({
       offerId: detail.offer_id, productDetailId: id,
       styleNo: publication?.style_no ?? null, title: detail.title,
@@ -4474,6 +4474,18 @@ app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKe
 app.get('/api/blocklist', { preHandler: requireDashboardOrApiKey }, async () => {
   const entries = await db.listProductBlocklist();
   return { count: entries.length, entries };
+});
+
+// Manual block without deleting an existing capture (future captures rejected).
+app.post('/api/blocklist', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const offerId = String(request.body?.offerId ?? '').trim();
+  if (!/^\d{10,13}$/.test(offerId)) return reply.code(400).send({ error: 'valid_1688_offer_id_required' });
+  const entry = await db.upsertProductBlocklist({
+    offerId,
+    reason: request.body?.reason ? String(request.body.reason).slice(0, 200) : 'manual block from the products console',
+    blockedBy: 'products-console',
+  });
+  return { blocked: true, entry };
 });
 
 app.delete('/api/blocklist/:offerId', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
