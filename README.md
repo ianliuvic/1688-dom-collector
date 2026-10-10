@@ -81,7 +81,6 @@ the normal `GET /api/jobs/:id` endpoint.
 `GET /api/jobs/:id/dom` downloads the archived HTML and is also bearer-token protected.
 
 ## WordPress status truth
-
 `product_wordpress_publications.wp_status` is kept true to the real WordPress
 state through three inputs: the wearhongxiu WPCode snippet pushes product post
 status changes to `POST /api/wordpress/status-events` (dedicated
@@ -93,6 +92,23 @@ copy. Keeper posts are matched through `product_wordpress_publications`,
 sibling posts through `product_split_contents`; an actual status change also
 queues a products RAG sync so the RAG matches the real store state. Every
 observation is recorded in `product_wp_status_events`.
+
+## Purge and blocklist
+
+`POST /api/product-details/:id/purge` (dashboard Basic or bearer auth) removes
+one product everywhere and stops future captures: WordPress keeper + split
+sibling posts first (`wpMode: "trash"` default, `"delete"` for permanent),
+then the products RAG entity, the staging portal record (`archivePortal`),
+the collector capture with its media folders, and finally a
+`product_blocklist` entry (`blocklist: true`). It refuses while publish,
+pipeline or maintenance jobs are running and is idempotent, so a failed run
+can be retried. `GET /api/product-details/:id/purge-preview` returns what the
+purge would touch (WP posts, portal, Shopify mapping, RAG, running jobs).
+Blocklisted offers are excluded from shop-scan added/relisted reconciliation,
+carry `ingestion_policy=blocklisted`, and are rejected with `blocked_offer` by
+every capture entry point (browser capture, worker save, LinkFox, pipeline).
+Manage the list with `GET /api/blocklist`, `POST /api/blocklist`
+({offerId, reason} — block without deleting) and `DELETE /api/blocklist/:offerId`.
 
 ## Review queue
 
