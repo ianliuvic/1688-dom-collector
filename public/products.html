@@ -137,6 +137,8 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 .badge.portal{background:#175cd3;font-weight:600}
 .badge.portalarch{background:#667085;font-weight:600}
 .badge.portalfail{background:#b42318;font-weight:600}
+.badge.editpending{background:#b54708;font-weight:600}
+.badge.editdone{background:#98a2b3;font-weight:600}
 img.zoomable{cursor:zoom-in}
 .lightbox-mask{position:fixed;inset:0;background:rgba(15,23,42,.85);z-index:80;display:flex;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}
 .lightbox-mask img{max-width:96vw;max-height:90vh;border-radius:8px;background:#fff;box-shadow:0 20px 60px rgba(0,0,0,.5)}
@@ -243,6 +245,7 @@ let colors = 0;
 let wpFilter = '';
 let bundleFilter = '';
 let shopFilter = '';
+let editedFilter = '';
 let keyword = '';
 let loading = false;
 let PICKS = new Set();
@@ -332,6 +335,15 @@ function portalBadge(it){
   const live = it.portalState === 'published' && it.portalLive === true ? ' ·live' : '';
   return '<span class="badge ' + cls + '" title="' + esc(tips.join(' · ')) + '">' + label + esc(live) + '</span>';
 }
+function editBadge(it){
+  if (!it.lastEditAt) return '';
+  const pending = it.editsPending === true;
+  const cls = pending ? 'editpending' : 'editdone';
+  const tip = '最近手动编辑：' + new Date(it.lastEditAt).toLocaleString()
+    + (pending ? '（尚未同步到 WP）' : '（已同步）');
+  return '<span class="badge ' + cls + '" title="' + esc(tip) + '">编辑于 ' + esc(timeAgo(it.lastEditAt))
+    + (pending ? ' · 未发布' : '') + '</span>';
+}
 function sourceImagesStrip(it){
   const seen = new Set();
   const images = [];
@@ -380,7 +392,7 @@ function row(it){
     + '<span class="muted">采集 ' + esc(it.date || '') + '</span>'
     + offerLine(it)
     + (it.shopName ? '<span class="muted">店铺 ' + esc(it.shopName) + '</span>' : '')
-    + wpBadge(it) + listingBadge(it) + portalBadge(it)
+    + wpBadge(it) + listingBadge(it) + portalBadge(it) + editBadge(it)
     + '</div>'
     + '<div class="body"><div class="title">' + esc(it.title || '') + '</div>'
     + '<div class="dims">' + (it.dims.length ? it.dims.map(dimRow).join('') : '<div class="muted" style="font-size:12px;color:var(--muted)">（无变体选项）</div>') + '</div>'
@@ -449,6 +461,10 @@ function renderFilters(){
   }
   parts.push('<span class="sep"></span><span class="label">店铺：</span>');
   parts.push('<select id="shopSelect" title="按 1688 来源店铺筛选">' + shopOptions.join('') + '</select>');
+  parts.push('<span class="sep"></span><span class="label">编辑：</span>');
+  parts.push('<button type="button" data-edited=""' + (editedFilter === '' ? ' class="on"' : '') + '>全部</button>');
+  parts.push('<button type="button" data-edited="1"' + (editedFilter === '1' ? ' class="on"' : '')
+    + ' title="只显示有过手动调整（规范化/发布图编辑）的产品">最近编辑过</button>');
   el.innerHTML = parts.join('');
 }
 function renderPager(){
@@ -498,6 +514,7 @@ async function loadPage(){
     if (wpFilter) params.set('wp', wpFilter);
     if (bundleFilter) params.set('bundle', bundleFilter);
     if (shopFilter) params.set('shop', shopFilter);
+    if (editedFilter) params.set('edited', '1');
     const res = await fetch('/api/product-catalog?' + params.toString(), { headers: { accept: 'application/json' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const body = await res.json();
@@ -573,6 +590,15 @@ function wireFilters(){
       const next = String(bundleBtn.dataset.bundle || '');
       if (next === bundleFilter) return;
       bundleFilter = next;
+      offset = 0;
+      void loadPage();
+      return;
+    }
+    const editedBtn = e.target.closest('button[data-edited]');
+    if (editedBtn) {
+      const next = String(editedBtn.dataset.edited || '');
+      if (next === editedFilter) return;
+      editedFilter = next;
       offset = 0;
       void loadPage();
     }

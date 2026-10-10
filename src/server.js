@@ -6508,6 +6508,19 @@ function extractDescriptionImageUrls(html) {
   return urls;
 }
 
+// Latest manual content edit from the audit log (publish/status actions are
+// excluded: this answers "when was this product last adjusted by hand").
+function catalogLastManualEdit(row) {
+  const log = Array.isArray(row.manual_edit_log) ? row.manual_edit_log : [];
+  let last = null;
+  for (const entry of log) {
+    if (!['variant_normalization_edit', 'publish_images_edit', 'publish_images_reset'].includes(String(entry?.action))) continue;
+    const timestamp = entry?.at ? Date.parse(entry.at) : NaN;
+    if (Number.isFinite(timestamp) && (last === null || timestamp > last)) last = timestamp;
+  }
+  return last === null ? null : new Date(last).toISOString();
+}
+
 // Portal staging state for a catalog row, mirroring the selection page: the
 // live staging catalog (60s cache) decides published-vs-removed; the stored
 // record covers failures and archived entries.
@@ -6530,6 +6543,7 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
   const bundle = ['bundle', 'clear'].includes(String(request.query?.bundle ?? '').trim())
     ? String(request.query.bundle).trim() : '';
   const shop = String(request.query?.shop ?? '').trim().slice(0, 24);
+  const edited = request.query?.edited === '1' || request.query?.edited === 'true';
   const [result, staging] = await Promise.all([
     db.listProductCatalog({
       limit: request.query?.limit ?? 100,
@@ -6539,15 +6553,23 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
       wp,
       bundle,
       shop,
+      edited,
     }),
     getPortalStagingActiveIds(),
   ]);
   const liveIds = staging.ids ? new Set([...staging.ids].map(String)) : null;
-  const items = result.items.map((row) => ({
-    ...toProductCatalogItem(row),
-    portalState: catalogPortalState(row, liveIds),
-    portalLive: row.portal_product_id && liveIds ? liveIds.has(String(row.portal_product_id)) : null,
-  }));
+  const items = result.items.map((row) => {
+    const lastEditAt = catalogLastManualEdit(row);
+    const publicationUpdatedAt = row.publication_updated_at
+      ? new Date(row.publication_updated_at).toISOString() : null;
+    return {
+      ...toProductCatalogItem(row),
+      portalState: catalogPortalState(row, liveIds),
+      portalLive: row.portal_product_id && liveIds ? liveIds.has(String(row.portal_product_id)) : null,
+      lastEditAt,
+      editsPending: Boolean(lastEditAt && (!publicationUpdatedAt || Date.parse(lastEditAt) > Date.parse(publicationUpdatedAt))),
+    };
+  });
   // Merge the original description images from the LinkFox data so the row
   // strip shows every source image even before it has been downloaded. The
   // extracted URL list is persisted on first use, so later page loads read a

@@ -1146,7 +1146,7 @@ export function createDatabase(databaseUrl) {
    * main/gallery/sku image list, price range, WordPress publication state,
    * the source shop and 1688 listing status, and the colour-variant count. */
   async function listProductCatalog({ limit = 100, offset = 0, search = '', colors = 0, wp = '',
-    bundle = '', shop = '' } = {}) {
+    bundle = '', shop = '', edited = false } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
     const safeOffset = Math.max(Number(offset) || 0, 0);
     const colorBucket = [1, 2, 3, 4, 5].includes(Number(colors)) ? Number(colors)
@@ -1168,6 +1168,10 @@ export function createDatabase(databaseUrl) {
         FROM jsonb_array_elements(${optsJson}) AS opt
         WHERE (opt->>'dimensionName') ~* '(颜色|color|colour)'),
       CASE WHEN jsonb_array_length(${dimsJson}) > 0 OR jsonb_array_length(${optsJson}) > 0 THEN 1 ELSE 0 END)`;
+    const editedOnly = edited === true || edited === 'true' || edited === 1 || edited === '1';
+    const editedClause = editedOnly
+      ? `AND jsonb_typeof(details.raw_data->'manualEditLog') = 'array' AND jsonb_array_length(details.raw_data->'manualEditLog') > 0`
+      : '';
     const base = `WITH base AS (
       SELECT details.id, details.offer_id, details.title,
         details.price_min, details.price_max, details.currency, details.moq,
@@ -1178,6 +1182,8 @@ export function createDatabase(databaseUrl) {
         publications.style_no, publications.wp_status, publications.wp_url,
         publications.status_source AS wp_status_source,
         publications.status_checked_at AS wp_status_checked_at,
+        publications.updated_at AS publication_updated_at,
+        details.raw_data->'manualEditLog' AS manual_edit_log,
         portal.portal_product_id, portal.portal_status, portal.last_error AS portal_error,
         portal.result->>'target' AS portal_target, portal.last_synced_at AS portal_synced_at,
         source.shop_id, source.shop_name, source.availability_status, source.delisted_at,
@@ -1197,7 +1203,8 @@ export function createDatabase(databaseUrl) {
         LIMIT 1
       ) source ON true
       WHERE ($1::text IS NULL OR details.title ILIKE $1 OR details.offer_id ILIKE $1
-        OR publications.style_no ILIKE $1 OR publications.external_id ILIKE $1))`;
+        OR publications.style_no ILIKE $1 OR publications.external_id ILIKE $1)
+        ${editedClause})`;
     // Build a filter set with dynamically numbered placeholders. search ($1)
     // is always part of the base CTE, so extra values start at $2.
     const filtersFor = ({ color, wp: useWp, bundle: useBundle, shop: useShop }) => {
