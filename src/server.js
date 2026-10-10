@@ -4276,28 +4276,32 @@ function productHasActivePublishJob(productDetailId) {
 
 // Maintenance jobs that could resurrect or re-write a product mid-purge. Maps
 // are read lazily because some are declared later in the module.
-function purgeBlockingJobs(productDetailId) {
-  const sources = () => [
-    ['wordpress_publish', wordpressJobs, true],
-    ['wordpress_refresh', wordpressRefreshJobs, false],
-    ['split_publish', splitPublishJobs, false],
-    ['split_finalize', finalizeSplitJobs, false],
-    ['wordpress_price_repair', wordpressPriceRepairJobs, false],
-    ['wordpress_best_sellers', wordpressBestSellerJobs, false],
-    ['stock_repair', stockRepairJobs, false],
-    ['split_swatch_repair', splitSwatchRepairJobs, false],
-    ['split_variant_repair', splitVariantRepairJobs, false],
-    ['split_copy_repair', splitCopyRepairJobs, false],
-    ['split_keeper_category_repair', splitKeeperCategoryRepairJobs, false],
+function purgeGlobalBlockingJobs() {
+  const candidates = () => [
+    ['wordpress_refresh', wordpressRefreshJobs],
+    ['split_publish', splitPublishJobs],
+    ['split_finalize', finalizeSplitJobs],
+    ['wordpress_price_repair', wordpressPriceRepairJobs],
+    ['wordpress_best_sellers', wordpressBestSellerJobs],
+    ['stock_repair', stockRepairJobs],
+    ['split_swatch_repair', splitSwatchRepairJobs],
+    ['split_variant_repair', splitVariantRepairJobs],
+    ['split_copy_repair', splitCopyRepairJobs],
+    ['split_keeper_category_repair', splitKeeperCategoryRepairJobs],
   ];
   const blocking = [];
-  for (const [type, map, perProduct] of sources()) {
-    const hit = [...(map?.values?.() ?? [])].some((job) => {
-      if (!['queued', 'running'].includes(String(job?.status ?? ''))) return false;
-      return perProduct ? Number(job?.productDetailId) === Number(productDetailId) : true;
-    });
-    if (hit) blocking.push(type);
+  for (const [type, map] of candidates()) {
+    if ([...(map?.values?.() ?? [])].some((job) =>
+      ['queued', 'running'].includes(String(job?.status ?? '')))) {
+      blocking.push(type);
+    }
   }
+  return blocking;
+}
+
+function purgeBlockingJobs(productDetailId) {
+  const blocking = purgeGlobalBlockingJobs();
+  if (productHasActivePublishJob(productDetailId)) blocking.unshift('wordpress_publish');
   return blocking;
 }
 
@@ -4345,11 +4349,9 @@ async function archivePortalPublicationForPurge(productDetailId) {
 }
 
 // What a purge would touch; powers the confirmation dialog on /products.
-app.get('/api/product-details/:id/purge-preview', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
-  const id = Number(request.params.id);
-  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+async function buildPurgePreview(id) {
   const detail = await db.getProductDetail(id);
-  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (!detail) return { ok: false, code: 'not_found' };
   const [publication, contents, portal, shopifyRows, blocked, pipeline] = await Promise.all([
     db.getWordPressPublication(id),
     db.getSplitContents(id),
@@ -4358,7 +4360,7 @@ app.get('/api/product-details/:id/purge-preview', { preHandler: requireDashboard
     db.isOfferBlocked(detail.offer_id),
     db.getPipelineRun(id).catch(() => null),
   ]);
-  return {
+  return { ok: true, preview: {
     product: { id: detail.id, offerId: detail.offer_id, title: detail.title,
       styleNo: publication?.style_no ?? null },
     wp: { posts: collectPurgeWpPosts(publication, contents), keeperStatus: publication?.wp_status ?? null },
@@ -4373,32 +4375,60 @@ app.get('/api/product-details/:id/purge-preview', { preHandler: requireDashboard
       pipeline: ['pending', 'running'].includes(String(pipeline?.status ?? '')),
       maintenance: purgeBlockingJobs(id),
     },
-  };
+  } };
+}
+
+app.get('/api/product-details/:id/purge-preview', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const result = await buildPurgePreview(id);
+  if (!result.ok) return reply.code(result.code === 'not_found' ? 404 : 500).send({ error: result.code });
+  return result.preview;
+});
+
+// Batch preview for the checkbox-driven bulk purge on /products.
+app.post('/api/product-details/purge-preview-batch', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const ids = [...new Set((Array.isArray(request.body?.ids) ? request.body.ids : [])
+    .map(Number).filter((value) => Number.isInteger(value) && value > 0))].slice(0, 100);
+  if (!ids.length) return reply.code(400).send({ error: 'ids_required' });
+  const previews = [];
+  let next = 0;
+  const workers = Array.from({ length: Math.min(4, ids.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= ids.length) return;
+      const id = ids[index];
+      try {
+        const result = await buildPurgePreview(id);
+        previews.push(result.ok ? { id, ok: true, ...result.preview } : { id, ok: false, error: result.code });
+      } catch (error) {
+        previews.push({ id, ok: false, error: 'preview_failed',
+          message: String(error?.message ?? error).slice(0, 200) });
+      }
+    }
+  });
+  await Promise.all(workers);
+  return { count: ids.length, previews, globalMaintenance: purgeGlobalBlockingJobs() };
 });
 
 // Purge one product: WordPress posts (keeper + split family) first, then the
 // RAG entity, the staging portal record, the collector capture and finally
 // the blocklist entry that stops future captures. Every step is idempotent so
-// a failed run can safely be retried.
-app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
-  const id = Number(request.params.id);
-  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
-  const body = request.body ?? {};
-  const wpMode = body.wpMode === 'delete' ? 'delete' : 'trash';
-  const addToBlocklist = body.blocklist !== false;
-  const archivePortal = body.archivePortal !== false;
-  const force = body.force === true;
+// a failed run can safely be retried. Returns { ok:true, ...summary } or
+// { ok:false, code, ...details }.
+async function purgeProductEverywhere(id, { wpMode = 'trash', addToBlocklist = true,
+  archivePortal = true, force = false } = {}) {
   const detail = await db.getProductDetail(id);
-  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (!detail) return { ok: false, code: 'not_found' };
   const blockingJobs = purgeBlockingJobs(id);
   if (blockingJobs.length) {
-    return reply.code(409).send({ error: 'maintenance_job_running', jobs: blockingJobs,
-      message: '有维护任务进行中（发布/刷新/拆分等），请等任务结束后再清退。' });
+    return { ok: false, code: 'maintenance_job_running', jobs: blockingJobs,
+      message: '有维护任务进行中（发布/刷新/拆分等），请等任务结束后再清退。' };
   }
   const pipeline = await db.getPipelineRun(id).catch(() => null);
   if (['pending', 'running'].includes(String(pipeline?.status ?? ''))) {
-    return reply.code(409).send({ error: 'pipeline_in_progress',
-      message: '该产品有流水线任务进行中，请稍后重试。' });
+    return { ok: false, code: 'pipeline_in_progress',
+      message: '该产品有流水线任务进行中，请稍后重试。' };
   }
 
   const publication = await db.getWordPressPublication(id);
@@ -4416,11 +4446,9 @@ app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKe
     }
   }
   if (wpErrors.length) {
-    request.log.error({ productDetailId: id, wpErrors }, 'purge WordPress delete failed');
-    return reply.code(502).send({
-      error: 'wordpress_delete_failed', wpResults, wpErrors,
-      message: '部分 WordPress 文章删除失败，采集器数据未改动；修复后可直接重试（幂等）。',
-    });
+    app.log.error({ productDetailId: id, wpErrors }, 'purge WordPress delete failed');
+    return { ok: false, code: 'wordpress_delete_failed', wpResults, wpErrors,
+      message: '部分 WordPress 文章删除失败，采集器数据未改动；修复后可直接重试（幂等）。' };
   }
 
   // 2) RAG deactivate while the capture still exists (clean canonical lookup).
@@ -4431,12 +4459,10 @@ app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKe
         sourceProductId: String(detail.offer_id) });
       ragResult = { status: 'deactivated' };
     } catch (error) {
-      request.log.error({ err: error, productDetailId: id }, 'purge RAG deactivate failed');
+      app.log.error({ err: error, productDetailId: id }, 'purge RAG deactivate failed');
       if (!force) {
-        return reply.code(502).send({
-          error: 'rag_deactivate_failed', wpResults,
-          message: 'RAG 反激活失败，采集器数据未删除；可重试，或传 force=true 跳过 RAG 继续。',
-        });
+        return { ok: false, code: 'rag_deactivate_failed', wpResults,
+          message: 'RAG 反激活失败，采集器数据未删除；可重试，或传 force=true 跳过 RAG 继续。' };
       }
       ragResult = { status: 'failed', message: String(error?.message ?? error).slice(0, 300) };
     }
@@ -4447,7 +4473,7 @@ app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKe
 
   // 4) Collector hard delete (cascades every child row) + media folders.
   const removed = await db.deleteProductDetail(id);
-  if (!removed) return reply.code(404).send({ error: 'not_found' });
+  if (!removed) return { ok: false, code: 'not_found' };
   const foldersRemoved = await removeDetailImageFolders(removed.imageStoragePaths);
 
   // 5) Blocklist: future scans and every capture entry point reject the offer.
@@ -4460,13 +4486,76 @@ app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKe
     });
   }
   return {
-    deleted: true, productDetailId: id, offerId: detail.offer_id,
+    ok: true, deleted: true, productDetailId: id, offerId: detail.offer_id,
     wp: { mode: wpMode, posts: wpResults },
     portal: portalResult,
     rag: ragResult,
     foldersRemoved,
     blocked: Boolean(blockedEntry),
   };
+}
+
+const PURGE_ERROR_STATUS = { not_found: 404, maintenance_job_running: 409,
+  pipeline_in_progress: 409, wordpress_delete_failed: 502, rag_deactivate_failed: 502 };
+
+app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const body = request.body ?? {};
+  const result = await purgeProductEverywhere(id, {
+    wpMode: body.wpMode === 'delete' ? 'delete' : 'trash',
+    addToBlocklist: body.blocklist !== false,
+    archivePortal: body.archivePortal !== false,
+    force: body.force === true,
+  });
+  if (!result.ok) {
+    const status = PURGE_ERROR_STATUS[result.code] ?? 500;
+    return reply.code(status).send(result);
+  }
+  return result;
+});
+
+// Checkbox-driven bulk purge: same per-product flow, bounded concurrency.
+app.post('/api/product-details/purge-batch', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const ids = [...new Set((Array.isArray(request.body?.ids) ? request.body.ids : [])
+    .map(Number).filter((value) => Number.isInteger(value) && value > 0))];
+  if (!ids.length) return reply.code(400).send({ error: 'ids_required' });
+  if (ids.length > 100) return reply.code(400).send({ error: 'too_many_ids', max: 100 });
+  const globalMaintenance = purgeGlobalBlockingJobs();
+  if (globalMaintenance.length) {
+    return reply.code(409).send({ error: 'maintenance_job_running', jobs: globalMaintenance,
+      message: '有全局维护任务进行中（刷新/拆分等），请等任务结束后再批量清退。' });
+  }
+  const body = request.body ?? {};
+  const options = {
+    wpMode: body.wpMode === 'delete' ? 'delete' : 'trash',
+    addToBlocklist: body.blocklist !== false,
+    archivePortal: body.archivePortal !== false,
+    force: body.force === true,
+  };
+  const results = [];
+  const failures = [];
+  let next = 0;
+  const workers = Array.from({ length: Math.min(4, ids.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= ids.length) return;
+      const id = ids[index];
+      try {
+        const result = await purgeProductEverywhere(id, options);
+        if (result.ok) results.push(result);
+        else failures.push({ productDetailId: id, error: result.code,
+          message: result.message ?? null, jobs: result.jobs ?? null,
+          wpErrors: result.wpErrors ?? null });
+      } catch (error) {
+        app.log.error({ err: error, productDetailId: id }, 'batch purge failed');
+        failures.push({ productDetailId: id, error: 'purge_failed',
+          message: String(error?.message ?? error).slice(0, 300) });
+      }
+    }
+  });
+  await Promise.all(workers);
+  return { total: ids.length, deleted: results.length, failed: failures.length, results, failures };
 });
 
 // ---- Blocklist management -----------------------------------------------------

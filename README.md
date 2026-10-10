@@ -103,7 +103,11 @@ the collector capture with its media folders, and finally a
 `product_blocklist` entry (`blocklist: true`). It refuses while publish,
 pipeline or maintenance jobs are running and is idempotent, so a failed run
 can be retried. `GET /api/product-details/:id/purge-preview` returns what the
-purge would touch (WP posts, portal, Shopify mapping, RAG, running jobs).
+purge would touch (WP posts, portal, Shopify mapping, RAG, running jobs), and
+`POST /api/product-details/purge-preview-batch` / `POST
+/api/product-details/purge-batch` power the checkbox-driven bulk purge on the
+products page (max 100 ids, bounded concurrency, per-product failures reported
+individually).
 Blocklisted offers are excluded from shop-scan added/relisted reconciliation,
 carry `ingestion_policy=blocklisted`, and are rejected with `blocked_offer` by
 every capture entry point (browser capture, worker save, LinkFox, pipeline).

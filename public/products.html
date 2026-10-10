@@ -95,7 +95,11 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .pp-tag{font-size:11.5px;border:1px solid var(--line);border-radius:999px;padding:1px 9px;background:#fff;color:var(--text)}
 .pp-tag.cat{background:#eff8ff;border-color:#b2ddff;color:#175cd3}
 main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width:1500px;margin:0 auto}
-.row{display:grid;grid-template-columns:96px 200px minmax(0,1fr) 260px;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;align-items:start}
+.row{display:grid;grid-template-columns:96px 200px minmax(0,1fr) 260px;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;align-items:start;position:relative}
+.pick{position:absolute;left:16px;top:13px;z-index:3;background:#fff;border:1px solid var(--line);border-radius:5px;padding:2px;line-height:1;display:inline-flex;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.pick input{width:15px;height:15px;margin:0;cursor:pointer;vertical-align:middle}
+#pickAll{width:15px;height:15px;vertical-align:middle;cursor:pointer}
+#pickCount{color:var(--info);font-weight:600}
 .row.is-bundle{border-left:4px solid var(--bundle)}
 .cover{width:96px;height:96px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:#f2f4f7;display:block}
 .meta{display:flex;flex-direction:column;gap:4px;min-width:0}
@@ -166,7 +170,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 <body>
 <header>
   <h1>全部产品 · 已采集</h1>
-  <p class="sub">采集器当前保存的全部商品（只读）。每行显示商品名称、各变体选项的名称与图片（颜色显示来源图，尺码为文字）、价格区间、变体组合数、图库缩略图与 wearhongxiu 发布状态。支持按标题、offer、款式号搜索。WP 状态与 WordPress 实时同步：站内外部改动（手动改 draft / 发布 / 回收站）会自动回传，徽标悬停可见来源与核对时间；也可点「核对 WP 状态」强制刷新本页。</p>
+  <p class="sub">采集器当前保存的全部商品（只读）。每行显示商品名称、各变体选项的名称与图片（颜色显示来源图，尺码为文字）、价格区间、变体组合数、图库缩略图与 wearhongxiu 发布状态。支持按标题、offer、款式号搜索。WP 状态与 WordPress 实时同步：站内外部改动（手动改 draft / 发布 / 回收站）会自动回传，徽标悬停可见来源与核对时间；也可点「核对 WP 状态」强制刷新本页。勾选产品可批量清退（采集器 + WordPress + RAG + 禁采名单）。</p>
   <div class="nav">
     <a href="/products" class="on">全部产品</a>
     <a href="/selection">选品</a>
@@ -180,6 +184,9 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 <div class="wp-sync" id="wpSync">
   <button type="button" id="wpSyncBtn">核对 WP 状态（本页）</button>
   <button type="button" id="blkBtn">禁止采集名单</button>
+  <label class="muted" style="display:inline-flex;align-items:center;gap:5px"><input type="checkbox" id="pickAll"> 全选本页</label>
+  <span class="muted" id="pickCount"></span>
+  <button type="button" id="batchPurgeBtn" disabled style="border-color:#fecdca;color:#b42318">批量删除…</button>
   <span class="muted" id="wpSyncNote">WP 状态来自采集器记录 + WordPress 实时回传（外部改动自动同步）</span>
 </div>
 <div id="modalRoot"></div>
@@ -202,6 +209,7 @@ let bundleFilter = '';
 let shopFilter = '';
 let keyword = '';
 let loading = false;
+let PICKS = new Set();
 
 function esc(s){return String(s).replace(/[&<>"']/g, (c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function imgFallback(el){
@@ -277,6 +285,8 @@ function row(it){
     '<button type="button" class="bbtn' + (manual === value || (!manual && value === 'auto') ? ' on ' + cls : '') + '"'
     + ' data-bundle-id="' + it.id + '" data-bundle-value="' + value + '">' + label + '</button>';
   return '<article class="row' + (isBundle ? ' is-bundle' : '') + '" data-id="' + it.id + '">'
+    + '<label class="pick" title="选择该产品"><input type="checkbox" data-pick-id="' + it.id + '"'
+      + (PICKS.has(String(it.id)) ? ' checked' : '') + '></label>'
     + (it.cover
       ? '<img class="cover" loading="lazy" referrerpolicy="no-referrer" src="' + esc(it.cover) + '" onerror="imgFallback(this)" alt="">'
       : '<span class="cover"></span>')
@@ -378,9 +388,24 @@ function render(){
   renderFilters();
   renderPager();
   renderTabs();
+  updatePickBar();
+}
+function updatePickBar(){
+  const countEl = document.getElementById('pickCount');
+  const btn = document.getElementById('batchPurgeBtn');
+  const all = document.getElementById('pickAll');
+  const sel = PICKS.size;
+  if (countEl) countEl.textContent = sel ? '已选 ' + sel + ' 个' : '';
+  if (btn) btn.disabled = sel === 0;
+  if (all) {
+    all.checked = DATA.length > 0 && sel === DATA.length;
+    all.indeterminate = sel > 0 && sel < DATA.length;
+  }
 }
 async function loadPage(){
   if (loading) return;
+  // Selections apply to the current page render only; any reload clears them.
+  PICKS = new Set();
   loading = true;
   try {
     const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
@@ -1585,6 +1610,119 @@ async function confirmPurge(id){
     if (btn) { btn.disabled = false; btn.textContent = '确认清退'; }
   }
 }
+async function openBatchPurge(){
+  const ids = [...PICKS].map(Number).filter((v) => Number.isInteger(v) && v > 0);
+  if (!ids.length) return;
+  const count = ids.length;
+  showModal('<div class="modal-card"><h3>批量清退 ' + count + ' 个产品</h3><div class="row-line">正在读取影响范围…</div></div>');
+  let preview = null;
+  let error = '';
+  try {
+    const res = await fetch('/api/product-details/purge-preview-batch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    preview = body;
+  } catch (e) { error = String((e && e.message) || e); }
+  if (error) {
+    showModal('<div class="modal-card"><h3>批量清退</h3><div class="row-line warn">无法读取影响范围：' + esc(error) + '</div>'
+      + '<div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
+    wireModalClose();
+    return;
+  }
+  const previews = preview.previews || [];
+  const okPreviews = previews.filter((p) => p.ok);
+  const badPreviews = previews.filter((p) => !p.ok);
+  const usableIds = [];
+  let wpTotal = 0;
+  let portalCount = 0;
+  let shopifyCount = 0;
+  let blockedCount = 0;
+  const busyLabels = [];
+  const itemRows = [];
+  for (const p of okPreviews) {
+    const wpn = (p.wp && p.wp.posts) ? p.wp.posts.length : 0;
+    wpTotal += wpn;
+    const flags = [];
+    if (p.portal && p.portal.portalProductId) { portalCount += 1; flags.push('Portal'); }
+    if (p.shopify && p.shopify.length) { shopifyCount += 1; flags.push('⚠ Shopify 不自动删'); }
+    if (p.blocklisted) { blockedCount += 1; flags.push('已在禁采名单'); }
+    const maint = (p.activeJobs && p.activeJobs.maintenance) || [];
+    const busy = (p.activeJobs && (p.activeJobs.wordpress || p.activeJobs.pipeline)) || maint.length > 0;
+    if (busy) {
+      flags.push('⚠ 有任务进行中，将跳过');
+      busyLabels.push('#' + p.product.id);
+    } else {
+      usableIds.push(Number(p.product.id));
+    }
+    itemRows.push('<li>#' + esc(String(p.product.id)) + ' ' + esc(p.product.styleNo || '')
+      + '：WP ' + wpn + ' 篇' + (flags.length ? ' · ' + esc(flags.join(' / ')) : '') + '</li>');
+  }
+  if (badPreviews.length) {
+    for (const p of badPreviews) itemRows.push('<li>#' + esc(String(p.id)) + '：' + esc(p.error === 'not_found' ? '已不存在，跳过' : String(p.error)) + '</li>');
+  }
+  const globalBusy = (preview.globalMaintenance || []).length > 0;
+  const lines = [];
+  lines.push('<div class="row-line">共选 <b>' + preview.count + '</b> 个：可清退 <b>' + usableIds.length + '</b> 个 · WP 文章合计 <b>' + wpTotal + '</b> 篇'
+    + (portalCount ? ' · Portal <b>' + portalCount + '</b> 个' : '')
+    + (shopifyCount ? ' · Shopify 映射 <b>' + shopifyCount + '</b> 个（只警告）' : '')
+    + (blockedCount ? ' · 已禁采 <b>' + blockedCount + '</b> 个' : '') + '</div>');
+  if (busyLabels.length) lines.push('<div class="row-line warn">⚠ 以下产品有任务进行中，本次将跳过：' + esc(busyLabels.join('、')) + '</div>');
+  if (globalBusy) {
+    lines.push('<div class="row-line warn">⚠ 有全局维护任务进行中（' + esc((preview.globalMaintenance || []).join('、')) + '），暂不可批量清退。</div>');
+  }
+  lines.push('<div class="row-line">将处理：</div><ul>' + (itemRows.join('') || '<li>（无可清退产品）</li>') + '</ul>');
+  showModal('<div class="modal-card">'
+    + '<h3>批量清退（已选 ' + preview.count + ' 个）</h3>'
+    + lines.join('')
+    + '<div class="row-line">WP 处理：<select id="purgeWpMode">'
+    + '<option value="trash">移入回收站（可恢复）</option>'
+    + '<option value="delete">彻底删除（不可恢复）</option></select></div>'
+    + '<div class="row-line"><label><input type="checkbox" id="purgeBlocklist" checked> 全部加入禁止采集名单</label></div>'
+    + '<div class="row-line"><label><input type="checkbox" id="purgePortal" checked> 归档 Portal staging 记录（如有）</label></div>'
+    + '<div class="row-line" id="purgeResult"></div>'
+    + '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button>'
+    + '<button class="primary" id="batchPurgeConfirm"' + ((globalBusy || !usableIds.length) ? ' disabled' : '') + '>确认清退 ' + usableIds.length + ' 个</button></div>'
+    + '</div>');
+  wireModalClose();
+  const confirmBtn = document.getElementById('batchPurgeConfirm');
+  if (confirmBtn && !globalBusy && usableIds.length) {
+    confirmBtn.addEventListener('click', () => { void confirmBatchPurge(usableIds); });
+  }
+}
+async function confirmBatchPurge(ids){
+  const btn = document.getElementById('batchPurgeConfirm');
+  const resultEl = document.getElementById('purgeResult');
+  const wpModeEl = document.getElementById('purgeWpMode');
+  const wpMode = wpModeEl ? wpModeEl.value : 'trash';
+  const blockEl = document.getElementById('purgeBlocklist');
+  const portalEl = document.getElementById('purgePortal');
+  const blocklist = !blockEl || blockEl.checked;
+  const archivePortal = !portalEl || portalEl.checked;
+  if (btn) { btn.disabled = true; btn.textContent = '正在批量清退…'; }
+  try {
+    const res = await fetch('/api/product-details/purge-batch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ ids, wpMode, blocklist, archivePortal }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    const failed = body.failures || [];
+    if (resultEl) {
+      resultEl.innerHTML = '<span class="' + (failed.length ? 'warn' : 'ok') + '">✔ 已清退 ' + body.deleted + ' / ' + body.total + ' 个'
+        + (failed.length ? '；失败 ' + failed.length + ' 个：' + esc(failed.map((f) => '#' + f.productDetailId + '（' + (f.error || 'failed') + '）').join('、')) : '')
+        + '</span>';
+    }
+    setTimeout(() => { closeModal(); void loadPage(); }, 1800);
+  } catch (e) {
+    if (resultEl) resultEl.innerHTML = '<span class="warn">批量清退失败：' + esc(String((e && e.message) || e)) + '</span>';
+    if (btn) { btn.disabled = false; btn.textContent = '确认清退'; }
+  }
+}
 async function openBlocklist(){
   showModal('<div class="modal-card"><h3>禁止采集名单</h3><div class="row-line">加载中…</div></div>');
   try {
@@ -1626,6 +1764,23 @@ function wireWpSync(){
   const note = document.getElementById('wpSyncNote');
   const blkBtn = document.getElementById('blkBtn');
   if (blkBtn) blkBtn.addEventListener('click', () => { void openBlocklist(); });
+  const batchBtn = document.getElementById('batchPurgeBtn');
+  if (batchBtn) batchBtn.addEventListener('click', () => { void openBatchPurge(); });
+  document.addEventListener('change', (e) => {
+    const pick = e.target.closest('input[data-pick-id]');
+    if (pick) {
+      const id = String(pick.dataset.pickId);
+      if (pick.checked) PICKS.add(id); else PICKS.delete(id);
+      updatePickBar();
+      return;
+    }
+    const all = e.target.closest('#pickAll');
+    if (all) {
+      PICKS = new Set(all.checked ? DATA.map((x) => String(x.id)) : []);
+      document.querySelectorAll('input[data-pick-id]').forEach((cb) => { cb.checked = all.checked; });
+      updatePickBar();
+    }
+  });
   document.addEventListener('click', (e) => {
     const purge = e.target.closest('button[data-purge-id]');
     if (purge) { void openPurge(String(purge.dataset.purgeId)); }
