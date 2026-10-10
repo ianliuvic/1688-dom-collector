@@ -35,6 +35,8 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 .meta{display:flex;flex-direction:column;gap:4px;min-width:0}
 .meta .style{font-weight:700;font-size:13.5px}
 .meta .muted{font-size:12px;color:var(--muted);word-break:break-all}
+.offer-link{color:var(--info);text-decoration:none;white-space:nowrap}
+.offer-link:hover{text-decoration:underline}
 .badge{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:1px 9px;margin-right:4px;color:#fff;background:#98a2b3}
 .badge.keeper{background:var(--warn)}.badge.delisted{background:#667085}.badge.active{background:var(--good)}
 .portal-badge.portal-ok{background:var(--good)}
@@ -238,6 +240,11 @@ function rowHtml(it) {
   ].join('');
   const sale = it.saleQuantity;
   const monthly = it.thirtyBookCount;
+  // Entry to the original 1688 product page (synthetic lfx- keys map back to the real offer id).
+  const offerNumber = String(it.offerId || '').trim().replace(/^lfx-/i, '');
+  const offerEntry = /^\d{6,}$/.test(offerNumber)
+    ? ' · <a class="offer-link" href="https://detail.1688.com/offer/' + encodeURIComponent(offerNumber) + '.html" target="_blank" rel="noopener" title="在 1688 打开原产品页">1688 原页 ↗</a>'
+    : '';
   return '<article class="row' + (it.bundleKeeper ? ' bundle' : '') + '" data-id="' + esc(it.productDetailId) + '">' +
     (it.cover ? '<img class="cover" loading="lazy" src="' + esc(it.cover) + '" alt="" onclick="openLightbox(this.src)">' : '<div class="cover"></div>') +
     '<div class="meta">' +
@@ -245,7 +252,7 @@ function rowHtml(it) {
       '<div class="title"><a href="' + esc(it.wpUrl || '#') + '" target="_blank" rel="noopener">' + esc(title) + '</a></div>' +
       (it.wpCategory ? '<div class="muted">WP 类别：' + esc(it.wpCategory) + '</div>' : '') +
       '<div class="muted">' + esc(it.shopName || '未知店铺') + (it.category ? ' · ' + esc(it.category) : '') + '</div>' +
-      '<div class="muted">offer ' + esc(it.offerId || '-') + (it.wpPostId ? ' · WP #' + esc(it.wpPostId) : '') + '</div>' +
+      '<div class="muted">offer ' + esc(it.offerId || '-') + (it.wpPostId ? ' · WP #' + esc(it.wpPostId) : '') + offerEntry + '</div>' +
     '</div>' +
     '<div class="body">' +
       '<div class="chips"><span class="lbl">颜色</span><span class="chip count">' + it.colorCount + ' 个</span>' + chips(it.colors) + '</div>' +
