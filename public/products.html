@@ -113,6 +113,13 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 .badge.delisted{background:#667085;font-weight:600}
 .badge.unknown{background:#e4e7ec;color:#475467;font-weight:600}
 .badge.wpmaybe{background:#fff;color:#b54708;border:1px dashed #f79009}
+.badge.portal{background:#175cd3;font-weight:600}
+.badge.portalarch{background:#667085;font-weight:600}
+.badge.portalfail{background:#b42318;font-weight:600}
+img.zoomable{cursor:zoom-in}
+.lightbox-mask{position:fixed;inset:0;background:rgba(15,23,42,.85);z-index:80;display:flex;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}
+.lightbox-mask img{max-width:96vw;max-height:90vh;border-radius:8px;background:#fff;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.lightbox-status{position:absolute;bottom:16px;left:0;right:0;text-align:center;color:#e5e7eb;font-size:12.5px}
 .wp-ext{font-size:11px;color:#b54708;margin-left:2px;cursor:help}
 .wp-sync{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 24px 0;max-width:1500px;margin:0 auto}
 .wp-sync button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 14px;font-size:12.5px;cursor:pointer;color:var(--text)}
@@ -226,7 +233,7 @@ function optionChip(o){
   if (o.local || o.source) {
     const src = o.local || o.source;
     const fallback = o.local && o.source ? o.source : '';
-    return '<span class="opt"><img loading="lazy" referrerpolicy="no-referrer" src="' + esc(src) + '"'
+    return '<span class="opt"><img class="zoomable" loading="lazy" referrerpolicy="no-referrer" src="' + esc(src) + '"'
       + (fallback ? ' data-fallback="' + esc(fallback) + '"' : '') + ' onerror="swatchFallback(this)" alt=""><span>' + esc(o.text) + '</span></span>';
   }
   return '<span class="chip">' + esc(o.text) + '</span>';
@@ -272,6 +279,28 @@ function listingBadge(it){
   if (it.listingStatus === 'delisted') return '<span class="badge delisted">1688 已下架</span>';
   return '<span class="badge unknown">1688 未知</span>';
 }
+function portalBadge(it){
+  if (!it.portalState || it.portalState === 'none') return '';
+  const map = {
+    published: ['portal', 'Portal 已发布'],
+    archived: ['portalarch', 'Portal 已归档'],
+    failed: ['portalfail', 'Portal 失败'],
+  };
+  const [cls, label] = map[it.portalState] || ['portalarch', 'Portal ' + esc(String(it.portalState))];
+  const tips = ['Portal staging'];
+  if (it.portalProductId) tips.push('ID ' + it.portalProductId);
+  if (it.portalState === 'published') {
+    tips.push(it.portalLive === null ? '实时状态未核对'
+      : (it.portalLive ? '实时核对：存在于 staging 目录' : '实时核对：不在 staging 目录（可能已移除）'));
+  } else if (it.portalState === 'archived') {
+    tips.push(it.portalTarget === 'staging' ? '已从 staging 移除/归档' : '历史记录');
+  }
+  if (it.portalStatus && String(it.portalStatus).toUpperCase() !== 'ARCHIVED') tips.push('状态 ' + it.portalStatus);
+  if (it.portalSyncedAt) tips.push('同步于 ' + timeAgo(it.portalSyncedAt));
+  if (it.portalError) tips.push('错误：' + String(it.portalError).slice(0, 80));
+  const live = it.portalState === 'published' && it.portalLive === true ? ' ·live' : '';
+  return '<span class="badge ' + cls + '" title="' + esc(tips.join(' · ')) + '">' + label + esc(live) + '</span>';
+}
 function row(it){
   const isBundle = it.status === 'bundle';
   const manual = it.bundleManual || null;
@@ -288,7 +317,7 @@ function row(it){
     + '<label class="pick" title="选择该产品"><input type="checkbox" data-pick-id="' + it.id + '"'
       + (PICKS.has(String(it.id)) ? ' checked' : '') + '></label>'
     + (it.cover
-      ? '<img class="cover" loading="lazy" referrerpolicy="no-referrer" src="' + esc(it.cover) + '" onerror="imgFallback(this)" alt="">'
+      ? '<img class="cover zoomable" loading="lazy" referrerpolicy="no-referrer" src="' + esc(it.cover) + '" onerror="imgFallback(this)" alt="">'
       : '<span class="cover"></span>')
     + '<div class="meta">'
     + '<span class="badge ' + (isBundle ? 'bundle' : 'normal') + '">' + (isBundle ? '捆绑' : '正常') + (manual ? ' · 手动' : '') + '</span>'
@@ -296,7 +325,7 @@ function row(it){
     + '<span class="muted">采集 ' + esc(it.date || '') + '</span>'
     + '<span class="muted">offer ' + esc(String(it.offerId || '')) + '</span>'
     + (it.shopName ? '<span class="muted">店铺 ' + esc(it.shopName) + '</span>' : '')
-    + wpBadge(it) + listingBadge(it)
+    + wpBadge(it) + listingBadge(it) + portalBadge(it)
     + '</div>'
     + '<div class="body"><div class="title">' + esc(it.title || '') + '</div>'
     + '<div class="dims">' + (it.dims.length ? it.dims.map(dimRow).join('') : '<div class="muted" style="font-size:12px;color:var(--muted)">（无变体选项）</div>') + '</div></div>'
@@ -312,7 +341,7 @@ function row(it){
         + (it.hasSplitPlan ? '（已保存）' : '') + '</button></div>'
       : '<div class="line"><button type="button" class="split-toggle" data-pp-id="' + it.id + '">发布预览 ▾</button></div>')
     + '<div class="line"><button type="button" class="purge-btn" data-purge-id="' + it.id + '" title="从采集器、WordPress 与 RAG 删除，并禁止后续采集">删除…</button></div>'
-    + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
+    + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img class="zoomable" loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
     + '</div></article>';
 }
 function renderStats(){
@@ -1137,6 +1166,58 @@ function fmtMoney(value, currency){
   return unit + Number(value).toFixed(value % 1 === 0 ? 0 : 2);
 }
 
+// One combined table for the raw SKU matrix and the normalized composed SKUs:
+// when normalization exists the raw rows are matched into the composed rows
+// (skuKey or colour+size), and any leftover raw rows are shown as 未规范化.
+function buildVariantsCard(data){
+  const currency = (data.price && data.price.currency) || 'CNY';
+  const rawRows = (data.variants && data.variants.rows) || [];
+  const normSkus = (data.normalization && data.normalization.variantSkus) || null;
+  if (!normSkus || !normSkus.length) {
+    const rows = rawRows.slice(0, 20).map((row) => '<tr><td>' + esc(row.skuKey) + '</td>'
+      + '<td>' + fmtMoney(row.price, currency) + '</td><td>' + (row.stock === null ? '—' : row.stock) + '</td>'
+      + '<td class="pp-muted">' + esc(row.skuId || '') + '</td></tr>').join('');
+    return '<div class="pp-card pp-wide"><div class="pp-card-title">变体矩阵（' + ((data.variants && data.variants.total) || 0) + ' 行，显示前 20）</div>'
+      + '<table class="pp-table"><thead><tr><th>变体</th><th>源价</th><th>库存</th><th>skuId</th></tr></thead><tbody>' + rows + '</tbody></table>'
+      + '<div class="pp-muted" style="margin-top:4px">尚未运行变体规范化：以上为原始变体矩阵。</div></div>';
+  }
+  const matchedKeys = new Set();
+  for (const row of normSkus) {
+    if (row.skuKey !== null && row.skuKey !== undefined && row.skuKey !== '') matchedKeys.add('k:' + String(row.skuKey));
+    matchedKeys.add('c:' + String(row.colour ?? '') + '|' + String(row.size ?? ''));
+  }
+  const extraRaw = [];
+  for (const raw of rawRows) {
+    const options = raw.options || {};
+    const colour = options.Color ?? options['颜色'] ?? null;
+    const size = options.Size ?? options['尺码'] ?? null;
+    const byKey = raw.skuKey !== null && raw.skuKey !== undefined && raw.skuKey !== ''
+      ? 'k:' + String(raw.skuKey) : null;
+    if ((byKey && matchedKeys.has(byKey)) || matchedKeys.has('c:' + String(colour ?? '') + '|' + String(size ?? ''))) continue;
+    extraRaw.push({ raw, colour, size });
+  }
+  const body = [];
+  for (const row of normSkus.slice(0, 40)) {
+    body.push('<tr><td><code>' + esc(row.sku) + '</code>' + (row.pendingStyleNumber ? ' <span class="pp-chip gray">待款号</span>' : '') + '</td>'
+      + '<td>' + esc(row.colour || '') + (row.code ? ' <span class="pp-muted">' + esc(row.code) + '</span>' : '') + '</td>'
+      + '<td>' + esc(row.sizeText || row.size || '') + '</td>'
+      + '<td>' + fmtMoney(row.price, currency) + '</td><td>' + (row.stock === null ? '—' : row.stock) + '</td>'
+      + '<td class="pp-muted">' + esc(row.skuId || '') + '</td></tr>');
+  }
+  for (const item of extraRaw.slice(0, Math.max(0, 40 - body.length))) {
+    body.push('<tr><td><span class="pp-chip gray">未规范化</span></td>'
+      + '<td class="pp-muted">' + esc(String(item.colour ?? item.raw.skuKey ?? '')) + '</td>'
+      + '<td class="pp-muted">' + esc(String(item.size ?? '')) + '</td>'
+      + '<td>' + fmtMoney(item.raw.price, currency) + '</td><td>' + (item.raw.stock === null ? '—' : item.raw.stock) + '</td>'
+      + '<td class="pp-muted">' + esc(item.raw.skuId || '') + '</td></tr>');
+  }
+  return '<div class="pp-card pp-wide"><div class="pp-card-title">变体与组合 SKU（' + normSkus.length + ' 行'
+    + (extraRaw.length ? ' + ' + extraRaw.length + ' 行未规范化' : '') + '）</div>'
+    + '<table class="pp-table"><thead><tr><th>组合 SKU</th><th>颜色</th><th>尺码</th><th>源价</th><th>库存</th><th>skuId</th></tr></thead><tbody>'
+    + body.join('') + '</tbody></table>'
+    + '<div class="pp-muted" style="margin-top:4px">组合 SKU = 款号-颜色缩写-尺码；未规范化的行发布时会被舍弃。</div></div>';
+}
+
 async function togglePublishPreview(id){
   const row = document.querySelector('.row[data-id="' + id + '"]');
   if (!row) return;
@@ -1209,7 +1290,7 @@ function renderPublishPreview(id, data){
     : '<div class="pp-card"><div class="pp-card-title">类目 / 标签 / 材质</div><div class="pp-muted">发布时由模型自动选择（尚无发布记录）。</div></div>';
 
   const swatchHtml = (data.images.swatches || []).map((swatch) => '<span class="pp-swatch">'
-    + (swatch.thumb ? '<img src="' + esc(swatch.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">' : '')
+    + (swatch.thumb ? '<img class="zoomable" src="' + esc(swatch.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">' : '')
     + '<span>' + esc(swatch.value)
     + (swatch.source ? ' <span class="pp-muted">(' + esc(swatch.source) + ')</span>' : '')
     + '</span></span>').join('');
@@ -1218,7 +1299,7 @@ function renderPublishPreview(id, data){
     + (data.images.variantsTranslated ? '发布用译文' : '未翻译，显示采集原文') + '）</div>'
     + (swatchHtml ? '<div class="pp-swatches">' + swatchHtml + '</div>' : '<div class="pp-muted">无颜色色卡</div>')
     + (sizesHtml ? '<div class="pp-row" style="margin-bottom:6px"><span class="pp-muted" style="margin-right:6px">尺码</span><span class="pp-tags">' + sizesHtml + '</span></div>' : '')
-    + '<div class="pp-thumbs">' + (data.images.gallery || []).map((image) => '<img src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">').join('') + '</div>'
+    + '<div class="pp-thumbs">' + (data.images.gallery || []).map((image) => '<img class="zoomable" src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">').join('') + '</div>'
     + '<div class="pp-muted" style="margin-top:6px">主图+图库 ' + (data.images.gallery || []).length + ' 张 · 详情图 ' + data.images.descriptionCount + ' 张'
     + (data.images.publishedImageCount !== null ? ' · 已发布 ' + data.images.publishedImageCount + ' 张 / 色卡 ' + (data.images.publishedColorCount || 0) + ' / 尺码 ' + (data.images.publishedSizeCount || 0) : '')
     + '</div>'
@@ -1229,10 +1310,7 @@ function renderPublishPreview(id, data){
       : '<div class="pp-muted" style="margin-top:4px">图片去重：未运行（发布时仍会做精确哈希去重）</div>')
     + '</div>';
 
-  const rows = (data.variants.rows || []).slice(0, 20).map((row) => '<tr><td>' + esc(row.skuKey) + '</td>'
-    + '<td>' + fmtMoney(row.price, data.price.currency) + '</td><td>' + (row.stock === null ? '—' : row.stock) + '</td><td class="pp-muted">' + esc(row.skuId || '') + '</td></tr>').join('');
-  const variantsCard = '<div class="pp-card pp-wide"><div class="pp-card-title">变体矩阵（' + data.variants.total + ' 行，显示前 20）</div>'
-    + '<table class="pp-table"><thead><tr><th>变体</th><th>源价</th><th>库存</th><th>skuId</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  const variantsCard = buildVariantsCard(data);
 
   const norm = data.normalization ? data.normalization.result : null;
   const normCard = norm
@@ -1242,7 +1320,7 @@ function renderPublishPreview(id, data){
       + '<table class="pp-table"><thead><tr><th>swatch 图</th><th>规范化文本</th><th>SKU 缩写</th><th>原文</th><th>置信度</th></tr></thead><tbody>'
       + (norm.colours || []).map((colour) => '<tr>'
         + '<td>' + (colour.thumb
-          ? '<img src="' + esc(colour.thumb) + '" style="width:26px;height:26px;object-fit:cover;border-radius:4px;display:block" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">'
+          ? '<img class="zoomable" src="' + esc(colour.thumb) + '" style="width:26px;height:26px;object-fit:cover;border-radius:4px;display:block" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">'
           : '<span class="pp-muted">无</span>') + '</td>'
         + '<td>' + (colour.text ? esc(colour.text) : '<span class="pp-muted">待人工</span>')
         + (colour.placeholder ? ' <span class="pp-chip warn">占位</span>' : '')
@@ -1258,15 +1336,7 @@ function renderPublishPreview(id, data){
           + '</span></div>'
         : '')
       + ((data.normalization.variantSkus || []).length
-        ? '<div class="pp-card-title" style="margin-top:8px">组合 SKU（'
-          + esc(data.normalization.styleNo || '待分配款号') + '）</div>'
-          + '<table class="pp-table"><thead><tr><th>SKU</th><th>颜色</th><th>尺码</th><th>源价</th><th>库存</th></tr></thead><tbody>'
-          + data.normalization.variantSkus.slice(0, 40).map((row) => '<tr>'
-            + '<td><code>' + esc(row.sku) + '</code>' + (row.pendingStyleNumber ? ' <span class="pp-chip gray">待款号</span>' : '') + '</td>'
-            + '<td>' + esc(row.colour || '') + ' <span class="pp-muted">' + esc(row.code || '') + '</span></td>'
-            + '<td>' + esc(row.sizeText || row.size || '') + '</td>'
-            + '<td>' + fmtMoney(row.price, 'CNY') + '</td><td>' + (row.stock === null ? '—' : row.stock) + '</td></tr>').join('')
-          + '</tbody></table>'
+        ? '<div class="pp-muted" style="margin-top:6px">组合 SKU 已与「变体与组合 SKU」表合并显示（本面板下方）。</div>'
         : '')
       + (norm.notes ? '<div class="pp-muted" style="margin-top:4px">备注：' + esc(norm.notes) + '</div>' : '')
       + '</div>'
@@ -1527,6 +1597,29 @@ function showModal(html){
   const mask = root.querySelector('.modal-mask');
   if (mask) mask.addEventListener('click', (e) => { if (e.target === mask) closeModal(); });
 }
+// Image lightbox: thumbnails carry ?w= (on-the-fly resize), so the original
+// full-size image is loaded only when the viewer actually opens.
+function hiResImageSrc(src){
+  try {
+    const url = new URL(src, location.origin);
+    if (url.pathname.startsWith('/api/product-images/')) {
+      url.searchParams.delete('w');
+      return url.pathname + (url.search ? url.search : '');
+    }
+    return src;
+  } catch (e) { return src; }
+}
+function closeLightbox(){
+  const el = document.getElementById('lightbox');
+  if (el) el.innerHTML = '';
+}
+function openLightbox(src){
+  if (!src) return;
+  let el = document.getElementById('lightbox');
+  if (!el) { el = document.createElement('div'); el.id = 'lightbox'; document.body.appendChild(el); }
+  el.innerHTML = '<div class="lightbox-mask"><img src="' + esc(hiResImageSrc(src)) + '" alt=""><div class="lightbox-status">点击任意处关闭</div></div>';
+  el.querySelector('.lightbox-mask').addEventListener('click', closeLightbox);
+}
 async function openPurge(id){
   const it = DATA.find((x) => String(x.id) === String(id));
   showModal('<div class="modal-card"><h3>删除并清退 #' + esc(id) + '</h3><div class="row-line">正在读取影响范围…</div></div>');
@@ -1782,8 +1875,13 @@ function wireWpSync(){
     }
   });
   document.addEventListener('click', (e) => {
+    const img = e.target.closest('img.zoomable');
+    if (img) { e.preventDefault(); openLightbox(img.getAttribute('src')); return; }
     const purge = e.target.closest('button[data-purge-id]');
     if (purge) { void openPurge(String(purge.dataset.purgeId)); }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeLightbox();
   });
   if (!btn) return;
   btn.addEventListener('click', async () => {

@@ -1178,11 +1178,14 @@ export function createDatabase(databaseUrl) {
         publications.style_no, publications.wp_status, publications.wp_url,
         publications.status_source AS wp_status_source,
         publications.status_checked_at AS wp_status_checked_at,
+        portal.portal_product_id, portal.portal_status, portal.last_error AS portal_error,
+        portal.result->>'target' AS portal_target, portal.last_synced_at AS portal_synced_at,
         source.shop_id, source.shop_name, source.availability_status, source.delisted_at,
         EXISTS (SELECT 1 FROM product_split_plans plans WHERE plans.product_detail_id=details.id) AS has_split_plan,
         ${colorExpr} AS color_count
       FROM product_details details
       LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
+      LEFT JOIN product_portal_publications portal ON portal.product_detail_id=details.id
       LEFT JOIN LATERAL (
         SELECT products.shop_id,
           coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name,

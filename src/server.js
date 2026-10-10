@@ -6078,10 +6078,30 @@ function toProductCatalogItem(row) {
     wpUrl: row.wp_url || null,
     wpStatusSource: row.wp_status_source || null,
     wpStatusCheckedAt: row.wp_status_checked_at || null,
+    portalProductId: row.portal_product_id ? String(row.portal_product_id) : null,
+    portalStatus: row.portal_status || null,
+    portalTarget: row.portal_target || null,
+    portalError: row.portal_error || null,
+    portalSyncedAt: row.portal_synced_at || null,
     cover: gallery.length ? gallery[0].thumb : null,
     gallery,
     dims: dimOrder.map((name) => ({ name, options: dimMap.get(name) })),
   };
+}
+
+// Portal staging state for a catalog row, mirroring the selection page: the
+// live staging catalog (60s cache) decides published-vs-removed; the stored
+// record covers failures and archived entries.
+function catalogPortalState(row, liveIds) {
+  if (row.portal_error) return 'failed';
+  if (!row.portal_product_id) return 'none';
+  if (String(row.portal_status ?? '').toUpperCase() === 'ARCHIVED') return 'archived';
+  if (liveIds) {
+    return liveIds.has(String(row.portal_product_id))
+      ? 'published'
+      : (row.portal_target === 'staging' ? 'archived' : 'published');
+  }
+  return 'published';
 }
 
 app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async (request) => {
@@ -6092,15 +6112,19 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
   const bundle = ['bundle', 'clear'].includes(String(request.query?.bundle ?? '').trim())
     ? String(request.query.bundle).trim() : '';
   const shop = String(request.query?.shop ?? '').trim().slice(0, 24);
-  const result = await db.listProductCatalog({
-    limit: request.query?.limit ?? 100,
-    offset: request.query?.offset ?? 0,
-    search: request.query?.search ?? '',
-    colors,
-    wp,
-    bundle,
-    shop,
-  });
+  const [result, staging] = await Promise.all([
+    db.listProductCatalog({
+      limit: request.query?.limit ?? 100,
+      offset: request.query?.offset ?? 0,
+      search: request.query?.search ?? '',
+      colors,
+      wp,
+      bundle,
+      shop,
+    }),
+    getPortalStagingActiveIds(),
+  ]);
+  const liveIds = staging.ids ? new Set([...staging.ids].map(String)) : null;
   return {
     count: result.filteredTotal, total: result.total,
     colorCounts: result.colorCounts,
@@ -6109,7 +6133,13 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
     shopCounts: result.shopCounts,
     manualBundleCount: result.manualBundleCount,
     limit: result.limit, offset: result.offset,
-    items: result.items.map(toProductCatalogItem),
+    portalCheck: staging.ids ? 'ok' : 'failed',
+    portalWarning: staging.warning ?? null,
+    items: result.items.map((row) => ({
+      ...toProductCatalogItem(row),
+      portalState: catalogPortalState(row, liveIds),
+      portalLive: row.portal_product_id && liveIds ? liveIds.has(String(row.portal_product_id)) : null,
+    })),
   };
 });
 
