@@ -2174,8 +2174,17 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
         result: decorateNormalization(normalization.result, detail),
         model: normalization.model ?? null,
         updatedAt: normalization.updated_at ?? null,
-        variantSkus: Array.isArray(normalization.result?.variantSkus) ? normalization.result.variantSkus : null,
-        styleNo: normalization.result?.styleNo ?? null,
+        // Recomputed from the live SKU rows so price/stock stay current after
+        // re-captures or price backfills; falls back to the stored snapshot.
+        variantSkus: (() => {
+          try {
+            const styleNo = publication?.style_no ?? normalization.result?.styleNo ?? null;
+            const computed = composeVariantSkus(detail, normalization, styleNo);
+            if (Array.isArray(computed) && computed.length) return computed;
+          } catch { /* fall back to the stored snapshot */ }
+          return Array.isArray(normalization.result?.variantSkus) ? normalization.result.variantSkus : null;
+        })(),
+        styleNo: publication?.style_no ?? normalization.result?.styleNo ?? null,
       }
       : null,
     gates: {
