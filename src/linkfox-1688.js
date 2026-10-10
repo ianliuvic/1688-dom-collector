@@ -147,7 +147,9 @@ export function buildLinkFoxCapture(raw, { offerId, offerKey }) {
       skuKey: entries.map(([key, value]) => `${key}:${value}`).join('|'),
       skuText,
       options,
-      price: positiveNumberOrNull(sku.price) ?? positiveNumberOrNull(sku.retailPrice),
+      price: positiveNumberOrNull(sku.price) ?? positiveNumberOrNull(sku.retailPrice)
+        ?? positiveNumberOrNull(sku.consignPrice)
+        ?? positiveNumberOrNull(sku.fenxiaoPriceInfo?.offerPrice),
       stock: numberOrNull(sku.amountOnSale),
       skuId: text(sku.skuId) || null,
       retailPrice: positiveNumberOrNull(sku.retailPrice),

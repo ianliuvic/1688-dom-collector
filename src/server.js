@@ -4583,6 +4583,36 @@ app.delete('/api/blocklist/:offerId', { preHandler: requireDashboardOrApiKey }, 
   return { removed: true, offerId: String(request.params.offerId) };
 });
 
+// One-off maintenance: fill per-SKU prices that earlier LinkFox captures left
+// null although the raw skuList carried consignPrice/fenxiaoPriceInfo values.
+// Pure local mapping — no LinkFox call, only null prices are touched.
+app.post('/api/product-details/backfill-linkfox-sku-prices', { preHandler: requireApiKey }, async (request) => {
+  const limit = Number(request.body?.limit) > 0 ? Math.min(Number(request.body.limit), 5000) : 2000;
+  const ids = await db.listLinkfoxSkuPriceBackfillCandidates(limit);
+  const priceOf = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  };
+  let products = 0;
+  let updatedRows = 0;
+  for (const id of ids) {
+    const detail = await db.getProductDetail(id);
+    const skuList = (((detail?.raw_data ?? {}).linkfox ?? {}).raw ?? {}).skuList;
+    if (!Array.isArray(skuList)) continue;
+    const priceBySkuId = {};
+    for (const sku of skuList) {
+      const skuId = sku?.skuId === null || sku?.skuId === undefined ? '' : String(sku.skuId);
+      if (!skuId) continue;
+      const price = priceOf(sku.price) ?? priceOf(sku.retailPrice)
+        ?? priceOf(sku.consignPrice) ?? priceOf(sku.fenxiaoPriceInfo?.offerPrice);
+      if (price !== null) priceBySkuId[skuId] = price;
+    }
+    const changed = await db.updateProductSkuPricesFromLinkfox(id, priceBySkuId);
+    if (changed) { products += 1; updatedRows += changed; }
+  }
+  return { candidates: ids.length, products, updatedRows, more: ids.length >= limit };
+});
+
 app.post('/api/product-details/:id/translations', { preHandler: requireApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });

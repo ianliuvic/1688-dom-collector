@@ -2198,6 +2198,36 @@ export function createDatabase(databaseUrl) {
     return (result.rowCount ?? 0) > 0;
   }
 
+  /** Captures whose LinkFox SKU rows are missing a per-SKU price. */
+  async function listLinkfoxSkuPriceBackfillCandidates(limit = 500) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 5000);
+    const result = await pool.query(`SELECT DISTINCT details.id
+      FROM product_details details
+      JOIN product_detail_skus skus ON skus.product_detail_id = details.id
+      WHERE details.raw_data->'linkfox'->'raw'->'skuList' IS NOT NULL
+        AND skus.price IS NULL
+      ORDER BY details.id DESC LIMIT $1`, [safeLimit]);
+    return result.rows.map((row) => Number(row.id));
+  }
+
+  /** Fill null per-SKU prices from a derived price map ({skuId: price}). */
+  async function updateProductSkuPricesFromLinkfox(productDetailId, priceBySkuId) {
+    const entries = Object.entries(priceBySkuId ?? {})
+      .map(([skuId, price]) => ({ skuId: String(skuId), price: Number(price) }))
+      .filter((entry) => entry.skuId && Number.isFinite(entry.price) && entry.price > 0);
+    if (!entries.length) return 0;
+    const result = await pool.query(`UPDATE product_detail_skus skus
+      SET price = data.price
+      FROM (SELECT entry->>'skuId' AS sku_id, (entry->>'price')::numeric AS price
+            FROM jsonb_array_elements($2::jsonb) AS entry) data
+      WHERE skus.product_detail_id = $1
+        AND skus.sku_id::text = data.sku_id
+        AND skus.price IS NULL
+        AND data.price IS NOT NULL`,
+    [productDetailId, JSON.stringify(entries)]);
+    return result.rowCount ?? 0;
+  }
+
   async function createProductRagSync(productDetailId, values = {}) {
     const saved = await pool.query(`INSERT INTO product_rag_syncs
       (product_detail_id, trigger_type, canonical_product_id, active, request_summary)
@@ -3389,6 +3419,7 @@ export function createDatabase(databaseUrl) {
     isOfferBlocked, listBlockedOfferIds, listProductBlocklist, upsertProductBlocklist,
     removeProductBlocklist, listBlockedProductDetailIds, listShopifyPublicationsForDetail,
     getLinkfoxDetailSources, saveLinkfoxDetailImageUrls,
+    listLinkfoxSkuPriceBackfillCandidates, updateProductSkuPricesFromLinkfox,
     createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
