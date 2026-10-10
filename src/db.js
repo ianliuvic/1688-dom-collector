@@ -2172,15 +2172,28 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
-  /** Raw LinkFox description HTML for the given captures (description image URLs). */
-  async function getLinkfoxDescriptionHtml(ids) {
+  /** LinkFox description sources: persisted URL list, raw HTML as first-time fallback. */
+  async function getLinkfoxDetailSources(ids) {
     const list = [...new Set((ids ?? []).map(Number).filter((value) => Number.isInteger(value) && value > 0))];
     if (!list.length) return new Map();
-    const result = await pool.query(`SELECT id, raw_data->'linkfox'->'raw'->>'description' AS description
-      FROM product_details
-      WHERE id = ANY($1::bigint[])
-        AND raw_data->'linkfox'->'raw'->>'description' IS NOT NULL`, [list]);
-    return new Map(result.rows.map((row) => [Number(row.id), String(row.description)]));
+    const result = await pool.query(`SELECT id,
+        raw_data->'linkfox'->'detailImageUrls' AS urls,
+        raw_data->'linkfox'->'raw'->>'description' AS description
+      FROM product_details WHERE id = ANY($1::bigint[])`, [list]);
+    return new Map(result.rows.map((row) => [Number(row.id), {
+      urls: Array.isArray(row.urls) ? row.urls.map(String) : null,
+      html: row.description ? String(row.description) : null,
+    }]));
+  }
+
+  async function saveLinkfoxDetailImageUrls(productDetailId, urls) {
+    const list = [...new Set((urls ?? []).map((value) => String(value ?? '').trim()).filter(Boolean))]
+      .slice(0, 100);
+    if (!list.length) return false;
+    const result = await pool.query(`UPDATE product_details
+      SET raw_data = jsonb_set(raw_data, '{linkfox,detailImageUrls}', $2::jsonb, true)
+      WHERE id=$1 AND raw_data->'linkfox' IS NOT NULL`, [productDetailId, JSON.stringify(list)]);
+    return (result.rowCount ?? 0) > 0;
   }
 
   async function createProductRagSync(productDetailId, values = {}) {
@@ -3373,7 +3386,7 @@ export function createDatabase(databaseUrl) {
     pruneWordpressStatusEvents,
     isOfferBlocked, listBlockedOfferIds, listProductBlocklist, upsertProductBlocklist,
     removeProductBlocklist, listBlockedProductDetailIds, listShopifyPublicationsForDetail,
-    getLinkfoxDescriptionHtml,
+    getLinkfoxDetailSources, saveLinkfoxDetailImageUrls,
     createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,

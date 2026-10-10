@@ -6164,28 +6164,38 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
     portalState: catalogPortalState(row, liveIds),
     portalLive: row.portal_product_id && liveIds ? liveIds.has(String(row.portal_product_id)) : null,
   }));
-  // Merge the original description images from the LinkFox raw HTML so the row
-  // strip shows every source image even before it has been downloaded. Only
-  // captures without any stored detail images need the (larger) raw HTML read.
+  // Merge the original description images from the LinkFox data so the row
+  // strip shows every source image even before it has been downloaded. The
+  // extracted URL list is persisted on first use, so later page loads read a
+  // small array instead of the (large) raw description HTML.
   const idsNeedingRaw = items.filter((item) => !(item.detailImages ?? []).length)
     .map((item) => Number(item.id));
   if (idsNeedingRaw.length) {
-    const htmlById = await db.getLinkfoxDescriptionHtml(idsNeedingRaw).catch(() => new Map());
-    if (htmlById.size) {
-      for (const item of items) {
-        const html = htmlById.get(Number(item.id));
-        if (!html) continue;
-        const seen = new Set((item.detailImages ?? [])
-          .map((image) => normalizedDetailImageKey(image.source || image.thumb)));
-        for (const url of extractDescriptionImageUrls(html)) {
-          const key = normalizedDetailImageKey(url);
-          if (!key || seen.has(key)) continue;
-          seen.add(key);
-          item.detailImages.push({ id: null, thumb: url, source: url });
-          if (item.detailImages.length >= 60) break;
+    const sourcesById = await db.getLinkfoxDetailSources(idsNeedingRaw).catch(() => new Map());
+    const persistUpdates = [];
+    for (const item of items) {
+      const source = sourcesById.get(Number(item.id));
+      if (!source) continue;
+      let urls = Array.isArray(source.urls) && source.urls.length ? source.urls : null;
+      if (!urls && source.html) {
+        const parsed = extractDescriptionImageUrls(source.html);
+        if (parsed.length) {
+          urls = parsed;
+          persistUpdates.push(db.saveLinkfoxDetailImageUrls(Number(item.id), parsed).catch(() => {}));
         }
       }
+      if (!urls || !urls.length) continue;
+      const seen = new Set((item.detailImages ?? [])
+        .map((image) => normalizedDetailImageKey(image.source || image.thumb)));
+      for (const url of urls) {
+        const key = normalizedDetailImageKey(url);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        item.detailImages.push({ id: null, thumb: url, source: url });
+        if (item.detailImages.length >= 60) break;
+      }
     }
+    if (persistUpdates.length) void Promise.all(persistUpdates);
   }
   return {
     count: result.filteredTotal, total: result.total,
