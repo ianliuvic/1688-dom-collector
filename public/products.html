@@ -105,6 +105,7 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .pick-img{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px;cursor:pointer;display:flex;flex-direction:column;gap:3px;align-items:center;width:114px}
 .pick-img img{width:102px;height:102px;object-fit:cover;border-radius:6px;background:#f2f4f7;display:block}
 .pick-img:hover{border-color:#98a2b3}
+.pick-img.picked{outline:2px solid #175cd3;outline-offset:-2px}
 .pick-img-meta{font-size:11px;color:#475467;text-align:center}
 .pub-edit-strip{display:flex;flex-wrap:wrap;gap:8px;min-height:84px;border:1px dashed var(--line);border-radius:8px;padding:8px;margin:6px 0}
 .pub-edit-img{position:relative;cursor:grab}
@@ -1654,8 +1655,9 @@ function renderNormEditModal(){
   if (save) save.addEventListener('click', () => { void saveNormEdit(); });
   const pick = document.getElementById('normEditPick');
   if (pick) pick.addEventListener('click', () => {
-    openImagePicker(st.id, { title: '选择 swatch 图片', onPick: (image) => {
-      if (NORM_EDIT) NORM_EDIT.imageId = image.id;
+    openImagePicker(st.id, { title: '选择 swatch 图片', onPick: (images) => {
+      const image = images && images[0];
+      if (NORM_EDIT && image) NORM_EDIT.imageId = image.id;
       renderNormEditModal();
     } });
   });
@@ -1686,30 +1688,61 @@ async function saveNormEdit(){
 }
 
 // Shared image picker over the product's main/gallery/description images.
-function openImagePicker(id, { onPick = null, excludeIds = [], title = '选择图片' } = {}){
+// multi=false: a click picks one image and closes. multi=true: clicks toggle
+// selection and the footer button adds every selected image at once (URL-only
+// entries are downloaded on confirm).
+function openImagePicker(id, { onPick = null, excludeIds = [], title = '选择图片', multi = false } = {}){
   const data = PP_DATA.get(String(id));
   if (!data || !data.images) return;
-  IMAGE_PICKER = { id: String(id), onPick, excludeIds: new Set((excludeIds || []).map(String)) };
+  IMAGE_PICKER = { id: String(id), onPick, multi, excludeIds: new Set((excludeIds || []).map(String)), picked: new Set() };
   const typeLabel = { main: '主图', gallery: '图库', description: '详情图' };
   const pool = data.images.pool || [];
   const cells = pool.map((image, index) => {
-    const dim = image.id && IMAGE_PICKER.excludeIds.has(String(image.id)) ? ' style="opacity:.35"' : '';
+    const dim = image.id && !multi && IMAGE_PICKER.excludeIds.has(String(image.id)) ? ' style="opacity:.35"' : '';
+    const already = image.inPublish && multi ? ' · <span style="color:#067647">已保存至发布集</span>' : '';
     return '<button type="button" class="pick-img" data-pick-ref="' + index + '"' + dim + '>'
       + '<img src="' + esc(image.thumb || image.source || '') + '" loading="lazy" referrerpolicy="no-referrer" alt="">'
       + '<span class="pick-img-meta">' + esc(typeLabel[image.type] || image.type)
-      + (image.inPublish ? ' · <span style="color:#067647">已在发布集</span>' : '')
+      + (image.inPublish && !multi ? ' · <span style="color:#067647">已在发布集</span>' : '')
+      + already
       + (image.local === false ? ' · <span style="color:#b54708">需下载</span>' : '') + '</span>'
       + '</button>';
   }).join('');
+  const footer = multi
+    ? '<div class="modal-actions" style="justify-content:space-between">'
+      + '<span class="pp-muted" id="pickCount">已选 0 张</span>'
+      + '<span><button class="ghost" data-modal-close>取消</button> '
+      + '<button class="primary" id="pickConfirm" disabled>添加所选</button></span></div>'
+    : '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button></div>';
   showModal('<div class="modal-card" style="max-width:880px"><h3>' + esc(title) + '（' + pool.length + ' 张）</h3>'
+    + (multi ? '<div class="row-line muted">点击图片勾选/取消，可一次选多张；确认后自动加入（需下载的会自动下载）。</div>' : '')
     + '<div class="pick-grid">' + (cells || '<div class="pp-muted">没有可选图片</div>') + '</div>'
-    + '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button></div></div>');
+    + footer + '</div>');
   wireModalClose();
+  const updateCount = () => {
+    const st = IMAGE_PICKER;
+    if (!st || !st.multi) return;
+    const countEl = document.getElementById('pickCount');
+    const confirm = document.getElementById('pickConfirm');
+    if (countEl) countEl.textContent = '已选 ' + st.picked.size + ' 张';
+    if (confirm) {
+      confirm.disabled = st.picked.size === 0;
+      confirm.textContent = st.picked.size ? '添加所选（' + st.picked.size + '）' : '添加所选';
+    }
+  };
   document.querySelectorAll('#modalRoot button[data-pick-ref]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const keep = IMAGE_PICKER;
-      const image = keep ? pool[Number(btn.dataset.pickRef)] : null;
+      const index = Number(btn.dataset.pickRef);
+      const image = keep ? pool[index] : null;
       if (!keep || !image) return;
+      if (keep.multi) {
+        if (keep.picked.has(index)) keep.picked.delete(index);
+        else keep.picked.add(index);
+        btn.classList.toggle('picked', keep.picked.has(index));
+        updateCount();
+        return;
+      }
       let picked = image;
       if (!picked.id) {
         // URL-only detail image: download it into storage first.
@@ -1718,13 +1751,7 @@ function openImagePicker(id, { onPick = null, excludeIds = [], title = '选择�
         btn.disabled = true;
         if (label) label.innerHTML = '下载中…';
         try {
-          const res = await fetch('/api/product-details/' + keep.id + '/publish-images/materialize', {
-            method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
-            body: JSON.stringify({ url: picked.source || picked.thumb }),
-          });
-          const body = await res.json().catch(() => null);
-          if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
-          picked = { ...picked, id: String(body.imageId), thumb: body.thumb || picked.thumb, local: true };
+          picked = await materializePoolImage(keep, picked);
         } catch (e) {
           if (label) label.innerHTML = original;
           btn.disabled = false;
@@ -1734,9 +1761,50 @@ function openImagePicker(id, { onPick = null, excludeIds = [], title = '选择�
       }
       IMAGE_PICKER = null;
       closeModal();
-      if (keep.onPick) keep.onPick(picked);
+      if (keep.onPick) keep.onPick([picked]);
     });
   });
+  if (multi) {
+    updateCount();
+    const confirm = document.getElementById('pickConfirm');
+    if (confirm) confirm.addEventListener('click', async () => {
+      const keep = IMAGE_PICKER;
+      if (!keep || !keep.picked.size) return;
+      const chosen = [...keep.picked].map((index) => pool[index]).filter(Boolean);
+      confirm.disabled = true;
+      const failed = [];
+      const results = [];
+      for (let i = 0; i < chosen.length; i += 1) {
+        let image = chosen[i];
+        if (!image.id) {
+          confirm.textContent = '下载中 ' + (i + 1) + '/' + chosen.length + '…';
+          try {
+            image = await materializePoolImage(keep, image);
+          } catch (e) {
+            failed.push({ image, message: String((e && e.message) || e) });
+            continue;
+          }
+        }
+        results.push(image);
+      }
+      IMAGE_PICKER = null;
+      closeModal();
+      if (keep.onPick && results.length) keep.onPick(results);
+      if (failed.length) {
+        window.alert('部分图片下载失败，未加入：' + failed.length + ' 张（'
+          + failed.map((entry) => String(entry.message).slice(0, 60)).join('；') + '）');
+      }
+    });
+  }
+}
+async function materializePoolImage(keep, image){
+  const res = await fetch('/api/product-details/' + keep.id + '/publish-images/materialize', {
+    method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ url: image.source || image.thumb }),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+  return { ...image, id: String(body.imageId), thumb: body.thumb || image.thumb, local: true };
 }
 
 function enableDragReorder(container){
@@ -1805,10 +1873,15 @@ function renderPubEditModal(){
   if (add) add.addEventListener('click', () => {
     openImagePicker(st.id, {
       title: '添加图片到发布集',
+      multi: true,
       excludeIds: st.items.map((item) => item.id),
-      onPick: (image) => {
+      onPick: (images) => {
         if (!PUB_EDIT) return;
-        PUB_EDIT.items.push({ id: String(image.id), thumb: image.thumb || image.source, type: image.type });
+        for (const image of images) {
+          const imageId = String(image.id);
+          if (PUB_EDIT.items.some((item) => item.id === imageId)) continue;
+          PUB_EDIT.items.push({ id: imageId, thumb: image.thumb || image.source, type: image.type });
+        }
         renderPubEditModal();
       },
     });
