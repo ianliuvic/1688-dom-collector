@@ -1997,7 +1997,9 @@ export function createDatabase(databaseUrl) {
           WHERE product_detail_id = $1`, [productDetailId, status, source]);
       } else {
         await pool.query(`UPDATE product_wordpress_publications
-          SET status_checked_at = now() WHERE product_detail_id = $1`, [productDetailId]);
+          SET status_checked_at = now(),
+            status_source = COALESCE(status_source, $2)
+          WHERE product_detail_id = $1`, [productDetailId, source]);
       }
       if (changed || source === 'wp_event') {
         await recordWordpressStatusEvent({ productDetailId, postId: postIdNumber,
