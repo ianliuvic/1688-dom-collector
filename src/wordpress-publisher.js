@@ -726,6 +726,31 @@ export async function resolveWordPressProduct(identifier, config) {
   return wp(`/wp-json/hx/v1/products/resolve?${query}`, { timeoutMs: 30000 });
 }
 
+/**
+ * Live-read the current post status for the given post ids (100 per REST
+ * batch). Posts missing from the response are trashed or permanently deleted
+ * (the collection endpoint omits internal statuses such as trash).
+ */
+export async function fetchWordPressProductStatuses({ postIds, config }) {
+  const wp = wordpressClient(config);
+  const ids = [...new Set((postIds ?? []).map(Number)
+    .filter((value) => Number.isInteger(value) && value > 0))];
+  const statuses = new Map();
+  for (let index = 0; index < ids.length; index += 100) {
+    const chunk = ids.slice(index, index + 100);
+    const query = new URLSearchParams({
+      include: chunk.join(','), status: 'any', context: 'edit',
+      _fields: 'id,status', per_page: '100',
+    }).toString();
+    const rows = await wp(`/wp-json/wp/v2/product?${query}`, { timeoutMs: 30000 });
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const id = Number(row?.id);
+      if (Number.isInteger(id) && row?.status) statuses.set(id, String(row.status));
+    }
+  }
+  return { statuses, missing: ids.filter((id) => !statuses.has(id)) };
+}
+
 // --- split-product publishing -------------------------------------------------
 
 async function pickSplitCategory({ content, categories, config }) {

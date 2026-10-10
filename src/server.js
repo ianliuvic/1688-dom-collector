@@ -15,6 +15,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   setWordPressProductPublicationDate, setWordPressProductStatus,
   syncWordPressProductPricing, replaceWordPressBestSellers,
   resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
+  fetchWordPressProductStatuses,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
   resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
@@ -65,6 +66,8 @@ const config = {
   wordpressBaseUrl: process.env.WORDPRESS_BASE_URL,
   wordpressUsername: process.env.WORDPRESS_USERNAME,
   wordpressApplicationPassword: process.env.WORDPRESS_APPLICATION_PASSWORD,
+  wpStatusEventToken: process.env.WP_STATUS_EVENT_TOKEN?.trim() || '',
+  wpStatusReconcileMinutes: Math.min(Math.max(Number(process.env.WP_STATUS_RECONCILE_MINUTES) || 15, 1), 1440),
   novncUsername: process.env.NOVNC_USERNAME || '',
   novncPassword: process.env.NOVNC_PASSWORD || '',
   productsRagApiUrl: process.env.PRODUCTS_RAG_API_URL || '',
@@ -174,6 +177,24 @@ function requireDashboardOrApiKey(request, reply, done) {
   const header = request.headers.authorization || '';
   if (/^Bearer\s+/i.test(header)) return requireApiKey(request, reply, done);
   return requireDashboardAuth(request, reply, done);
+}
+
+// WordPress pushes product status changes here with a dedicated token, kept
+// separate from the collector admin key so the site cannot call other APIs.
+function requireWpStatusEventToken(request, reply, done) {
+  if (!config.wpStatusEventToken) {
+    reply.code(503).send({ error: 'wp_status_events_not_configured' });
+    return;
+  }
+  const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
+  const suppliedBuffer = Buffer.from(supplied);
+  const expectedBuffer = Buffer.from(config.wpStatusEventToken);
+  if (suppliedBuffer.length !== expectedBuffer.length
+      || !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)) {
+    reply.code(401).send({ error: 'unauthorized' });
+    return;
+  }
+  done();
 }
 
 function requireNovncAuth(request, reply, done) {
@@ -4315,6 +4336,153 @@ app.get('/api/product-details/:id/wordpress', { preHandler: requireApiKey }, asy
   return db.getWordPressPublication(detail.id);
 });
 
+// ---- WordPress status truth ------------------------------------------------
+// The stored wp_status must converge to the real WordPress state no matter who
+// changes it (manual wp-admin edits, bulk edits, other tools). Three inputs:
+//   1. WP pushes change events to /api/wordpress/status-events (near real time)
+//   2. a periodic live reconcile sweep (self-healing backstop)
+//   3. an on-demand sync endpoint used by the products page and the daily task.
+
+async function applyObservedWordpressStatuses(observations, { source = 'reconcile' } = {}) {
+  let checked = 0;
+  let changed = 0;
+  let unmapped = 0;
+  const ragScheduled = [];
+  for (const observation of observations) {
+    const outcome = await db.applyWordpressPostStatus({
+      postId: observation.postId,
+      newStatus: observation.status,
+      source,
+      changedBy: observation.changedBy ?? null,
+      eventAt: observation.eventAt ?? null,
+    }).catch(() => null);
+    if (!outcome) { unmapped += 1; continue; }
+    checked += 1;
+    if (outcome.changed) {
+      changed += 1;
+      if (outcome.role === 'keeper') ragScheduled.push(outcome);
+    }
+  }
+  for (const outcome of ragScheduled) {
+    const trigger = `${source}_${outcome.newStatus === 'publish' ? 'publish' : 'unpublish'}`;
+    await scheduleProductRagSync(outcome.productDetailId, { trigger }).catch(() => {});
+  }
+  return { checked, changed, unmapped, ragScheduled: ragScheduled.length };
+}
+
+let wpStatusReconcileRunning = false;
+
+async function runWordpressStatusReconcile({ staleMinutes = config.wpStatusReconcileMinutes,
+  keeperLimit = 800 } = {}) {
+  if (wpStatusReconcileRunning) return { skipped: 'already_running' };
+  if (!config.wordpressBaseUrl || !config.wordpressUsername || !config.wordpressApplicationPassword) {
+    return { skipped: 'wordpress_not_configured' };
+  }
+  wpStatusReconcileRunning = true;
+  try {
+    const staleBefore = new Date(Date.now() - staleMinutes * 60_000).toISOString();
+    const [keeperRows, siblingEntries] = await Promise.all([
+      db.listWordpressStatusReconcileTargets({ staleBefore, limit: keeperLimit }),
+      db.listSplitContentWpPostEntries(),
+    ]);
+    const staleSiblings = siblingEntries.filter((entry) => !entry.checkedAt || entry.checkedAt < staleBefore);
+    const postIds = [...new Set([
+      ...keeperRows.map((row) => Number(row.wp_post_id)),
+      ...staleSiblings.map((entry) => entry.postId),
+    ])];
+    if (!postIds.length) return { checked: 0, changed: 0, posts: 0 };
+    const { statuses } = await fetchWordPressProductStatuses({ postIds, config });
+    const observations = postIds.map((postId) => ({ postId, status: statuses.get(postId) ?? 'deleted' }));
+    const result = await applyObservedWordpressStatuses(observations, { source: 'reconcile' });
+    await db.pruneWordpressStatusEvents({ keepDays: 60 }).catch(() => {});
+    if (result.changed) {
+      app.log.info({ ...result, posts: postIds.length }, 'wordpress status reconcile applied changes');
+    }
+    return { ...result, posts: postIds.length };
+  } finally {
+    wpStatusReconcileRunning = false;
+  }
+}
+
+// Push endpoint for the WordPress site: reports product post status changes.
+app.post('/api/wordpress/status-events', { preHandler: requireWpStatusEventToken }, async (request, reply) => {
+  const events = Array.isArray(request.body?.events) ? request.body.events.slice(0, 100) : [];
+  if (!events.length) return reply.code(400).send({ error: 'events_required' });
+  const results = [];
+  let changed = 0;
+  let unmapped = 0;
+  for (const event of events) {
+    const postId = Number(event?.postId);
+    const newStatus = String(event?.newStatus ?? '').trim().slice(0, 40);
+    if (!Number.isInteger(postId) || postId <= 0 || !newStatus) {
+      results.push({ postId: event?.postId ?? null, applied: false, reason: 'invalid_event' });
+      continue;
+    }
+    const outcome = await db.applyWordpressPostStatus({
+      postId,
+      newStatus,
+      source: 'wp_event',
+      changedBy: event?.changedBy ? String(event.changedBy).slice(0, 120) : null,
+      eventAt: event?.changedAt ? String(event.changedAt).slice(0, 40) : null,
+    }).catch(() => null);
+    if (!outcome) {
+      unmapped += 1;
+      results.push({ postId, applied: false, reason: 'unmapped' });
+      continue;
+    }
+    if (outcome.changed && outcome.role === 'keeper') {
+      changed += 1;
+      const trigger = `wp_event_${newStatus === 'publish' ? 'publish' : 'unpublish'}`;
+      scheduleProductRagSync(outcome.productDetailId, { trigger }).catch(() => {});
+    }
+    results.push({ postId, applied: true, role: outcome.role,
+      productDetailId: outcome.productDetailId, status: newStatus, changed: outcome.changed });
+  }
+  return { received: events.length, changed, unmapped, results };
+});
+
+// On-demand live check: reads the real WordPress status for the given saved
+// products (keeper + split siblings) and refreshes the stored copy.
+app.post('/api/wordpress/statuses/sync', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const rawIds = Array.isArray(request.body?.productDetailIds) ? request.body.productDetailIds : [];
+  const ids = [...new Set(rawIds.map(Number).filter((value) => Number.isInteger(value) && value > 0))].slice(0, 300);
+  if (!ids.length) return reply.code(400).send({ error: 'product_detail_ids_required' });
+  const postIds = new Set();
+  for (const id of ids) {
+    const [publication, contents] = await Promise.all([
+      db.getWordPressPublication(id), db.getSplitContents(id),
+    ]);
+    if (publication?.wp_post_id) postIds.add(Number(publication.wp_post_id));
+    for (const product of contents?.result?.products ?? []) {
+      const postId = Number(product?.wp?.postId);
+      if (Number.isInteger(postId) && postId > 0) postIds.add(postId);
+    }
+  }
+  if (!postIds.size) {
+    return { checked: 0, changed: 0, posts: 0, results: [], note: 'no_wordpress_posts_for_details' };
+  }
+  let statuses;
+  try {
+    ({ statuses } = await fetchWordPressProductStatuses({ postIds: [...postIds], config }));
+  } catch (error) {
+    request.log.warn({ err: error }, 'wordpress status sync failed');
+    return reply.code(502).send({ error: 'wordpress_unreachable', message: String(error?.message ?? error).slice(0, 300) });
+  }
+  const observations = [...postIds].map((postId) => ({ postId, status: statuses.get(postId) ?? 'deleted' }));
+  const applied = await applyObservedWordpressStatuses(observations, { source: 'reconcile' });
+  const results = [];
+  for (const id of ids) {
+    const publication = await db.getWordPressPublication(id);
+    results.push({
+      productDetailId: id,
+      wpStatus: publication?.wp_status ?? null,
+      statusSource: publication?.status_source ?? null,
+      statusCheckedAt: publication?.status_checked_at ?? null,
+    });
+  }
+  return { ...applied, posts: postIds.size, results };
+});
+
 // Publication overview across every captured product: status totals per shop,
 // plus a filterable listing. Bearer or dashboard Basic auth.
 app.get('/api/wordpress/publications/summary', { preHandler: requireDashboardOrApiKey }, async () => db.summarizeWordPressPublications());
@@ -5562,6 +5730,8 @@ function toProductCatalogItem(row) {
     styleNo: row.style_no || null,
     wpStatus: row.wp_status || null,
     wpUrl: row.wp_url || null,
+    wpStatusSource: row.wp_status_source || null,
+    wpStatusCheckedAt: row.wp_status_checked_at || null,
     cover: gallery.length ? gallery[0].thumb : null,
     gallery,
     dims: dimOrder.map((name) => ({ name, options: dimMap.get(name) })),
@@ -6074,6 +6244,21 @@ try {
 }
 await collector.start();
 await app.listen({ port: config.port, host: '0.0.0.0' });
+
+// Periodic WordPress status reconcile: self-healing backstop for the pushed
+// status events. Runs in-process; stale products only, batched REST reads.
+const wpStatusReconcileTimer = setInterval(() => {
+  runWordpressStatusReconcile().catch((error) =>
+    app.log.error({ err: error }, 'wordpress status reconcile failed'));
+}, config.wpStatusReconcileMinutes * 60_000);
+wpStatusReconcileTimer.unref?.();
+setTimeout(() => {
+  runWordpressStatusReconcile().catch((error) =>
+    app.log.error({ err: error }, 'initial wordpress status reconcile failed'));
+}, 15_000).unref?.();
+if (!config.wpStatusEventToken) {
+  app.log.warn('WP_STATUS_EVENT_TOKEN is not configured; WordPress status push events will be rejected (reconcile still runs).');
+}
 const workers = [workerLoop('general', 0),
   ...Array.from({ length: config.detailCaptureConcurrency }, (_, index) =>
     workerLoop('product_detail', index + 1))];

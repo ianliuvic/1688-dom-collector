@@ -108,6 +108,13 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 .badge.listing{background:var(--normal);font-weight:600}
 .badge.delisted{background:#667085;font-weight:600}
 .badge.unknown{background:#e4e7ec;color:#475467;font-weight:600}
+.badge.wpmaybe{background:#fff;color:#b54708;border:1px dashed #f79009}
+.wp-ext{font-size:11px;color:#b54708;margin-left:2px;cursor:help}
+.wp-sync{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 24px 0;max-width:1500px;margin:0 auto}
+.wp-sync button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 14px;font-size:12.5px;cursor:pointer;color:var(--text)}
+.wp-sync button:hover{border-color:#98a2b3}
+.wp-sync button:disabled{opacity:.55;cursor:default}
+.wp-sync .muted{color:var(--muted);font-size:12px}
 .filters select{border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:12.5px;background:#fff;color:var(--text);max-width:280px;outline:none}
 .meta .style{font-weight:700;font-size:13.5px}
 .meta .muted{font-size:12px;color:var(--muted);word-break:break-all}
@@ -137,7 +144,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 <body>
 <header>
   <h1>全部产品 · 已采集</h1>
-  <p class="sub">采集器当前保存的全部商品（只读）。每行显示商品名称、各变体选项的名称与图片（颜色显示来源图，尺码为文字）、价格区间、变体组合数、图库缩略图与 wearhongxiu 发布状态。支持按标题、offer、款式号搜索。</p>
+  <p class="sub">采集器当前保存的全部商品（只读）。每行显示商品名称、各变体选项的名称与图片（颜色显示来源图，尺码为文字）、价格区间、变体组合数、图库缩略图与 wearhongxiu 发布状态。支持按标题、offer、款式号搜索。WP 状态与 WordPress 实时同步：站内外部改动（手动改 draft / 发布 / 回收站）会自动回传，徽标悬停可见来源与核对时间；也可点「核对 WP 状态」强制刷新本页。</p>
   <div class="nav">
     <a href="/products" class="on">全部产品</a>
     <a href="/selection">选品</a>
@@ -148,6 +155,10 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 <nav class="tabs" id="tabs"></nav>
 <nav class="filters" id="filters"></nav>
 <div class="pager" id="pager"></div>
+<div class="wp-sync" id="wpSync">
+  <button type="button" id="wpSyncBtn">核对 WP 状态（本页）</button>
+  <span class="muted" id="wpSyncNote">WP 状态来自采集器记录 + WordPress 实时回传（外部改动自动同步）</span>
+</div>
 <main id="list"><div class="empty">加载中…</div></main>
 <script>
 let DATA = [];
@@ -197,10 +208,32 @@ function priceText(it){
   if (it.priceMin != null && it.priceMax != null && Number(it.priceMin) !== Number(it.priceMax)) return unit + it.priceMin + ' – ' + it.priceMax;
   return unit + (it.priceMax != null ? it.priceMax : it.priceMin);
 }
+const WP_SOURCE_LABEL = { collector: '采集器操作', wp_event: 'WP 外部改动', reconcile: '自动核对' };
+function timeAgo(iso){
+  const t = iso ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(t)) return '';
+  const mins = Math.max(Math.floor((Date.now() - t) / 60000), 0);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return mins + ' 分钟前';
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + ' 小时前';
+  return Math.floor(hours / 24) + ' 天前';
+}
 function wpBadge(it){
   if (!it.wpStatus) return '<span class="badge wpnone">未发布</span>';
+  const label = it.wpStatus === 'deleted' ? '已删除/回收站' : it.wpStatus;
   const cls = it.wpStatus === 'publish' ? 'wp' : 'wpdraft';
-  return '<span class="badge ' + cls + '">WP ' + esc(it.wpStatus) + '</span>';
+  const checkedAt = it.wpStatusCheckedAt ? Date.parse(it.wpStatusCheckedAt) : NaN;
+  const stale = !Number.isFinite(checkedAt) || Date.now() - checkedAt > 45 * 60 * 1000;
+  const src = WP_SOURCE_LABEL[it.wpStatusSource] || '未核对';
+  const tip = 'WP 状态：' + label + ' · 来源：' + src
+    + (Number.isFinite(checkedAt) ? ' · 核对于 ' + timeAgo(it.wpStatusCheckedAt) : '')
+    + (stale ? '（可能已过期，建议点“核对 WP 状态”）' : '');
+  const warn = stale ? ' ⚠' : '';
+  const ext = it.wpStatusSource === 'wp_event'
+    ? '<span class="wp-ext" title="WordPress 侧有外部状态改动（非采集器操作）">✎</span>' : '';
+  return '<span class="badge ' + cls + (stale ? ' wpmaybe' : '') + '" title="' + esc(tip) + '">WP '
+    + esc(label) + warn + '</span>' + ext;
 }
 function listingBadge(it){
   if (it.listingStatus === 'active') return '<span class="badge listing">1688 在售</span>';
@@ -1436,9 +1469,40 @@ document.addEventListener('change', (e) => {
   const move = e.target.closest('select[data-split-move]');
   if (move) moveSplitOption(String(move.dataset.splitMove), move.dataset.opt, Number(move.value));
 });
+function wireWpSync(){
+  const btn = document.getElementById('wpSyncBtn');
+  const note = document.getElementById('wpSyncNote');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (btn.disabled) return;
+    const ids = DATA.map((x) => x.id);
+    if (!ids.length) { if (note) note.textContent = '本页没有产品'; return; }
+    btn.disabled = true;
+    if (note) note.textContent = '正在向 WordPress 核对 ' + ids.length + ' 个产品…';
+    try {
+      const res = await fetch('/api/wordpress/statuses/sync', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ productDetailIds: ids }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+      if (note) {
+        note.textContent = '核对完成：检查 ' + (body.posts || 0) + ' 个 WP 文章，更新 '
+          + (body.changed || 0) + ' 个状态' + (body.note ? '（' + body.note + '）' : '');
+      }
+      await loadPage();
+    } catch (e) {
+      if (note) note.textContent = '核对失败：' + String((e && e.message) || e);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
 (async () => {
   wireTabs();
   wireFilters();
+  wireWpSync();
   await loadPage();
 })();
 </script>

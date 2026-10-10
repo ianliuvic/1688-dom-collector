@@ -392,6 +392,28 @@ export function createDatabase(databaseUrl) {
         ON product_wordpress_publications(wp_url);
       CREATE INDEX IF NOT EXISTS product_wordpress_publications_external_idx
         ON product_wordpress_publications(external_id);
+      ALTER TABLE product_wordpress_publications
+        ADD COLUMN IF NOT EXISTS status_source text;
+      ALTER TABLE product_wordpress_publications
+        ADD COLUMN IF NOT EXISTS status_checked_at timestamptz;
+      CREATE INDEX IF NOT EXISTS product_wordpress_publications_status_checked_idx
+        ON product_wordpress_publications(status_checked_at) WHERE wp_post_id IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS product_wp_status_events (
+        id bigserial PRIMARY KEY,
+        product_detail_id bigint REFERENCES product_details(id) ON DELETE SET NULL,
+        wp_post_id bigint NOT NULL,
+        role text,
+        old_status text,
+        new_status text,
+        source text NOT NULL,
+        changed_by text,
+        event_at timestamptz,
+        received_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS product_wp_status_events_post_idx
+        ON product_wp_status_events(wp_post_id, received_at DESC);
+      CREATE INDEX IF NOT EXISTS product_wp_status_events_product_idx
+        ON product_wp_status_events(product_detail_id, received_at DESC);
       CREATE TABLE IF NOT EXISTS product_shopify_publications (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -1138,6 +1160,8 @@ export function createDatabase(databaseUrl) {
         details.raw_data->'skuOptions' AS sku_options,
         details.raw_data->'skuDimensions' AS sku_dimensions,
         publications.style_no, publications.wp_status, publications.wp_url,
+        publications.status_source AS wp_status_source,
+        publications.status_checked_at AS wp_status_checked_at,
         source.shop_id, source.shop_name, source.availability_status, source.delisted_at,
         EXISTS (SELECT 1 FROM product_split_plans plans WHERE plans.product_detail_id=details.id) AS has_split_plan,
         ${colorExpr} AS color_count
@@ -1908,16 +1932,22 @@ export function createDatabase(databaseUrl) {
     const saved = await pool.query(`INSERT INTO product_wordpress_publications
       (product_detail_id, translation_id, external_id, style_no, wp_post_id, wp_url,
        wp_edit_url, wp_status, sync_hash, payload, result, last_error,
-       first_published_at, last_synced_at)
+       first_published_at, last_synced_at, status_source, status_checked_at)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
         CASE WHEN $5::bigint IS NULL THEN NULL ELSE now() END,
-        CASE WHEN $5::bigint IS NULL THEN NULL ELSE now() END)
+        CASE WHEN $5::bigint IS NULL THEN NULL ELSE now() END,
+        CASE WHEN $8::text IS NULL THEN NULL ELSE 'collector' END,
+        CASE WHEN $8::text IS NULL THEN NULL ELSE now() END)
       ON CONFLICT (product_detail_id) DO UPDATE SET
         translation_id=EXCLUDED.translation_id, external_id=EXCLUDED.external_id,
         style_no=EXCLUDED.style_no, wp_post_id=COALESCE(EXCLUDED.wp_post_id, product_wordpress_publications.wp_post_id),
         wp_url=COALESCE(EXCLUDED.wp_url, product_wordpress_publications.wp_url),
         wp_edit_url=COALESCE(EXCLUDED.wp_edit_url, product_wordpress_publications.wp_edit_url),
         wp_status=COALESCE(EXCLUDED.wp_status, product_wordpress_publications.wp_status),
+        status_source=CASE WHEN EXCLUDED.wp_status IS NOT NULL THEN 'collector'
+          ELSE product_wordpress_publications.status_source END,
+        status_checked_at=CASE WHEN EXCLUDED.wp_status IS NOT NULL THEN now()
+          ELSE product_wordpress_publications.status_checked_at END,
         sync_hash=EXCLUDED.sync_hash, payload=EXCLUDED.payload, result=EXCLUDED.result,
         last_error=EXCLUDED.last_error,
         first_published_at=COALESCE(product_wordpress_publications.first_published_at, EXCLUDED.first_published_at),
@@ -1929,6 +1959,122 @@ export function createDatabase(databaseUrl) {
       values.wpEditUrl ?? null, values.wpStatus ?? null, syncHash,
       JSON.stringify(payload), JSON.stringify(result), values.lastError ?? null]);
     return saved.rows[0];
+  }
+
+  // ---- WordPress status truth: events pushed by WP + live reconcile reads ----
+
+  async function recordWordpressStatusEvent({ productDetailId = null, postId, role = null,
+    oldStatus = null, newStatus = null, source, changedBy = null, eventAt = null }) {
+    const parsedEventAt = eventAt && !Number.isNaN(Date.parse(eventAt))
+      ? new Date(eventAt).toISOString() : null;
+    await pool.query(`INSERT INTO product_wp_status_events
+      (product_detail_id, wp_post_id, role, old_status, new_status, source, changed_by, event_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [productDetailId, postId, role, oldStatus, newStatus, source, changedBy, parsedEventAt]);
+  }
+
+  /**
+   * Apply one WordPress-side status observation (webhook event or a live
+   * reconcile read). The keeper publication wins; otherwise the post is
+   * matched against split-content sibling entries. Returns null when the post
+   * is not tracked by this collector.
+   */
+  async function applyWordpressPostStatus({ postId, newStatus, source = 'wp_event',
+    changedBy = null, eventAt = null }) {
+    const postIdNumber = Number(postId);
+    const status = newStatus == null ? null : String(newStatus).trim().slice(0, 40);
+    if (!Number.isInteger(postIdNumber) || postIdNumber <= 0 || !status) return null;
+    const keeper = await pool.query(
+      `SELECT product_detail_id, wp_status FROM product_wordpress_publications
+       WHERE wp_post_id = $1 LIMIT 1`, [postIdNumber]);
+    if (keeper.rowCount) {
+      const productDetailId = keeper.rows[0].product_detail_id;
+      const previousStatus = keeper.rows[0].wp_status ?? null;
+      const changed = previousStatus !== status;
+      if (changed) {
+        await pool.query(`UPDATE product_wordpress_publications
+          SET wp_status = $2, status_source = $3, status_checked_at = now(), updated_at = now()
+          WHERE product_detail_id = $1`, [productDetailId, status, source]);
+      } else {
+        await pool.query(`UPDATE product_wordpress_publications
+          SET status_checked_at = now() WHERE product_detail_id = $1`, [productDetailId]);
+      }
+      if (changed || source === 'wp_event') {
+        await recordWordpressStatusEvent({ productDetailId, postId: postIdNumber,
+          role: 'keeper', oldStatus: previousStatus, newStatus: status, source,
+          changedBy, eventAt });
+      }
+      return { role: 'keeper', productDetailId, previousStatus, newStatus: status, changed };
+    }
+    const sibling = await pool.query(
+      `SELECT product_detail_id, result, model FROM product_split_contents
+       WHERE EXISTS (
+         SELECT 1 FROM jsonb_array_elements(result->'products') entry
+         WHERE entry->'wp'->>'postId' = $1
+       ) LIMIT 1`, [String(postIdNumber)]);
+    if (sibling.rowCount) {
+      const record = sibling.rows[0];
+      const checkedAt = new Date().toISOString();
+      let previousStatus = null;
+      let matchedProductId = null;
+      let matched = false;
+      const products = (record.result?.products ?? []).map((product) => {
+        const wp = product?.wp ?? null;
+        if (!wp || String(wp.postId ?? '') !== String(postIdNumber)) return product;
+        matched = true;
+        matchedProductId = product.id ?? null;
+        previousStatus = wp.status ?? null;
+        return { ...product, wp: { ...wp, status, checkedAt, checkedSource: source } };
+      });
+      if (!matched) return null;
+      const changed = previousStatus !== status;
+      await saveSplitContents(record.product_detail_id, { ...record.result, products }, record.model);
+      if (changed || source === 'wp_event') {
+        await recordWordpressStatusEvent({ productDetailId: record.product_detail_id,
+          postId: postIdNumber, role: 'sibling', oldStatus: previousStatus,
+          newStatus: status, source, changedBy, eventAt });
+      }
+      return { role: 'sibling', productDetailId: record.product_detail_id,
+        productId: matchedProductId, previousStatus, newStatus: status, changed };
+    }
+    await recordWordpressStatusEvent({ postId: postIdNumber, role: 'unmapped',
+      newStatus: status, source, changedBy, eventAt }).catch(() => {});
+    return null;
+  }
+
+  /** Keeper publications whose WordPress status is due for a live re-check. */
+  async function listWordpressStatusReconcileTargets({ staleBefore, limit = 500 } = {}) {
+    const result = await pool.query(`SELECT product_detail_id, wp_post_id
+      FROM product_wordpress_publications
+      WHERE wp_post_id IS NOT NULL
+        AND (status_checked_at IS NULL OR status_checked_at < $1)
+      ORDER BY status_checked_at NULLS FIRST
+      LIMIT $2`, [staleBefore, limit]);
+    return result.rows;
+  }
+
+  /** Every split-product sibling post with its stored checkedAt (reconcile input). */
+  async function listSplitContentWpPostEntries() {
+    const rows = await pool.query(`SELECT product_detail_id, result FROM product_split_contents`);
+    const entries = [];
+    for (const row of rows.rows) {
+      for (const product of row.result?.products ?? []) {
+        const wp = product?.wp ?? null;
+        const postId = Number(wp?.postId);
+        if (!Number.isInteger(postId) || postId <= 0) continue;
+        entries.push({ productDetailId: row.product_detail_id,
+          productId: product?.id ?? null, postId, checkedAt: wp?.checkedAt ?? null });
+      }
+    }
+    return entries;
+  }
+
+  async function pruneWordpressStatusEvents({ keepDays = 60 } = {}) {
+    const days = Math.min(Math.max(Number(keepDays) || 60, 1), 3650);
+    const result = await pool.query(
+      `DELETE FROM product_wp_status_events
+       WHERE received_at < now() - make_interval(days => $1)`, [days]);
+    return result.rowCount ?? 0;
   }
 
   async function createProductRagSync(productDetailId, values = {}) {
@@ -3116,7 +3262,9 @@ export function createDatabase(databaseUrl) {
     getWordPressPublication, resolveWordPressPublication, findShopifySource, getShopifyPublication,
     saveShopifyPublication, listWordPressPublicationDates, listWordPressArrivalDates,
     saveWordPressArrivalDate, auditAndRepairProductPrices,
-    saveWordPressPublication, createProductRagSync, startProductRagSync,
+    saveWordPressPublication, applyWordpressPostStatus, recordWordpressStatusEvent,
+    listWordpressStatusReconcileTargets, listSplitContentWpPostEntries,
+    pruneWordpressStatusEvents, createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     getProductSplitPlan, saveProductSplitPlan,
