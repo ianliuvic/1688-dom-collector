@@ -4510,7 +4510,7 @@ app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKe
   });
   if (!result.ok) {
     const status = PURGE_ERROR_STATUS[result.code] ?? 500;
-    return reply.code(status).send(result);
+    return reply.code(status).send({ ...result, error: result.code });
   }
   return result;
 });
