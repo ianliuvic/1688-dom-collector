@@ -4669,7 +4669,7 @@ app.post('/api/product-details/backfill-linkfox-sku-prices', { preHandler: requi
   return { candidates: ids.length, products, updatedRows, more: ids.length >= limit };
 });
 
-app.post('/api/product-details/:id/translations', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/product-details/:id/translations', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   const targetLanguage = request.body?.targetLanguage || 'en';
@@ -4726,7 +4726,7 @@ app.get('/api/product-details/:id/translations', { preHandler: requireApiKey }, 
   return db.listProductTranslations(detail.id, targetLanguage);
 });
 
-app.get('/api/translation-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+app.get('/api/translation-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const job = translationJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });

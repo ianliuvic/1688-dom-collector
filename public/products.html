@@ -1458,6 +1458,7 @@ function renderPublishPreview(id, data){
   panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 发布前预览</b>'
     + '<button type="button" data-pp-normalize="' + id + '">运行变体规范化（LLM）</button>'
     + '<button type="button" data-pp-dedupe="' + id + '">图片去重（hash+LLM）</button>'
+    + '<button type="button" data-pp-retranslate="' + id + '" title="按当前图片重新生成英文标题与描述（本地生效，发布后更新 WP）">重新生成文案</button>'
     + '<button type="button" data-pp-reload="' + id + '">刷新</button>'
     + '<button type="button" data-pp-close="' + id + '">收起</button>'
     + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（只读）</span></div>'
@@ -1497,6 +1498,36 @@ async function runVariantNormalization(id, button){
     if (button) { button.textContent = '失败：' + String((e && e.message) || e); }
   } finally {
     if (button) button.disabled = false;
+  }
+}
+
+// Regenerate the English catalog copy from the CURRENT image set (dedupe
+// removals and re-captures included). Runs the existing translation job and
+// polls it; nothing is published to WordPress until the next publish/refresh.
+async function runRetranslation(id, button){
+  if (button) { button.disabled = true; button.textContent = '生成中…约 30–90 秒'; }
+  try {
+    const res = await fetch('/api/product-details/' + id + '/translations', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ targetLanguage: 'en' }),
+    });
+    const job = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((job && (job.message || job.error)) || ('HTTP ' + res.status));
+    if (!job || !job.id) throw new Error('translation_job_missing');
+    let state = job;
+    for (let attempt = 0; attempt < 150 && !['completed', 'failed'].includes(String(state.status)); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      const poll = await fetch('/api/translation-jobs/' + job.id, { headers: { accept: 'application/json' } });
+      state = await poll.json().catch(() => ({}));
+      if (!poll.ok) throw new Error('HTTP ' + poll.status);
+    }
+    if (state.status === 'failed') throw new Error(state.error || 'translation_failed');
+    if (state.status !== 'completed') throw new Error('生成超时，请稍后刷新查看');
+    const existing = document.getElementById('pp-panel-' + id);
+    if (existing) existing.remove();
+    await togglePublishPreview(id);
+  } catch (e) {
+    if (button) { button.disabled = false; button.textContent = '失败：' + String((e && e.message) || e).slice(0, 60); }
   }
 }
 
@@ -1560,6 +1591,8 @@ document.addEventListener('click', (e) => {
   if (ppNorm) { void runVariantNormalization(String(ppNorm.dataset.ppNormalize), ppNorm); return; }
   const ppDedupe = e.target.closest('button[data-pp-dedupe]');
   if (ppDedupe) { void runImageDedupe(String(ppDedupe.dataset.ppDedupe), ppDedupe); return; }
+  const ppRetranslate = e.target.closest('button[data-pp-retranslate]');
+  if (ppRetranslate) { void runRetranslation(String(ppRetranslate.dataset.ppRetranslate), ppRetranslate); return; }
   const splitContentBtn = e.target.closest('button[data-split-content]');
   if (splitContentBtn) { void runSplitContent(String(splitContentBtn.dataset.splitContent), splitContentBtn); return; }
   const addGroup = e.target.closest('button[data-split-addgroup]');
