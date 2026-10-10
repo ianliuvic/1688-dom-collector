@@ -637,6 +637,85 @@ async function updatePortalCatalogMedia(portal, portalProductId, product, images
   return { visible: visibleIds.length, hidden: hiddenIds.length };
 }
 
+/**
+ * Assign per-variant images to a portal catalog product. `variantImages` is the
+ * portal's admin PATCH format: [{ id, imageUrl }] and lands on the variant's
+ * default image (the value that pre-fills the customer's variant image picker).
+ */
+async function updatePortalCatalogVariants(portal, portalProductId, variantImages) {
+  if (!portalProductId || !Array.isArray(variantImages) || !variantImages.length) return null;
+  const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(portalProductId)}`, portal.url), {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${portal.secret}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ variantImages: variantImages.slice(0, 250) }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = payload?.error?.message ?? (typeof payload?.error === 'string' ? payload.error : null)
+      ?? `Portal variant image update returned HTTP ${response.status}`;
+    const error = new Error(String(message));
+    error.status = 502;
+    error.code = 'portal_variant_images_update_failed';
+    throw error;
+  }
+  return { updated: Math.min(variantImages.length, 250) };
+}
+
+/** Normalise the selection page's per-colour variant image assignments. */
+function normalizeVariantImageAssignments(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const list = [];
+  for (const entry of value.slice(0, 250)) {
+    const color = String(entry?.color ?? '').trim();
+    const url = String(entry?.url ?? '').trim();
+    if (!color || !/^https?:\/\//i.test(url) || url.length > 2000) continue;
+    const key = color.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    list.push({ color, url });
+  }
+  return list;
+}
+
+/**
+ * Resolve colour assignments to portal variant ids (matching the collector's
+ * composed variant SKUs against the imported variants' supplier SKUs) and apply
+ * them. Unmatched colours are reported back instead of guessed.
+ */
+async function applyPortalVariantImages(portal, product, assignments, productDetailId) {
+  if (!product?.id || !assignments.length) return null;
+  const skuData = await db.getSelectionProductSkus(productDetailId).catch(() => null);
+  const colorBySku = new Map();
+  for (const sku of skuData?.skus ?? []) {
+    const skuCode = String(sku.variantSku ?? '').trim().toLowerCase();
+    const color = String(sku.color ?? '').trim();
+    if (skuCode && color && !colorBySku.has(skuCode)) colorBySku.set(skuCode, color);
+  }
+  const variantIdsByColor = new Map();
+  for (const variant of Array.isArray(product.variants) ? product.variants : []) {
+    const skuCode = String(variant?.supplierSku ?? '').trim().toLowerCase();
+    const color = skuCode ? colorBySku.get(skuCode) : null;
+    if (!color || !variant?.id) continue;
+    const key = color.toLowerCase();
+    if (!variantIdsByColor.has(key)) variantIdsByColor.set(key, []);
+    variantIdsByColor.get(key).push(variant.id);
+  }
+  const patch = [];
+  const matchedColors = [];
+  const unmatchedColors = [];
+  for (const assignment of assignments) {
+    const ids = variantIdsByColor.get(assignment.color.toLowerCase()) ?? [];
+    if (!ids.length) { unmatchedColors.push(assignment.color); continue; }
+    matchedColors.push(assignment.color);
+    for (const id of ids) patch.push({ id, imageUrl: assignment.url });
+  }
+  if (!patch.length) return { colors: [], unmatchedColors, variants: 0, updated: 0 };
+  const updated = await updatePortalCatalogVariants(portal, product.id, patch);
+  return { colors: matchedColors, unmatchedColors, variants: patch.length, updated: updated?.updated ?? 0 };
+}
+
 /** Import one collector product into the portal catalog, optionally applying image order/selection. */
 async function publishProductToPortal(productDetailId, options = {}) {
   const target = options.target === 'production' ? 'production' : 'staging';
@@ -667,16 +746,34 @@ async function publishProductToPortal(productDetailId, options = {}) {
   const chosenImages = Array.isArray(options.images) && options.images.length
     ? options.images
     : (Array.isArray(previous?.result?.mediaImages) && previous.result.mediaImages.length ? previous.result.mediaImages : null);
+  const variantAssignments = Array.isArray(options.variantImages)
+    ? normalizeVariantImageAssignments(options.variantImages)
+    : normalizeVariantImageAssignments(previous?.result?.variantImages);
   const identifier = String(publication.wp_post_id ?? publication.style_no);
   // WordPress media comes in through the import itself; 1688 detail images (not
   // part of the WordPress set) are downloaded to the collector on demand and
   // passed to the portal as extra media URLs.
   const wpImageSet = new Set((Array.isArray(publication.payload?.images) ? publication.payload.images : [])
     .map((image) => normalizedImageUrl(image?.url)).filter(Boolean));
-  const chosenList = Array.isArray(chosenImages)
+  let chosenList = Array.isArray(chosenImages)
     ? chosenImages.map((entry) => ({ url: String(entry?.url ?? '').trim(), visible: entry?.visible !== false }))
       .filter((entry) => entry.url)
     : null;
+  // A colour image assigned to a variant must be part of the published gallery —
+  // the portal only offers published images in the variant picker — so assigned
+  // images are auto-included and marked visible.
+  if (variantAssignments.length) {
+    if (chosenList) {
+      const chosenByUrl = new Map(chosenList.map((entry) => [entry.url, entry]));
+      for (const assignment of variantAssignments) {
+        const existing = chosenByUrl.get(assignment.url);
+        if (existing) existing.visible = true;
+        else chosenList.push({ url: assignment.url, visible: true });
+      }
+    } else {
+      chosenList = variantAssignments.map((assignment) => ({ url: assignment.url, visible: true }));
+    }
+  }
   const remoteDetailUrls = (chosenList ?? []).filter((entry) => entry.visible
     && !wpImageSet.has(normalizedImageUrl(entry.url))
     && /^https?:\/\//i.test(entry.url)
@@ -691,11 +788,16 @@ async function publishProductToPortal(productDetailId, options = {}) {
     const publicPath = imagePublicPath(image.storage_path);
     if (publicPath) storedDetailByUrl.set(normalizedImageUrl(image.source_url), `${config.publicBaseUrl}${publicPath}`);
   }
+  const finalUrlByInput = new Map();
   const finalImages = (chosenList ?? []).map((entry) => {
     const normalized = normalizedImageUrl(entry.url);
-    if (wpImageSet.has(normalized)) return { url: entry.url, visible: entry.visible, kind: 'wp' };
+    if (wpImageSet.has(normalized)) {
+      finalUrlByInput.set(entry.url, entry.url);
+      return { url: entry.url, visible: entry.visible, kind: 'wp' };
+    }
     const stored = storedDetailByUrl.get(normalized);
     const url = stored ?? (/^\//.test(entry.url) ? `${config.publicBaseUrl}${entry.url}` : entry.url);
+    finalUrlByInput.set(entry.url, url);
     return { url, visible: entry.visible, kind: 'detail' };
   });
   // A downloaded detail image can reuse an already stored file URL; the same URL
@@ -713,12 +815,28 @@ async function publishProductToPortal(productDetailId, options = {}) {
     mergedByUrl.set(entry.url, copy);
     mergedImages.push(copy);
   }
+  // Assignments resolved to their final published URLs (detail images can be
+  // re-stored under a different public URL during the publish) and forced visible.
+  const resolvedVariantImages = variantAssignments.map((assignment) => ({
+    color: assignment.color,
+    url: finalUrlByInput.get(assignment.url) ?? assignment.url,
+  }));
+  const variantUrlSet = new Set(resolvedVariantImages.map((entry) => entry.url));
+  if (variantUrlSet.size) {
+    for (const entry of mergedImages) {
+      if (variantUrlSet.has(entry.url)) entry.visible = true;
+    }
+  }
   const detailMediaUrls = [...new Set(mergedImages.filter((entry) => entry.kind === 'detail' && entry.visible).map((entry) => entry.url))];
   try {
     const product = await importWordPressProductToPortal(identifier, portal, { mediaUrls: detailMediaUrls });
     let media = null;
     if (mergedImages.length && product?.id) {
       media = await updatePortalCatalogMedia(portal, product.id, product, mergedImages);
+    }
+    let variantMatch = null;
+    if (resolvedVariantImages.length && product?.id) {
+      variantMatch = await applyPortalVariantImages(portal, product, resolvedVariantImages, productDetailId);
     }
     const portalBase = portal.url.replace(/\/$/, '');
     const saved = await db.savePortalPublication(productDetailId, {
@@ -733,11 +851,17 @@ async function publishProductToPortal(productDetailId, options = {}) {
         styleNumber: product.styleNumber, variantCount: (product.variants ?? []).length,
         mediaCount: (product.media ?? []).length,
         mediaImages: mergedImages ?? null,
+        variantImages: resolvedVariantImages.length ? resolvedVariantImages : null,
+        variantMatch: variantMatch ? {
+          colors: variantMatch.colors.length,
+          variants: variantMatch.variants,
+          unmatchedColors: variantMatch.unmatchedColors,
+        } : null,
         target,
       } : { target },
       lastError: null,
     });
-    return { product, publication: saved, media, target, images: mergedImages };
+    return { product, publication: saved, media, target, images: mergedImages, variantImages: resolvedVariantImages, variantMatch };
   } catch (error) {
     const message = String(error?.message || error);
     await db.failPortalPublication(productDetailId, message, {
@@ -756,11 +880,13 @@ app.post('/api/portal/publish', { preHandler: requireDashboardOrApiKey }, async 
   try {
     const result = await publishProductToPortal(productDetailId, {
       images: Array.isArray(request.body?.images) ? request.body.images : null,
+      variantImages: Array.isArray(request.body?.variantImages) ? request.body.variantImages : null,
       target: request.body?.target === 'staging' ? 'staging' : 'production',
     });
     return {
       status: 'synced', productDetailId,
       portalProduct: result.product, publication: result.publication, media: result.media,
+      variantImages: result.variantImages ?? null, variantMatch: result.variantMatch ?? null,
     };
   } catch (error) {
     const status = Number(error?.status) || 502;
@@ -4404,6 +4530,7 @@ app.post('/api/selection/products/:id/portal-publish', { preHandler: requireDash
   try {
     const result = await publishProductToPortal(productDetailId, {
       images: Array.isArray(request.body?.images) ? request.body.images : null,
+      variantImages: Array.isArray(request.body?.variantImages) ? request.body.variantImages : null,
       target: request.body?.target === 'production' ? 'production' : 'staging',
     });
     portalStagingActiveCache = { at: 0, ids: null, warning: null };
@@ -4416,6 +4543,8 @@ app.post('/api/selection/products/:id/portal-publish', { preHandler: requireDash
         media: result.media,
         mediaCount: (result.product?.media ?? []).length,
         images: result.images ?? null,
+        variantImages: result.variantImages ?? null,
+        variantMatch: result.variantMatch ?? null,
       },
       publication: result.publication,
     };

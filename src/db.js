@@ -2999,6 +2999,9 @@ export function createDatabase(databaseUrl) {
     const savedImages = Array.isArray(portalPub?.result?.mediaImages) && portalPub.result.mediaImages.length
       ? portalPub.result.mediaImages
       : null;
+    const savedVariantImages = Array.isArray(portalPub?.result?.variantImages) && portalPub.result.variantImages.length
+      ? portalPub.result.variantImages
+      : null;
     return {
       productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, wpImages, detailImages,
       portal: portalPub ? {
@@ -3008,6 +3011,7 @@ export function createDatabase(databaseUrl) {
         syncedAt: portalPub.last_synced_at ?? null,
         target: portalPub.result?.target ?? null,
         images: savedImages,
+        variantImages: savedVariantImages,
       } : null,
     };
   }

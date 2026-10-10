@@ -62,6 +62,14 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 .portal-actions button.danger{border:1px solid var(--danger);background:#fff;color:var(--danger);border-radius:8px;padding:5px 14px;font-size:12.5px;cursor:pointer}
 .portal-actions button.danger:hover{background:#fef3f2}
 .portal-actions button.danger:disabled{opacity:.55;cursor:default}
+.vi-block{margin:2px 0 10px}
+.vi-block h5{margin:2px 0 4px;font-size:12px}
+.vi-row{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.vi-color{display:inline-flex;align-items:center;gap:5px;min-width:128px;max-width:200px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vi-color img{width:20px;height:20px;object-fit:cover;border-radius:4px;border:1px solid var(--line);background:#f2f4f7;display:block}
+.vi-row select{flex:1;max-width:420px;border:1px solid var(--line);border-radius:7px;padding:4px 8px;font-size:12px;background:#fff;color:var(--text)}
+.vi-preview{width:28px;height:28px;object-fit:cover;border-radius:5px;border:1px solid var(--line);background:#f2f4f7;cursor:zoom-in;display:block}
+.vi-preview.empty{border-style:dashed;cursor:default}
 .portal-msg{font-size:12px;color:var(--muted)}
 .portal-msg.error{color:var(--danger)}
 .portal-msg.ok{color:var(--good)}
@@ -286,7 +294,7 @@ const portalDrafts = {};
 let dragPortalIndex = null;
 let dropPortalIndex = null;
 
-function portalDraftFor(id, media) {
+function portalDraftFor(id, media, colours) {
   if (portalDrafts[id]) return portalDrafts[id];
   const wp = Array.isArray(media.wpImages) ? media.wpImages : [];
   const detail = Array.isArray(media.detailImages) ? media.detailImages : [];
@@ -306,7 +314,14 @@ function portalDraftFor(id, media) {
   for (const image of all) {
     if (available.has(image.url)) images.push({ url: image.url, visible: image.kind === 'wp', kind: image.kind });
   }
-  portalDrafts[id] = { images, portal: media.portal || null, message: '', error: '', saving: false };
+  // Saved per-colour variant image assignments (set when publishing to Portal).
+  const variantImages = {};
+  for (const entry of (media.portal && Array.isArray(media.portal.variantImages) ? media.portal.variantImages : [])) {
+    const color = String((entry && entry.color) || '').trim();
+    const url = String((entry && entry.url) || '').trim();
+    if (color && url) variantImages[color] = url;
+  }
+  portalDrafts[id] = { images, colours: Array.isArray(colours) ? colours : [], variantImages, portal: media.portal || null, message: '', error: '', saving: false };
   return portalDrafts[id];
 }
 
@@ -332,10 +347,37 @@ function portalPanelHtml(id) {
       '<img loading="lazy" referrerpolicy="no-referrer" draggable="true" src="' + esc(image.url) + '" alt="" onclick="openLightbox(this.src)" onerror="this.style.opacity=.25">' +
       '<span class="moves"><button type="button" data-portal-move="' + index + '" data-portal-dir="-1" title="前移">◀</button><button type="button" data-portal-move="' + index + '" data-portal-dir="1" title="后移">▶</button></span>' +
     '</div>').join('');
+  const colours = Array.isArray(draft.colours) ? draft.colours : [];
+  const assignable = colours.filter((colour) => colour.assignable !== false);
+  const variantRows = assignable.map((colour) => {
+    const current = draft.variantImages[colour.color] || '';
+    let found = false;
+    const options = ['<option value="">不设置</option>'];
+    draft.images.forEach((image, imageIndex) => {
+      const isSelected = Boolean(current) && image.url === current;
+      if (isSelected) found = true;
+      options.push('<option value="' + esc(image.url) + '"' + (isSelected ? ' selected' : '') + '>' + (imageIndex + 1) + (image.kind === 'detail' ? ' · 详情' : '') + '</option>');
+    });
+    if (current && !found) options.push('<option value="' + esc(current) + '" selected>已保存（不在当前列表）</option>');
+    return '<div class="vi-row">' +
+      '<span class="vi-color" title="' + esc(colour.color) + '">' + (colour.image ? '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(colour.image) + '" alt="" onerror="this.style.display=\'none\'">' : '') + esc(colour.color) + '</span>' +
+      '<select data-portal-variant="' + esc(colour.color) + '" title="选择该颜色的变体图片">' + options.join('') + '</select>' +
+      (current ? '<img class="vi-preview" loading="lazy" referrerpolicy="no-referrer" src="' + esc(current) + '" alt="" onclick="openLightbox(this.src)" onerror="this.style.opacity=.25">' : '<span class="vi-preview empty"></span>') +
+    '</div>';
+  }).join('');
+  const variantSection = colours.length
+    ? '<div class="vi-block"><h5>变体图片（按颜色，可选）</h5>'
+      + (assignable.length
+        ? '<div class="portal-note">为每个颜色选择一张图；发布后 Portal 的商品变体图片会自动设置，被分配的图片会自动勾选发布。</div>' + variantRows
+          + (assignable.length < colours.length ? '<div class="portal-note">另有 ' + (colours.length - assignable.length) + ' 个颜色没有变体 SKU，暂不能分配。</div>' : '')
+        : '<div class="portal-note">该产品还没有变体 SKU，暂不能分配变体图片。</div>')
+      + '</div>'
+    : '';
   return '<div class="portal-panel" data-portal-panel="' + esc(id) + '">' +
     '<h4>发布到 Portal <span class="portal-msg">（' + stateText + '）</span></h4>' +
     '<div class="portal-note">勾选要发布到 Portal 的图片（共 ' + draft.images.length + ' 张，已选 ' + selected + ' 张）；WP 产品图默认勾选，1688 详情图默认不勾选（带「详情」标记，勾选后会在发布时自动下载）；拖拽图片或用 ◀ ▶ 调整顺序，顺序即 Portal 客户侧的展示顺序；未勾选的图片不会展示。</div>' +
     (draft.images.length ? '<div class="portal-grid">' + tiles + '</div>' : '<div class="empty">该产品没有可选图片</div>') +
+    variantSection +
     '<div class="portal-actions">' +
       '<button type="button" class="primary" data-portal-publish="' + esc(id) + '"' + (draft.saving ? ' disabled' : '') + '>' +
         (draft.saving ? '发布中…' : portal && portal.productId && !isArchived ? '更新发布到 Portal' : portal && portal.productId ? '重新发布到 Portal' : '发布到 Portal') + '</button>' +
@@ -365,17 +407,40 @@ async function publishPortal(id) {
   draft.saving = true; draft.message = ''; draft.error = '';
   refreshPortalSlot(id);
   try {
+    const variantImages = Object.entries(draft.variantImages || {})
+      .filter(([color, url]) => color && url)
+      .map(([color, url]) => ({ color, url }));
     const response = await fetch('/api/selection/products/' + encodeURIComponent(id) + '/portal-publish', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ images: draft.images.map((image) => ({ url: image.url, visible: image.visible })) }),
+      body: JSON.stringify({
+        images: draft.images.map((image) => ({ url: image.url, visible: image.visible })),
+        variantImages,
+      }),
     });
     const data = await response.json().catch(() => null);
     if (!response.ok) throw new Error((data && (data.message || data.error)) || ('HTTP ' + response.status));
     if (data.portal && Array.isArray(data.portal.images) && data.portal.images.length) {
       draft.images = data.portal.images.map((entry) => ({ url: entry.url, visible: entry.visible !== false, kind: entry.kind || null }));
     }
+    if (data.portal && Array.isArray(data.portal.variantImages)) {
+      const next = {};
+      for (const entry of data.portal.variantImages) {
+        const color = String((entry && entry.color) || '').trim();
+        const url = String((entry && entry.url) || '').trim();
+        if (color && url) next[color] = url;
+      }
+      draft.variantImages = next;
+    }
     const visibleCount = draft.images.filter((image) => image.visible).length;
+    const match = data.portal && data.portal.variantMatch;
+    let variantNote = '';
+    if (match) {
+      variantNote = ' · 变体图 ' + (match.variants || 0) + ' 个变体';
+      if (Array.isArray(match.unmatchedColors) && match.unmatchedColors.length) {
+        variantNote += '（未匹配颜色：' + match.unmatchedColors.join('、') + '）';
+      }
+    }
     draft.portal = {
       productId: (data.portal && data.portal.productId) || null,
       status: (data.portal && data.portal.status) || null,
@@ -384,7 +449,7 @@ async function publishPortal(id) {
       syncedAt: new Date().toISOString(),
       images: draft.images.map((image) => ({ url: image.url, visible: image.visible })),
     };
-    draft.message = '已发布：展示 ' + visibleCount + ' 张 / 共 ' + draft.images.length + ' 张';
+    draft.message = '已发布：展示 ' + visibleCount + ' 张 / 共 ' + draft.images.length + ' 张' + variantNote;
     updatePortalBadge(id, 'published', [draft.portal.target, draft.portal.status].filter(Boolean).join(' · '));
   } catch (error) {
     draft.error = String((error && error.message) || error);
@@ -451,6 +516,26 @@ document.addEventListener('click', (event) => {
   if (unpublish) { void unpublishPortal(unpublish.dataset.portalUnpublish); return; }
 });
 
+document.addEventListener('change', (event) => {
+  const select = event.target.closest('select[data-portal-variant]');
+  if (!select) return;
+  const panel = select.closest('[data-portal-panel]');
+  const id = panel ? panel.dataset.portalPanel : null;
+  const draft = id ? portalDrafts[id] : null;
+  if (!draft) return;
+  const color = select.dataset.portalVariant;
+  const url = select.value;
+  if (color && url) {
+    draft.variantImages[color] = url;
+    // The assigned image must be part of the published gallery: auto-enable it.
+    const image = draft.images.find((entry) => entry.url === url);
+    if (image && !image.visible) image.visible = true;
+  } else if (color) {
+    delete draft.variantImages[color];
+  }
+  refreshPortalSlot(id);
+});
+
 document.addEventListener('dragstart', (event) => {
   const image = event.target.closest('.portal-tile img');
   if (!image) return;
@@ -508,9 +593,21 @@ async function toggleMedia(button) {
     fetch('/api/selection/products/' + encodeURIComponent(id) + '/skus').then((response) => response.json()),
   ]);
   let html = '';
+  let colours = [];
   if (skuResult.status === 'fulfilled' && skuResult.value && Array.isArray(skuResult.value.skus)) {
     const data = skuResult.value;
     const skus = data.skus;
+    const colourMap = new Map();
+    for (const sku of skus) {
+      const color = String(sku.color ?? '').trim();
+      if (!color) continue;
+      let entry = colourMap.get(color);
+      if (!entry) { entry = { color, image: null, variantSkus: new Set() }; colourMap.set(color, entry); }
+      if (!entry.image && sku.image) entry.image = sku.image;
+      const variantSku = String(sku.variantSku ?? '').trim();
+      if (variantSku) entry.variantSkus.add(variantSku.toLowerCase());
+    }
+    colours = [...colourMap.values()].map((entry) => ({ color: entry.color, image: entry.image, assignable: entry.variantSkus.size > 0 }));
     const total = skus.reduce((sum, sku) => sum + (Number(sku.stock) || 0), 0);
     html += '<h4>SKU 库存（' + skus.length + ' 个 · 合计 ' + total + (data.capturedAt ? ' · 采集于 ' + esc(String(data.capturedAt).slice(0, 10)) : '') + '）</h4>';
     html += skus.length
@@ -540,7 +637,7 @@ async function toggleMedia(button) {
   box.innerHTML = '<div class="portal-slot"></div>' + html;
   const slot = box.querySelector('.portal-slot');
   if (mediaResult.status === 'fulfilled' && mediaResult.value) {
-    portalDraftFor(id, mediaResult.value);
+    portalDraftFor(id, mediaResult.value, colours);
     if (slot) slot.innerHTML = portalPanelHtml(id);
   } else if (slot) {
     slot.innerHTML = '<div class="portal-panel"><h4>发布到 Portal</h4><div class="portal-msg error">图片加载失败，无法选择图片</div></div>';
