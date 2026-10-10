@@ -1170,7 +1170,9 @@ export function createDatabase(databaseUrl) {
       CASE WHEN jsonb_array_length(${dimsJson}) > 0 OR jsonb_array_length(${optsJson}) > 0 THEN 1 ELSE 0 END)`;
     const editedOnly = edited === true || edited === 'true' || edited === 1 || edited === '1';
     const editedClause = editedOnly
-      ? `AND jsonb_typeof(details.raw_data->'manualEditLog') = 'array' AND jsonb_array_length(details.raw_data->'manualEditLog') > 0`
+      ? `AND jsonb_typeof(details.raw_data->'manualEditLog') = 'array' AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements(details.raw_data->'manualEditLog') AS entry
+          WHERE entry->>'action' IN ('variant_normalization_edit','publish_images_edit','publish_images_reset'))`
       : '';
     const base = `WITH base AS (
       SELECT details.id, details.offer_id, details.title,
