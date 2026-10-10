@@ -1234,46 +1234,48 @@ export function createDatabase(databaseUrl) {
     };
 
     const main = filtersFor({ color: true, wp: true, bundle: true, shop: true });
-    const counts = await pool.query(`${base} SELECT count(*)::int AS total FROM base WHERE ${main.where}`,
-      main.values);
-    const all = await pool.query(`${base} SELECT count(*)::int AS total FROM base`, [searchParam]);
     const col = filtersFor({ wp: true, bundle: true, shop: true });
-    const distribution = await pool.query(
-      `${base} SELECT LEAST(color_count, 6) AS bucket, count(*)::int AS products
-        FROM base WHERE ${col.where} GROUP BY 1 ORDER BY 1`, col.values);
     const wpq = filtersFor({ color: true, bundle: true, shop: true });
-    const wpRows = await pool.query(
-      `${base} SELECT CASE WHEN coalesce(wp_status,'none') = 'publish' THEN 'publish' ELSE 'unpublished' END AS bucket,
-        count(*)::int AS products FROM base WHERE ${wpq.where} GROUP BY 1`, wpq.values);
     const bq = filtersFor({ color: true, wp: true, shop: true });
-    const bundleRows = await pool.query(
-      `${base} SELECT CASE WHEN bundle_status = 'bundle' THEN 'bundle' ELSE 'clear' END AS bucket,
-        count(*)::int AS products FROM base WHERE ${bq.where} GROUP BY 1`, bq.values);
     const sq = filtersFor({ color: true, wp: true, bundle: true });
-    const shopRows = await pool.query(
-      `${base} SELECT COALESCE(shop_id::text, 'none') AS bucket, max(shop_name) AS shop_name,
-        count(*)::int AS products FROM base WHERE ${sq.where} GROUP BY 1 ORDER BY products DESC`, sq.values);
-    const manual = await pool.query(
-      'SELECT count(*)::int AS total FROM product_details WHERE bundle_manual_status IS NOT NULL');
-
     const itemsQ = filtersFor({ color: true, wp: true, bundle: true, shop: true });
-    const result = await pool.query(`${base}
-      SELECT base.*,
-        (SELECT count(*) FROM product_detail_skus skus WHERE skus.product_detail_id=base.id)::int AS sku_rows,
-        media.images
-      FROM base
-      LEFT JOIN LATERAL (
-        SELECT json_agg(json_build_object('id', images.id, 'type', images.image_type,
-          'sort', images.sort_order, 'path', images.storage_path, 'source', images.source_url)
-          ORDER BY CASE images.image_type WHEN 'main' THEN 0 WHEN 'gallery' THEN 1 WHEN 'sku' THEN 2 ELSE 3 END,
-            images.sort_order, images.id) AS images
-        FROM product_detail_images images
-        WHERE images.product_detail_id=base.id AND images.image_type IN ('main','gallery','sku','description')
-      ) media ON true
-      WHERE ${itemsQ.where}
-      ORDER BY base.id DESC
-      LIMIT $${itemsQ.values.length + 1} OFFSET $${itemsQ.values.length + 2}`,
-    [...itemsQ.values, safeLimit, safeOffset]);
+    // These eight read-only queries are independent; running them concurrently
+    // turns eight sequential round trips into one wait for the products page.
+    const [counts, all, distribution, wpRows, bundleRows, shopRows, manual, result] = await Promise.all([
+      pool.query(`${base} SELECT count(*)::int AS total FROM base WHERE ${main.where}`, main.values),
+      pool.query(`${base} SELECT count(*)::int AS total FROM base`, [searchParam]),
+      pool.query(
+        `${base} SELECT LEAST(color_count, 6) AS bucket, count(*)::int AS products
+          FROM base WHERE ${col.where} GROUP BY 1 ORDER BY 1`, col.values),
+      pool.query(
+        `${base} SELECT CASE WHEN coalesce(wp_status,'none') = 'publish' THEN 'publish' ELSE 'unpublished' END AS bucket,
+          count(*)::int AS products FROM base WHERE ${wpq.where} GROUP BY 1`, wpq.values),
+      pool.query(
+        `${base} SELECT CASE WHEN bundle_status = 'bundle' THEN 'bundle' ELSE 'clear' END AS bucket,
+          count(*)::int AS products FROM base WHERE ${bq.where} GROUP BY 1`, bq.values),
+      pool.query(
+        `${base} SELECT COALESCE(shop_id::text, 'none') AS bucket, max(shop_name) AS shop_name,
+          count(*)::int AS products FROM base WHERE ${sq.where} GROUP BY 1 ORDER BY products DESC`, sq.values),
+      pool.query(
+        'SELECT count(*)::int AS total FROM product_details WHERE bundle_manual_status IS NOT NULL'),
+      pool.query(`${base}
+        SELECT base.*,
+          (SELECT count(*) FROM product_detail_skus skus WHERE skus.product_detail_id=base.id)::int AS sku_rows,
+          media.images
+        FROM base
+        LEFT JOIN LATERAL (
+          SELECT json_agg(json_build_object('id', images.id, 'type', images.image_type,
+            'sort', images.sort_order, 'path', images.storage_path, 'source', images.source_url)
+            ORDER BY CASE images.image_type WHEN 'main' THEN 0 WHEN 'gallery' THEN 1 WHEN 'sku' THEN 2 ELSE 3 END,
+              images.sort_order, images.id) AS images
+          FROM product_detail_images images
+          WHERE images.product_detail_id=base.id AND images.image_type IN ('main','gallery','sku','description')
+        ) media ON true
+        WHERE ${itemsQ.where}
+        ORDER BY base.id DESC
+        LIMIT $${itemsQ.values.length + 1} OFFSET $${itemsQ.values.length + 2}`,
+      [...itemsQ.values, safeLimit, safeOffset]),
+    ]);
 
     const colorCounts = {};
     for (const row of distribution.rows) colorCounts[String(row.bucket)] = Number(row.products);
