@@ -1369,9 +1369,16 @@ function renderPublishPreview(id, data){
     + '<tr><th>零售可售</th><td>' + (data.price.retailAvailable ? '是（全部变体有货，页面显示 2× 首档价）' : (data.price.stockKnown ? '否（存在 0 库存）' : '库存未知')) + '</td></tr>'
     + '</tbody></table></div>';
 
+  const merchCats = (data.merchandising && data.merchandising.categories) || null;
+  const primaryCat = merchCats ? (merchCats.find((c) => c.primary) || merchCats[0] || null) : null;
+  const otherCats = merchCats && primaryCat ? merchCats.filter((c) => c !== primaryCat) : [];
   const merch = data.merchandising
     ? '<div class="pp-card"><div class="pp-card-title">类目 / 标签 / 材质（上次发布结果）</div>'
-      + '<div class="pp-muted">主类目：' + esc(data.merchandising.primaryCategory || '—') + ' · 材质：' + esc(data.merchandising.material || '—') + '</div>'
+      + '<div class="pp-muted">主类目：' + esc((primaryCat && (primaryCat.name || ('#' + primaryCat.id))) || data.merchandising.primaryCategory || '—') + '</div>'
+      + (otherCats.length
+        ? '<div class="pp-muted" style="margin-top:2px">其他类目：' + otherCats.map((c) => '<span title="类目 ID：' + esc(String(c.id)) + '">' + esc(c.name || ('#' + c.id)) + '</span>').join('、') + '</div>'
+        : '')
+      + '<div class="pp-muted" style="margin-top:2px">材质：' + esc(data.merchandising.material || '—') + '</div>'
       + ((data.merchandising.tags || []).length ? '<div class="pp-tags" style="margin-top:6px">' + data.merchandising.tags.map((tag) => '<span class="pp-tag">' + esc(tag) + '</span>').join('') + '</div>' : '')
       + '</div>'
     : '<div class="pp-card"><div class="pp-card-title">类目 / 标签 / 材质</div><div class="pp-muted">发布时由模型自动选择（尚无发布记录）。</div></div>';

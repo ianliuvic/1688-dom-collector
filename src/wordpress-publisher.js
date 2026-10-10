@@ -726,6 +726,12 @@ export async function resolveWordPressProduct(identifier, config) {
   return wp(`/wp-json/hx/v1/products/resolve?${query}`, { timeoutMs: 30000 });
 }
 
+/** Existing wearhongxiu category/tag taxonomy list (no writes). */
+export async function fetchWordPressTaxonomies({ config }) {
+  const wp = wordpressClient(config);
+  return wp('/wp-json/hx/v1/products/taxonomies', { timeoutMs: 30000 });
+}
+
 /**
  * Live-read the current post status for the given post ids (100 per REST
  * batch). Posts missing from the response are trashed or permanently deleted

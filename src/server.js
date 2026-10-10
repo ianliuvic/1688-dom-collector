@@ -15,7 +15,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   setWordPressProductPublicationDate, setWordPressProductStatus,
   syncWordPressProductPricing, replaceWordPressBestSellers,
   resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
-  fetchWordPressProductStatuses, deleteWordPressProduct,
+  fetchWordPressProductStatuses, deleteWordPressProduct, fetchWordPressTaxonomies,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
   resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
@@ -2013,6 +2013,24 @@ function decorateNormalization(result, detail) {
     }),
   };
 }
+// Existing WP taxonomies with a small TTL cache: the publish preview resolves
+// category names from it; failures keep the previous value (never throws).
+let wordpressTaxonomiesCache = { at: 0, value: null };
+async function getWordPressTaxonomiesCached() {
+  const now = Date.now();
+  if (wordpressTaxonomiesCache.value && now - wordpressTaxonomiesCache.at < 10 * 60_000) {
+    return wordpressTaxonomiesCache.value;
+  }
+  if (!config.wordpressBaseUrl || !config.wordpressUsername || !config.wordpressApplicationPassword) {
+    return wordpressTaxonomiesCache.value;
+  }
+  try {
+    const value = await fetchWordPressTaxonomies({ config });
+    wordpressTaxonomiesCache = { at: now, value };
+  } catch { /* keep the previous cached list */ }
+  return wordpressTaxonomiesCache.value;
+}
+
 // Pre-publish review layer: everything the publisher would use for this
 // capture, assembled from stored data without any model call. Mirrors the
 // translation, pricing, merchandising, images, variants and every publish gate.
@@ -2021,11 +2039,12 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
-  const [translation, publication, sourceListings, normalization] = await Promise.all([
+  const [translation, publication, sourceListings, normalization, taxonomies] = await Promise.all([
     db.getLatestProductTranslation(id, 'en'),
     db.getWordPressPublication(id),
     db.listShopProductSources(detail.offer_id),
     db.getVariantNormalization(id),
+    getWordPressTaxonomiesCached(),
   ]);
   const policy = evaluateShopProductPolicy(sourceListings);
   let pricing = null;
@@ -2167,14 +2186,41 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       model: translation.model ?? null,
       createdAt: translation.created_at ?? null,
     } : null,
-    merchandising: publication ? {
-      primaryCategory: payloadMeta.primary_category ?? null,
-      primaryCategoryId: payloadMeta.primary_category_id ?? null,
-      material: payloadMeta.material ?? null,
-      tags: publication.payload?.tags ?? [],
-      categoryIds: publication.payload?.category_ids ?? [],
-      tagIds: publication.payload?.tag_ids ?? [],
-    } : null,
+    merchandising: publication ? (() => {
+      // All assigned categories with resolved names: the payload stores every
+      // category id plus the primary name; the rest resolve via the (cached)
+      // WP taxonomy list.
+      const categoryIds = (Array.isArray(publication.payload?.category_ids)
+        ? publication.payload.category_ids : []).map(Number).filter(Boolean);
+      const primaryId = Number(payloadMeta.primary_category_id) || 0;
+      const nameById = new Map((taxonomies?.categories ?? [])
+        .map((category) => [Number(category?.id), String(category?.name ?? '')]));
+      const categories = categoryIds.map((categoryId) => ({
+        id: categoryId,
+        name: nameById.get(categoryId) || null,
+        primary: categoryId === primaryId,
+      }));
+      if (primaryId && !categories.some((category) => category.id === primaryId)) {
+        categories.unshift({ id: primaryId,
+          name: String(payloadMeta.primary_category ?? '') || nameById.get(primaryId) || null,
+          primary: true });
+      }
+      if (primaryId) {
+        const primaryEntry = categories.find((category) => category.id === primaryId);
+        if (primaryEntry && !primaryEntry.name) {
+          primaryEntry.name = String(payloadMeta.primary_category ?? '') || null;
+        }
+      }
+      return {
+        primaryCategory: payloadMeta.primary_category ?? null,
+        primaryCategoryId: payloadMeta.primary_category_id ?? null,
+        categories,
+        material: payloadMeta.material ?? null,
+        tags: publication.payload?.tags ?? [],
+        categoryIds,
+        tagIds: publication.payload?.tag_ids ?? [],
+      };
+    })() : null,
     price: {
       currency: detail.currency ?? 'CNY',
       moq: detail.moq ?? null,
