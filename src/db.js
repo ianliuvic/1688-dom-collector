@@ -2064,6 +2064,9 @@ export function createDatabase(databaseUrl) {
         const wp = product?.wp ?? null;
         const postId = Number(wp?.postId);
         if (!Number.isInteger(postId) || postId <= 0) continue;
+        // The keeper post is tracked on product_wordpress_publications; only
+        // true siblings are reconciled from the split contents.
+        if (String(wp?.role ?? '') === 'keeper') continue;
         entries.push({ productDetailId: row.product_detail_id,
           productId: product?.id ?? null, postId, checkedAt: wp?.checkedAt ?? null });
       }
