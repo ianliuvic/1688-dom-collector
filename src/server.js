@@ -1945,6 +1945,34 @@ async function downloadDetailImageUrls(detail, urls) {
   return results;
 }
 
+// Download one image URL into the detail's persistent storage and register it
+// as an image row (used for URL-only picks from the review console).
+async function downloadImageUrlToDetail(detail, url, { type = 'description', sortOrder = 600 } = {}) {
+  const response = await fetch(url, {
+    headers: { referer: 'https://detail.1688.com/', 'user-agent': 'Mozilla/5.0' },
+    signal: AbortSignal.timeout(45000),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length < 64) throw new Error('image too small');
+  const root = path.resolve(config.storagePath, 'product-images');
+  const folder = path.resolve(root, String(detail.offer_id ?? ''));
+  if (!folder.startsWith(`${root}${path.sep}`)) throw new Error('invalid storage folder');
+  await fs.mkdir(folder, { recursive: true });
+  const extension = (url.split('?')[0].match(/\.(jpe?g|png|webp|gif|avif)$/i) || ['.jpg'])[0].toLowerCase();
+  const sha = crypto.createHash('sha256').update(bytes).digest('hex');
+  const fileName = `${String(type || 'extra').replace(/[^a-z0-9_-]/gi, '')}-${sha.slice(0, 12)}${extension}`;
+  const filePath = path.join(folder, fileName);
+  await fs.writeFile(filePath, bytes);
+  return db.addProductImage(detail.id, {
+    type: type || 'gallery',
+    sortOrder: Number(sortOrder) || 500,
+    sourceUrl: url, storagePath: filePath,
+    mimeType: String(response.headers.get('content-type') || '').split(';')[0] || 'image/jpeg',
+    contentSha256: sha, byteSize: bytes.length,
+  });
+}
+
 // Download one stored image row that has only a source URL (used when the
 // review console picks a URL-only image for a swatch or the publish set).
 async function ensureImageDownloaded(detail, imageId) {
@@ -1954,28 +1982,9 @@ async function ensureImageDownloaded(detail, imageId) {
   const url = /^https:\/\//i.test(image.source_url || '') ? String(image.source_url) : null;
   if (!url) return { ok: false, reason: 'no_source_url' };
   try {
-    const response = await fetch(url, {
-      headers: { referer: 'https://detail.1688.com/', 'user-agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(45000),
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length < 64) throw new Error('image too small');
-    const root = path.resolve(config.storagePath, 'product-images');
-    const folder = path.resolve(root, String(detail.offer_id ?? ''));
-    if (!folder.startsWith(`${root}${path.sep}`)) throw new Error('invalid storage folder');
-    await fs.mkdir(folder, { recursive: true });
-    const extension = (url.split('?')[0].match(/\.(jpe?g|png|webp|gif|avif)$/i) || ['.jpg'])[0].toLowerCase();
-    const sha = crypto.createHash('sha256').update(bytes).digest('hex');
-    const fileName = `${String(image.image_type || 'extra').replace(/[^a-z0-9_-]/gi, '')}-${sha.slice(0, 12)}${extension}`;
-    const filePath = path.join(folder, fileName);
-    await fs.writeFile(filePath, bytes);
-    const saved = await db.addProductImage(detail.id, {
+    const saved = await downloadImageUrlToDetail(detail, url, {
       type: image.image_type || 'gallery',
       sortOrder: Number(image.sort_order) || 500,
-      sourceUrl: url, storagePath: filePath,
-      mimeType: String(response.headers.get('content-type') || '').split(';')[0] || 'image/jpeg',
-      contentSha256: sha, byteSize: bytes.length,
     });
     return { ok: true, image: saved };
   } catch (error) {
@@ -2197,6 +2206,31 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       source: image.source_url || null, local: Boolean(image.storage_path),
       inPublish: publishIds.has(String(image.id)),
     }));
+  // Detail images that exist only as URLs (LinkFox description HTML) are
+  // selectable too; picking one downloads it (materialize endpoint) and only
+  // then joins the publish set.
+  try {
+    const sources = await db.getLinkfoxDetailSources([id]);
+    const source = sources.get(Number(id));
+    let urls = Array.isArray(source?.urls) && source.urls.length ? source.urls : null;
+    if (!urls && source?.html) {
+      urls = extractDescriptionImageUrls(source.html);
+      if (urls.length) void db.saveLinkfoxDetailImageUrls(Number(id), urls).catch(() => {});
+    }
+    if (urls && urls.length) {
+      const storedKeys = new Set((detail.images ?? [])
+        .map((image) => normalizedSourceImageKey(image.source_url)).filter(Boolean));
+      for (const url of urls) {
+        const key = normalizedSourceImageKey(url);
+        if (!key || storedKeys.has(key)) continue;
+        storedKeys.add(key);
+        publishPool.push({
+          id: null, type: 'description', thumb: url, source: url,
+          local: false, inPublish: false, needsDownload: true,
+        });
+      }
+    }
+  } catch { /* URL-only additions are best effort */ }
   // Pending unpublished edits: any review action newer than the last WP sync.
   const editTimes = [
     normalization?.updated_at, raw.imageDedupe?.updatedAt, raw.publishImages?.updatedAt,
@@ -2615,6 +2649,37 @@ app.put('/api/product-details/:id/publish-images', { preHandler: requireDashboar
     count: desiredIds.length, removed: excluded.length, added: added.length,
   });
   return { productDetailId: id, publishImages: value };
+});
+
+// Materialize a URL-only image (LinkFox detail link) into a stored row so it
+// can join the publish set or a swatch. Returns the image row id.
+const SOURCE_IMAGE_HOSTS = ['alicdn.com', '1688.com', 'taobao.com', 'tmall.com', 'yiswim.cloud'];
+app.post('/api/product-details/:id/publish-images/materialize', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const url = String(request.body?.url ?? '').trim();
+  if (!/^https:\/\//i.test(url) || url.length > 2000) return reply.code(400).send({ error: 'invalid_url' });
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { host = ''; }
+  if (!SOURCE_IMAGE_HOSTS.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) {
+    return reply.code(400).send({ error: 'host_not_allowed' });
+  }
+  const key = normalizedSourceImageKey(url);
+  const existing = (detail.images ?? [])
+    .find((image) => normalizedSourceImageKey(image.source_url) === key);
+  if (existing) {
+    const base = imagePublicPath(existing.storage_path);
+    return { imageId: String(existing.id), thumb: base ? `${base}?w=160` : (existing.source_url || url), existing: true };
+  }
+  try {
+    const saved = await downloadImageUrlToDetail(detail, url, { type: 'description', sortOrder: 600 });
+    const base = imagePublicPath(saved.storage_path);
+    return { imageId: String(saved.id), thumb: base ? `${base}?w=160` : url };
+  } catch (error) {
+    return reply.code(422).send({ error: 'image_download_failed', message: String(error?.message ?? error).slice(0, 200) });
+  }
 });
 
 // Publish the accumulated manual edits to the existing WordPress product,

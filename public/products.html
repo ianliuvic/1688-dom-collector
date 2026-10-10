@@ -1691,27 +1691,50 @@ function openImagePicker(id, { onPick = null, excludeIds = [], title = '选择�
   if (!data || !data.images) return;
   IMAGE_PICKER = { id: String(id), onPick, excludeIds: new Set((excludeIds || []).map(String)) };
   const typeLabel = { main: '主图', gallery: '图库', description: '详情图' };
-  const cells = (data.images.pool || []).map((image) => {
-    const dim = IMAGE_PICKER.excludeIds.has(image.id) ? ' style="opacity:.35"' : '';
-    return '<button type="button" class="pick-img" data-pick-img="' + esc(image.id) + '"' + dim + '>'
+  const pool = data.images.pool || [];
+  const cells = pool.map((image, index) => {
+    const dim = image.id && IMAGE_PICKER.excludeIds.has(String(image.id)) ? ' style="opacity:.35"' : '';
+    return '<button type="button" class="pick-img" data-pick-ref="' + index + '"' + dim + '>'
       + '<img src="' + esc(image.thumb || image.source || '') + '" loading="lazy" referrerpolicy="no-referrer" alt="">'
       + '<span class="pick-img-meta">' + esc(typeLabel[image.type] || image.type)
       + (image.inPublish ? ' · <span style="color:#067647">已在发布集</span>' : '')
       + (image.local === false ? ' · <span style="color:#b54708">需下载</span>' : '') + '</span>'
       + '</button>';
   }).join('');
-  showModal('<div class="modal-card" style="max-width:880px"><h3>' + esc(title) + '（' + (data.images.pool || []).length + ' 张）</h3>'
+  showModal('<div class="modal-card" style="max-width:880px"><h3>' + esc(title) + '（' + pool.length + ' 张）</h3>'
     + '<div class="pick-grid">' + (cells || '<div class="pp-muted">没有可选图片</div>') + '</div>'
     + '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button></div></div>');
   wireModalClose();
-  document.querySelectorAll('#modalRoot button[data-pick-img]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const imageId = String(btn.dataset.pickImg);
-      const image = (data.images.pool || []).find((entry) => entry.id === imageId);
-      const handler = IMAGE_PICKER && IMAGE_PICKER.onPick;
+  document.querySelectorAll('#modalRoot button[data-pick-ref]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const keep = IMAGE_PICKER;
+      const image = keep ? pool[Number(btn.dataset.pickRef)] : null;
+      if (!keep || !image) return;
+      let picked = image;
+      if (!picked.id) {
+        // URL-only detail image: download it into storage first.
+        const label = btn.querySelector('.pick-img-meta');
+        const original = label ? label.innerHTML : '';
+        btn.disabled = true;
+        if (label) label.innerHTML = '下载中…';
+        try {
+          const res = await fetch('/api/product-details/' + keep.id + '/publish-images/materialize', {
+            method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ url: picked.source || picked.thumb }),
+          });
+          const body = await res.json().catch(() => null);
+          if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+          picked = { ...picked, id: String(body.imageId), thumb: body.thumb || picked.thumb, local: true };
+        } catch (e) {
+          if (label) label.innerHTML = original;
+          btn.disabled = false;
+          window.alert('该详情图下载失败：' + String((e && e.message) || e));
+          return;
+        }
+      }
       IMAGE_PICKER = null;
       closeModal();
-      if (handler && image) handler(image);
+      if (keep.onPick) keep.onPick(picked);
     });
   });
 }
