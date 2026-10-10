@@ -2097,6 +2097,42 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       const base = imagePublicPath(image.storage_path);
       return { id: String(image.id), type: image.image_type, thumb: base ? `${base}?w=160` : (image.source_url || null) };
     });
+  // Final WordPress gallery, mirroring selectPublishingImages exactly:
+  // translation-selected images first then the full gallery, same-URL
+  // collapse, stored dedupe decisions drop flagged ids, and a live exact-sha
+  // guard removes exact duplicates. Detail images never enter the WP gallery.
+  const publishSet = (() => {
+    const byId = new Map((detail.images ?? []).map((image) => [String(image.id), image]));
+    const selected = (translation?.image_sources ?? [])
+      .map((source) => byId.get(String(source?.imageId)))
+      .filter(Boolean);
+    const fallback = (detail.images ?? [])
+      .filter((image) => image.image_type === 'main' || image.image_type === 'gallery')
+      .sort((left, right) => (left.image_type !== right.image_type
+        ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)));
+    const source = selected.length ? [...selected, ...fallback] : fallback;
+    const removedById = new Map((Array.isArray(raw.imageDedupe?.removed) ? raw.imageDedupe.removed : [])
+      .map((entry) => [String(entry?.imageId ?? ''), String(entry?.reason ?? 'duplicate')]));
+    const seenUrl = new Set();
+    const seenSha = new Set();
+    const final = [];
+    const excluded = [];
+    for (const image of source) {
+      const base = imagePublicPath(image.storage_path);
+      const entry = { id: String(image.id), type: image.image_type,
+        thumb: base ? `${base}?w=160` : (image.source_url || null) };
+      const urlKey = normalizedSourceImageKey(image.source_url);
+      const dedupeReason = removedById.get(String(image.id)) ?? null;
+      if (urlKey && seenUrl.has(urlKey)) { excluded.push({ ...entry, reason: 'same-url' }); continue; }
+      if (urlKey) seenUrl.add(urlKey);
+      if (dedupeReason) { excluded.push({ ...entry, reason: dedupeReason }); continue; }
+      const sha = String(image.content_sha256 ?? '');
+      if (sha && seenSha.has(sha)) { excluded.push({ ...entry, reason: 'exact' }); continue; }
+      if (sha) seenSha.add(sha);
+      final.push(entry);
+    }
+    return { final, excluded };
+  })();
   const payloadMeta = publication?.payload?.meta ?? {};
   const payloadColors = publication?.payload?.colors?.colors ?? [];
   const payloadSizes = publication?.payload?.sizes?.sizes ?? [];
@@ -2149,6 +2185,7 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
     },
     images: {
       gallery: galleryImages,
+      publish: { final: publishSet.final, excluded: publishSet.excluded },
       swatches,
       sizes,
       variantsTranslated: sizesTranslated,
