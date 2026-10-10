@@ -115,6 +115,28 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 .wp-sync button:hover{border-color:#98a2b3}
 .wp-sync button:disabled{opacity:.55;cursor:default}
 .wp-sync .muted{color:var(--muted);font-size:12px}
+.purge-btn{border:1px solid #fecdca;color:#b42318;background:#fff;border-radius:6px;padding:2px 9px;font-size:11.5px;cursor:pointer}
+.purge-btn:hover{border-color:#f97066;background:#fef3f2}
+.modal-mask{position:fixed;inset:0;background:rgba(17,24,39,.55);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modal-card{background:#fff;border-radius:10px;max-width:640px;width:100%;max-height:85vh;overflow:auto;padding:16px 18px;box-shadow:0 20px 40px rgba(0,0,0,.25)}
+.modal-card h3{margin:0 0 8px;font-size:16px}
+.modal-card .row-line{font-size:12.5px;margin:5px 0;color:#344054;line-height:1.6}
+.modal-card .warn{color:#b42318;font-weight:600}
+.modal-card .ok{color:#067647;font-weight:600}
+.modal-card ul{margin:4px 0 8px 18px;padding:0;font-size:12.5px;color:#344054}
+.modal-card select{border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12.5px;background:#fff}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+.modal-actions button{border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer;border:1px solid var(--line);background:#fff}
+.modal-actions button.primary{background:#b42318;border-color:#b42318;color:#fff}
+.modal-actions button.primary:disabled{opacity:.5;cursor:default}
+.modal-actions button.ghost{background:#fff}
+.blk-list{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:6px}
+.blk-row{display:flex;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--line);font-size:12.5px}
+.blk-row:last-child{border-bottom:none}
+.blk-row .grow{flex:1;min-width:0}
+.blk-row .muted{color:var(--muted);font-size:11.5px}
+.blk-row button{border:1px solid var(--line);border-radius:6px;padding:2px 10px;font-size:11.5px;cursor:pointer;background:#fff}
+.blk-row button:hover{border-color:#98a2b3}
 .filters select{border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:12.5px;background:#fff;color:var(--text);max-width:280px;outline:none}
 .meta .style{font-weight:700;font-size:13.5px}
 .meta .muted{font-size:12px;color:var(--muted);word-break:break-all}
@@ -157,8 +179,10 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 <div class="pager" id="pager"></div>
 <div class="wp-sync" id="wpSync">
   <button type="button" id="wpSyncBtn">核对 WP 状态（本页）</button>
+  <button type="button" id="blkBtn">禁止采集名单</button>
   <span class="muted" id="wpSyncNote">WP 状态来自采集器记录 + WordPress 实时回传（外部改动自动同步）</span>
 </div>
+<div id="modalRoot"></div>
 <main id="list"><div class="empty">加载中…</div></main>
 <script>
 let DATA = [];
@@ -277,6 +301,7 @@ function row(it){
       ? '<div class="line"><button type="button" class="split-toggle" data-split-id="' + it.id + '">拆分 ▾'
         + (it.hasSplitPlan ? '（已保存）' : '') + '</button></div>'
       : '<div class="line"><button type="button" class="split-toggle" data-pp-id="' + it.id + '">发布预览 ▾</button></div>')
+    + '<div class="line"><button type="button" class="purge-btn" data-purge-id="' + it.id + '" title="从采集器、WordPress 与 RAG 删除，并禁止后续采集">删除…</button></div>'
     + (thumbs.length ? '<div class="thumbs">' + thumbs.map((im) => '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.thumb) + '" data-fallback="" onerror="imgFallback(this)" alt="">').join('') + (overflow > 0 ? '<span class="muted">+' + overflow + '</span>' : '') + '</div>' : '')
     + '</div></article>';
 }
@@ -1469,9 +1494,142 @@ document.addEventListener('change', (e) => {
   const move = e.target.closest('select[data-split-move]');
   if (move) moveSplitOption(String(move.dataset.splitMove), move.dataset.opt, Number(move.value));
 });
+function closeModal(){ const root = document.getElementById('modalRoot'); if (root) root.innerHTML = ''; }
+function wireModalClose(){ document.querySelectorAll('[data-modal-close]').forEach((b) => b.addEventListener('click', closeModal)); }
+function showModal(html){
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = '<div class="modal-mask">' + html + '</div>';
+  const mask = root.querySelector('.modal-mask');
+  if (mask) mask.addEventListener('click', (e) => { if (e.target === mask) closeModal(); });
+}
+async function openPurge(id){
+  const it = DATA.find((x) => String(x.id) === String(id));
+  showModal('<div class="modal-card"><h3>删除并清退 #' + esc(id) + '</h3><div class="row-line">正在读取影响范围…</div></div>');
+  let preview = null;
+  let error = '';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/purge-preview', { headers: { accept: 'application/json' } });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    preview = body;
+  } catch (e) { error = String((e && e.message) || e); }
+  if (error) {
+    showModal('<div class="modal-card"><h3>删除并清退 #' + esc(id) + '</h3><div class="row-line warn">无法读取影响范围：' + esc(error) + '</div><div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
+    wireModalClose();
+    return;
+  }
+  const wpPosts = (preview.wp && preview.wp.posts) || [];
+  const wpList = wpPosts.length
+    ? wpPosts.map((p) => '<li>WordPress #' + esc(String(p.postId)) + '（' + esc(String(p.role)) + '，当前 ' + esc(String(p.status || '未知')) + '）</li>').join('')
+    : '<li>无关联 WordPress 文章</li>';
+  const lines = ['<div class="row-line">将在以下系统删除该产品：</div>', '<ul>' + wpList + '</ul>'];
+  if (preview.portal && preview.portal.portalProductId) {
+    lines.push('<div class="row-line">Portal：' + esc(String(preview.portal.portalProductId)) + '（' + esc(String(preview.portal.status || '')) + '）将归档移除</div>');
+  }
+  if ((preview.shopify || []).length) {
+    lines.push('<div class="row-line warn">⚠ Shopify 存在映射（' + esc(preview.shopify.map((s) => s.store).join('、')) + '）：本操作不会删除 Shopify 产品，请手动处理。</div>');
+  }
+  if (preview.blocklisted) lines.push('<div class="row-line">该 offer 已在禁止采集名单中。</div>');
+  const maintenance = (preview.activeJobs && preview.activeJobs.maintenance) || [];
+  const busyParts = [];
+  if (preview.activeJobs && preview.activeJobs.wordpress) busyParts.push('发布任务');
+  if (preview.activeJobs && preview.activeJobs.pipeline) busyParts.push('流水线任务');
+  if (maintenance.length) busyParts.push(maintenance.join('、'));
+  const busy = busyParts.length > 0;
+  if (busy) lines.push('<div class="row-line warn">⚠ 有任务进行中（' + esc(busyParts.join('、')) + '），暂不可清退。</div>');
+  showModal('<div class="modal-card">'
+    + '<h3>删除并清退 #' + esc(id) + (it && it.styleNo ? ' · ' + esc(it.styleNo) : '') + '</h3>'
+    + '<div class="row-line">' + esc((preview.product && preview.product.title) || '') + '</div>'
+    + lines.join('')
+    + '<div class="row-line">WP 处理：<select id="purgeWpMode">'
+    + '<option value="trash">移入回收站（可恢复）</option>'
+    + '<option value="delete">彻底删除（不可恢复）</option></select></div>'
+    + '<div class="row-line"><label><input type="checkbox" id="purgeBlocklist" checked> 加入禁止采集名单（后续扫描与采集自动跳过）</label></div>'
+    + '<div class="row-line"><label><input type="checkbox" id="purgePortal" checked> 归档 Portal staging 记录（如有）</label></div>'
+    + '<div class="row-line" id="purgeResult"></div>'
+    + '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button>'
+    + '<button class="primary" id="purgeConfirm"' + (busy ? ' disabled' : '') + '>确认清退</button></div>'
+    + '</div>');
+  wireModalClose();
+  const confirmBtn = document.getElementById('purgeConfirm');
+  if (confirmBtn && !busy) confirmBtn.addEventListener('click', () => { void confirmPurge(id); });
+}
+async function confirmPurge(id){
+  const btn = document.getElementById('purgeConfirm');
+  const resultEl = document.getElementById('purgeResult');
+  const wpModeEl = document.getElementById('purgeWpMode');
+  const wpMode = wpModeEl ? wpModeEl.value : 'trash';
+  const blockEl = document.getElementById('purgeBlocklist');
+  const portalEl = document.getElementById('purgePortal');
+  const blocklist = !blockEl || blockEl.checked;
+  const archivePortal = !portalEl || portalEl.checked;
+  if (btn) { btn.disabled = true; btn.textContent = '正在清退…'; }
+  try {
+    const res = await fetch('/api/product-details/' + id + '/purge', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ wpMode, blocklist, archivePortal }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    const wpCount = ((body.wp && body.wp.posts) || []).length;
+    if (resultEl) {
+      resultEl.innerHTML = '<span class="ok">✔ 已清退：WP ' + wpCount + ' 篇（' + esc(wpMode === 'delete' ? '彻底删除' : '回收站') + '）'
+        + '；Portal ' + esc(String((body.portal && body.portal.status) || '-'))
+        + '；RAG ' + esc(String((body.rag && body.rag.status) || '-'))
+        + (body.blocked ? '；已加入禁止采集名单' : '') + '</span>';
+    }
+    setTimeout(() => { closeModal(); void loadPage(); }, 1600);
+  } catch (e) {
+    if (resultEl) resultEl.innerHTML = '<span class="warn">清退失败：' + esc(String((e && e.message) || e)) + '</span>';
+    if (btn) { btn.disabled = false; btn.textContent = '确认清退'; }
+  }
+}
+async function openBlocklist(){
+  showModal('<div class="modal-card"><h3>禁止采集名单</h3><div class="row-line">加载中…</div></div>');
+  try {
+    const res = await fetch('/api/blocklist', { headers: { accept: 'application/json' } });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    const entries = body.entries || [];
+    const rows = entries.length
+      ? entries.map((e) => '<div class="blk-row"><div class="grow"><b>' + esc(e.style_no || '—') + '</b> · ' + esc(e.title || '')
+        + '<div class="muted">offer ' + esc(String(e.offer_id)) + ' · 加入于 ' + esc(String(e.created_at || '').slice(0, 10)) + '</div></div>'
+        + '<button type="button" data-unblock="' + esc(String(e.offer_id)) + '">解除</button></div>').join('')
+      : '<div class="blk-row"><span class="muted">名单为空</span></div>';
+    showModal('<div class="modal-card"><h3>禁止采集名单（' + entries.length + '）</h3>'
+      + '<div class="blk-list">' + rows + '</div>'
+      + '<div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
+    wireModalClose();
+    document.querySelectorAll('#modalRoot button[data-unblock]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        try {
+          const r = await fetch('/api/blocklist/' + encodeURIComponent(b.dataset.unblock), { method: 'DELETE', headers: { accept: 'application/json' } });
+          const bb = await r.json().catch(() => null);
+          if (!r.ok) throw new Error((bb && (bb.message || bb.error)) || ('HTTP ' + r.status));
+          void openBlocklist();
+        } catch (e) {
+          b.disabled = false;
+          window.alert('解除失败：' + String((e && e.message) || e));
+        }
+      });
+    });
+  } catch (e) {
+    showModal('<div class="modal-card"><h3>禁止采集名单</h3><div class="row-line warn">加载失败：' + esc(String((e && e.message) || e)) + '</div>'
+      + '<div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
+    wireModalClose();
+  }
+}
 function wireWpSync(){
   const btn = document.getElementById('wpSyncBtn');
   const note = document.getElementById('wpSyncNote');
+  const blkBtn = document.getElementById('blkBtn');
+  if (blkBtn) blkBtn.addEventListener('click', () => { void openBlocklist(); });
+  document.addEventListener('click', (e) => {
+    const purge = e.target.closest('button[data-purge-id]');
+    if (purge) { void openPurge(String(purge.dataset.purgeId)); }
+  });
   if (!btn) return;
   btn.addEventListener('click', async () => {
     if (btn.disabled) return;

@@ -15,7 +15,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   setWordPressProductPublicationDate, setWordPressProductStatus,
   syncWordPressProductPricing, replaceWordPressBestSellers,
   resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
-  fetchWordPressProductStatuses,
+  fetchWordPressProductStatuses, deleteWordPressProduct,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
   resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
@@ -3185,7 +3185,7 @@ app.post('/api/pipelines/run', { preHandler: requireApiKey }, async (request, re
   const refreshSplit = request.body?.refreshSplit === true;
   const job = {
     id: crypto.randomUUID(), status: 'running', statusTarget: status, publish, refreshSplit,
-    total: 0, processed: 0, completed: 0, dropped: 0, waitingReview: 0, failed: 0,
+    total: 0, processed: 0, completed: 0, dropped: 0, waitingReview: 0, failed: 0, skipped: 0,
     results: [], errors: [], createdAt: new Date().toISOString(),
     startedAt: new Date().toISOString(), completedAt: null,
   };
@@ -3199,13 +3199,21 @@ app.post('/api/pipelines/run', { preHandler: requireApiKey }, async (request, re
         const id = Number(rows?.[0]?.id ?? rows?.[0]?.product_detail_id ?? 0);
         if (id) targets.push(id);
       }
-      job.total = targets.length;
+      // Blocklisted offers never re-enter the pipeline even if a stale scan
+      // listing still names them.
+      const blockedTargets = new Set(await db.listBlockedProductDetailIds(targets).catch(() => []));
+      for (const blockedId of blockedTargets) {
+        job.results.push({ productDetailId: blockedId, status: 'skipped', reason: 'blocked_offer' });
+      }
+      job.skipped = blockedTargets.size;
+      const activeTargets = targets.filter((id) => !blockedTargets.has(id));
+      job.total = activeTargets.length;
       let next = 0;
-      const workers = Array.from({ length: Math.min(3, targets.length) }, async () => {
+      const workers = Array.from({ length: Math.min(3, activeTargets.length) }, async () => {
         while (true) {
           const index = next++;
-          if (index >= targets.length) return;
-          const productDetailId = targets[index];
+          if (index >= activeTargets.length) return;
+          const productDetailId = activeTargets[index];
           job.processed += 1;
           try {
             const result = await runProductPipeline({ productDetailId, status, publish, refreshSplit });
@@ -3877,6 +3885,14 @@ app.post('/api/product-details', { preHandler: [requireApiKey, requireCollectorM
   const resolvedOfferId = typeof offerId === 'string' && /^\d{10,13}$/.test(offerId)
     ? offerId : url.match(/\/offer\/(\d{10,13})\.html/i)?.[1];
   if (resolvedOfferId) {
+    const blocked = await db.isOfferBlocked(resolvedOfferId);
+    if (blocked) {
+      return reply.code(409).send({
+        error: 'blocked_offer',
+        message: '该商品已被列入禁止采集名单（从操作台清退）。',
+        blockedAt: blocked.created_at,
+      });
+    }
     const sourceListings = await db.listShopProductSources(resolvedOfferId);
     const policy = evaluateShopProductPolicy(sourceListings);
     if (!policy.allowed) {
@@ -3919,6 +3935,14 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
     || String(body.url ?? '').match(/\/offer\/(\d{10,13})\.html/i)?.[1] || '';
   if (!/^\d{10,13}$/.test(offerId)) {
     return reply.code(400).send({ error: 'valid_1688_offer_id_required' });
+  }
+  const blocked = await db.isOfferBlocked(offerId);
+  if (blocked) {
+    return reply.code(409).send({
+      error: 'blocked_offer',
+      message: '该商品已被列入禁止采集名单（从操作台清退）。',
+      blockedAt: blocked.created_at,
+    });
   }
   if (!config.linkfoxApiKey) {
     return reply.code(503).send({ error: 'linkfox_not_configured' });
@@ -4205,6 +4229,24 @@ app.get('/api/product-details/:id', { preHandler: requireApiKey }, async (reques
 // Permanent deletion of one capture (all child rows cascade). The dedicated
 // media folder is removed from persistent storage as well. Refuses while a
 // WordPress publication still points at a live post unless ?force=true.
+async function removeDetailImageFolders(imageStoragePaths) {
+  const root = path.resolve(config.storagePath, 'product-images');
+  const folders = new Set();
+  for (const storagePath of imageStoragePaths ?? []) {
+    const folder = path.dirname(path.resolve(storagePath));
+    if (folder.startsWith(`${root}${path.sep}`) && /^[A-Za-z0-9_-]{1,64}$/.test(path.basename(folder))) {
+      folders.add(folder);
+    }
+  }
+  const foldersRemoved = [];
+  for (const folder of folders) {
+    const entries = await fs.readdir(folder).catch(() => []);
+    await fs.rm(folder, { recursive: true, force: true });
+    foldersRemoved.push({ folder: path.basename(folder), files: entries.length });
+  }
+  return foldersRemoved;
+}
+
 app.delete('/api/product-details/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
@@ -4220,21 +4262,224 @@ app.delete('/api/product-details/:id', { preHandler: requireApiKey }, async (req
   }
   const removed = await db.deleteProductDetail(id);
   if (!removed) return reply.code(404).send({ error: 'not_found' });
-  const root = path.resolve(config.storagePath, 'product-images');
-  const folders = new Set();
-  for (const storagePath of removed.imageStoragePaths) {
-    const folder = path.dirname(path.resolve(storagePath));
-    if (folder.startsWith(`${root}${path.sep}`) && /^[A-Za-z0-9_-]{1,64}$/.test(path.basename(folder))) {
-      folders.add(folder);
+  const foldersRemoved = await removeDetailImageFolders(removed.imageStoragePaths);
+  return { deleted: true, ...removed, foldersRemoved };
+});
+
+// ---- Console purge: delete everywhere and blocklist the offer -----------------
+
+function productHasActivePublishJob(productDetailId) {
+  return [...wordpressJobs.values()].some((job) =>
+    Number(job.productDetailId) === Number(productDetailId)
+    && ['queued', 'running'].includes(String(job.status ?? '')));
+}
+
+// Maintenance jobs that could resurrect or re-write a product mid-purge. Maps
+// are read lazily because some are declared later in the module.
+function purgeBlockingJobs(productDetailId) {
+  const sources = () => [
+    ['wordpress_publish', wordpressJobs, true],
+    ['wordpress_refresh', wordpressRefreshJobs, false],
+    ['split_publish', splitPublishJobs, false],
+    ['split_finalize', finalizeSplitJobs, false],
+    ['wordpress_price_repair', wordpressPriceRepairJobs, false],
+    ['wordpress_best_sellers', wordpressBestSellerJobs, false],
+    ['stock_repair', stockRepairJobs, false],
+    ['split_swatch_repair', splitSwatchRepairJobs, false],
+    ['split_variant_repair', splitVariantRepairJobs, false],
+    ['split_copy_repair', splitCopyRepairJobs, false],
+    ['split_keeper_category_repair', splitKeeperCategoryRepairJobs, false],
+  ];
+  const blocking = [];
+  for (const [type, map, perProduct] of sources()) {
+    const hit = [...(map?.values?.() ?? [])].some((job) => {
+      if (!['queued', 'running'].includes(String(job?.status ?? ''))) return false;
+      return perProduct ? Number(job?.productDetailId) === Number(productDetailId) : true;
+    });
+    if (hit) blocking.push(type);
+  }
+  return blocking;
+}
+
+function collectPurgeWpPosts(publication, contents) {
+  const posts = [];
+  if (publication?.wp_post_id) {
+    posts.push({ postId: Number(publication.wp_post_id), role: 'keeper',
+      status: publication.wp_status ?? null, url: publication.wp_url ?? null });
+  }
+  for (const product of contents?.result?.products ?? []) {
+    const wp = product?.wp ?? null;
+    const postId = Number(wp?.postId);
+    if (!Number.isInteger(postId) || postId <= 0) continue;
+    if (posts.some((entry) => entry.postId === postId)) continue;
+    posts.push({ postId, role: String(wp?.role ?? 'split'), status: wp?.status ?? null,
+      title: product?.title ?? null });
+  }
+  return posts;
+}
+
+async function archivePortalPublicationForPurge(productDetailId) {
+  const publication = await db.getPortalPublication(productDetailId);
+  if (!publication?.portal_product_id) return { status: 'none' };
+  const target = publication.result?.target ?? null;
+  if (target !== 'staging') return { status: 'skipped', reason: 'target_not_staging' };
+  if (!config.portalStagingApiUrl || !config.portalStagingAdminSecret) {
+    return { status: 'skipped', reason: 'portal_not_configured' };
+  }
+  try {
+    const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(publication.portal_product_id)}`, config.portalStagingApiUrl), {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${config.portalStagingAdminSecret}` },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok && response.status !== 404) {
+      const body = await response.json().catch(() => null);
+      return { status: 'failed', message: String(body?.error?.message ?? `Portal returned HTTP ${response.status}`) };
+    }
+    await db.markPortalPublicationArchived(productDetailId);
+    portalStagingActiveCache = { at: 0, ids: null, warning: null };
+    return { status: 'archived', alreadyRemoved: response.status === 404 };
+  } catch (error) {
+    return { status: 'failed', message: String(error?.message ?? error).slice(0, 300) };
+  }
+}
+
+// What a purge would touch; powers the confirmation dialog on /products.
+app.get('/api/product-details/:id/purge-preview', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const [publication, contents, portal, shopifyRows, blocked, pipeline] = await Promise.all([
+    db.getWordPressPublication(id),
+    db.getSplitContents(id),
+    db.getPortalPublication(id),
+    db.listShopifyPublicationsForDetail(id).catch(() => []),
+    db.isOfferBlocked(detail.offer_id),
+    db.getPipelineRun(id).catch(() => null),
+  ]);
+  return {
+    product: { id: detail.id, offerId: detail.offer_id, title: detail.title,
+      styleNo: publication?.style_no ?? null },
+    wp: { posts: collectPurgeWpPosts(publication, contents), keeperStatus: publication?.wp_status ?? null },
+    portal: portal ? { portalProductId: portal.portal_product_id, status: portal.portal_status,
+      target: portal.result?.target ?? null } : null,
+    shopify: (shopifyRows ?? []).map((row) => ({ store: row.shopify_store,
+      gid: row.shopify_product_gid, url: row.shopify_url, status: row.publication_status })),
+    rag: { enabled: ragClient.enabled },
+    blocklisted: Boolean(blocked),
+    activeJobs: {
+      wordpress: productHasActivePublishJob(id),
+      pipeline: ['pending', 'running'].includes(String(pipeline?.status ?? '')),
+      maintenance: purgeBlockingJobs(id),
+    },
+  };
+});
+
+// Purge one product: WordPress posts (keeper + split family) first, then the
+// RAG entity, the staging portal record, the collector capture and finally
+// the blocklist entry that stops future captures. Every step is idempotent so
+// a failed run can safely be retried.
+app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const body = request.body ?? {};
+  const wpMode = body.wpMode === 'delete' ? 'delete' : 'trash';
+  const addToBlocklist = body.blocklist !== false;
+  const archivePortal = body.archivePortal !== false;
+  const force = body.force === true;
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const blockingJobs = purgeBlockingJobs(id);
+  if (blockingJobs.length) {
+    return reply.code(409).send({ error: 'maintenance_job_running', jobs: blockingJobs,
+      message: '有维护任务进行中（发布/刷新/拆分等），请等任务结束后再清退。' });
+  }
+  const pipeline = await db.getPipelineRun(id).catch(() => null);
+  if (['pending', 'running'].includes(String(pipeline?.status ?? ''))) {
+    return reply.code(409).send({ error: 'pipeline_in_progress',
+      message: '该产品有流水线任务进行中，请稍后重试。' });
+  }
+
+  const publication = await db.getWordPressPublication(id);
+  const contents = await db.getSplitContents(id);
+  const wpPosts = collectPurgeWpPosts(publication, contents).map((entry) => entry.postId);
+
+  // 1) WordPress first: if this fails nothing local has been touched yet.
+  const wpResults = [];
+  const wpErrors = [];
+  for (const postId of wpPosts) {
+    try {
+      wpResults.push(await deleteWordPressProduct({ postId, force: wpMode === 'delete', config }));
+    } catch (error) {
+      wpErrors.push({ postId, message: String(error?.message ?? error).slice(0, 300) });
     }
   }
-  const foldersRemoved = [];
-  for (const folder of folders) {
-    const entries = await fs.readdir(folder).catch(() => []);
-    await fs.rm(folder, { recursive: true, force: true });
-    foldersRemoved.push({ folder: path.basename(folder), files: entries.length });
+  if (wpErrors.length) {
+    request.log.error({ productDetailId: id, wpErrors }, 'purge WordPress delete failed');
+    return reply.code(502).send({
+      error: 'wordpress_delete_failed', wpResults, wpErrors,
+      message: '部分 WordPress 文章删除失败，采集器数据未改动；修复后可直接重试（幂等）。',
+    });
   }
-  return { deleted: true, ...removed, foldersRemoved };
+
+  // 2) RAG deactivate while the capture still exists (clean canonical lookup).
+  let ragResult = { status: 'not_configured' };
+  if (ragClient.enabled) {
+    try {
+      await ragClient.deactivate({ canonicalProductId: `1688:${detail.offer_id}`,
+        sourceProductId: String(detail.offer_id) });
+      ragResult = { status: 'deactivated' };
+    } catch (error) {
+      request.log.error({ err: error, productDetailId: id }, 'purge RAG deactivate failed');
+      if (!force) {
+        return reply.code(502).send({
+          error: 'rag_deactivate_failed', wpResults,
+          message: 'RAG 反激活失败，采集器数据未删除；可重试，或传 force=true 跳过 RAG 继续。',
+        });
+      }
+      ragResult = { status: 'failed', message: String(error?.message ?? error).slice(0, 300) };
+    }
+  }
+
+  // 3) Portal staging archive is best effort (secondary catalog).
+  const portalResult = archivePortal ? await archivePortalPublicationForPurge(id) : { status: 'skipped', reason: 'disabled' };
+
+  // 4) Collector hard delete (cascades every child row) + media folders.
+  const removed = await db.deleteProductDetail(id);
+  if (!removed) return reply.code(404).send({ error: 'not_found' });
+  const foldersRemoved = await removeDetailImageFolders(removed.imageStoragePaths);
+
+  // 5) Blocklist: future scans and every capture entry point reject the offer.
+  let blockedEntry = null;
+  if (addToBlocklist) {
+    blockedEntry = await db.upsertProductBlocklist({
+      offerId: detail.offer_id, productDetailId: id,
+      styleNo: publication?.style_no ?? null, title: detail.title,
+      wpPostIds: wpPosts, reason: 'purged from the products console', blockedBy: 'products-console',
+    });
+  }
+  return {
+    deleted: true, productDetailId: id, offerId: detail.offer_id,
+    wp: { mode: wpMode, posts: wpResults },
+    portal: portalResult,
+    rag: ragResult,
+    foldersRemoved,
+    blocked: Boolean(blockedEntry),
+  };
+});
+
+// ---- Blocklist management -----------------------------------------------------
+
+app.get('/api/blocklist', { preHandler: requireDashboardOrApiKey }, async () => {
+  const entries = await db.listProductBlocklist();
+  return { count: entries.length, entries };
+});
+
+app.delete('/api/blocklist/:offerId', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const removed = await db.removeProductBlocklist(request.params.offerId);
+  if (!removed) return reply.code(404).send({ error: 'not_found' });
+  return { removed: true, offerId: String(request.params.offerId) };
 });
 
 app.post('/api/product-details/:id/translations', { preHandler: requireApiKey }, async (request, reply) => {
@@ -6125,6 +6370,13 @@ async function workerLoop(queue, workerIndex = 0) {
         result.extractedData.reconciliation = reconciliation;
       } else if (job.options?.mode === 'product_detail'
           && result.extractedData?.pageType === 'product') {
+        const blockedOfferId = String(result.extractedData?.offerId ?? '').trim();
+        if (blockedOfferId && await db.isOfferBlocked(blockedOfferId).catch(() => false)) {
+          await cleanupRejectedProductImages(result.extractedData.localImages ?? []);
+          result.extractedData.localImages = [];
+          result.status = 'blocked_offer';
+          result.error = null;
+        } else {
         const duplicateAnalysis = await analyzeProductDuplicates({
           data: result.extractedData,
           imageFiles: result.extractedData.localImages ?? [],
@@ -6197,6 +6449,7 @@ async function workerLoop(queue, workerIndex = 0) {
               app.log.error({ err: error }, 'failed to send the bundle notification to Feishu');
             }
           }
+        }
         }
       }
       await db.completeJob(job.id, result);

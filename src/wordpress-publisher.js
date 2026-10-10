@@ -751,6 +751,28 @@ export async function fetchWordPressProductStatuses({ postIds, config }) {
   return { statuses, missing: ids.filter((id) => !statuses.has(id)) };
 }
 
+/**
+ * Delete (trash) or permanently delete one product post. Deleting an
+ * already-trashed/deleted post counts as success (idempotent purge retries).
+ */
+export async function deleteWordPressProduct({ postId, force = false, config }) {
+  const wp = wordpressClient(config);
+  const id = Number(postId);
+  if (!Number.isInteger(id) || id <= 0) throw new Error('A valid WordPress post id is required.');
+  try {
+    const result = await wp(`/wp-json/wp/v2/product/${id}${force ? '?force=true' : ''}`, {
+      method: 'DELETE', timeoutMs: 60000,
+    });
+    return { postId: id, ok: true, force, status: result?.status ?? (force ? 'deleted' : 'trash') };
+  } catch (error) {
+    const message = String(error?.message ?? error);
+    if (/HTTP 404|HTTP 410|rest_post_invalid_id|rest_already_trashed|already been (deleted|trashed)|invalid post id/i.test(message)) {
+      return { postId: id, ok: true, force, already: true, message };
+    }
+    throw error;
+  }
+}
+
 // --- split-product publishing -------------------------------------------------
 
 async function pickSplitCategory({ content, categories, config }) {

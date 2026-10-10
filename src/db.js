@@ -414,6 +414,16 @@ export function createDatabase(databaseUrl) {
         ON product_wp_status_events(wp_post_id, received_at DESC);
       CREATE INDEX IF NOT EXISTS product_wp_status_events_product_idx
         ON product_wp_status_events(product_detail_id, received_at DESC);
+      CREATE TABLE IF NOT EXISTS product_blocklist (
+        offer_id text PRIMARY KEY,
+        product_detail_id bigint,
+        style_no text,
+        title text,
+        wp_post_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+        reason text,
+        blocked_by text,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE TABLE IF NOT EXISTS product_shopify_publications (
         id bigserial PRIMARY KEY,
         product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
@@ -771,6 +781,7 @@ export function createDatabase(databaseUrl) {
   async function saveShopScan(jobId, data, { completeInventory = false } = {}) {
     if (!data || data.pageType !== 'shop-offer-collection' || !data.shop) return null;
     const shop = await upsertShopProfile(data.shop);
+    const blockedOffers = new Set(await listBlockedOfferIds());
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -803,13 +814,18 @@ export function createDatabase(databaseUrl) {
         const offerId = offer?.offerId == null ? null : String(offer.offerId);
         if (!offerId || seen.has(offerId)) continue;
         seen.add(offerId);
-        if (!knownBefore.has(offerId)) addedOfferIds.push(offerId);
-        else if (!activeBefore.has(offerId)) relistedOfferIds.push(offerId);
+        const isBlocked = blockedOffers.has(offerId);
+        // Blocklisted offers never re-enter the added/relisted synchronization;
+        // the row itself stays visible for lifecycle reporting only.
+        if (!knownBefore.has(offerId)) { if (!isBlocked) addedOfferIds.push(offerId); }
+        else if (!activeBefore.has(offerId)) { if (!isBlocked) relistedOfferIds.push(offerId); }
         const product = normalizeOffer(offer);
         // Keep the previously known source category when a scan source stops
         // reporting one, so shop policies stay stable across scans.
         const effectiveCategory = product.category ?? previousCategoryById.get(offerId) ?? null;
-        const ingestion = evaluateShopProductPolicy([{ domain: shop.domain, category: effectiveCategory }]);
+        const ingestion = isBlocked
+          ? { allowed: false, policy: 'blocklisted', reason: 'offer is on the collector blocklist' }
+          : evaluateShopProductPolicy([{ domain: shop.domain, category: effectiveCategory }]);
         const productResult = await client.query(`
           INSERT INTO shop_products (
             shop_id, offer_id, title, category, price, currency, image_url, product_url,
@@ -2082,6 +2098,77 @@ export function createDatabase(databaseUrl) {
     return result.rowCount ?? 0;
   }
 
+  // ---- Collector blocklist: purged offers must never be captured again ----
+
+  async function isOfferBlocked(offerId) {
+    const value = String(offerId ?? '').trim();
+    if (!value) return null;
+    const result = await pool.query('SELECT * FROM product_blocklist WHERE offer_id=$1', [value]);
+    return result.rows[0] ?? null;
+  }
+
+  async function listBlockedOfferIds() {
+    const result = await pool.query('SELECT offer_id FROM product_blocklist');
+    return result.rows.map((row) => String(row.offer_id));
+  }
+
+  async function listProductBlocklist() {
+    const result = await pool.query(`SELECT blocked.*,
+      (SELECT count(*)::int FROM product_details details WHERE details.offer_id = blocked.offer_id) AS capture_count
+      FROM product_blocklist blocked ORDER BY blocked.created_at DESC`);
+    return result.rows;
+  }
+
+  async function upsertProductBlocklist({ offerId, productDetailId = null, styleNo = null,
+    title = null, wpPostIds = [], reason = null, blockedBy = null }) {
+    const value = String(offerId ?? '').trim();
+    if (!value) throw new Error('offerId is required for the blocklist.');
+    const saved = await pool.query(`INSERT INTO product_blocklist
+      (offer_id, product_detail_id, style_no, title, wp_post_ids, reason, blocked_by)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
+      ON CONFLICT (offer_id) DO UPDATE SET
+        product_detail_id=COALESCE(EXCLUDED.product_detail_id, product_blocklist.product_detail_id),
+        style_no=COALESCE(EXCLUDED.style_no, product_blocklist.style_no),
+        title=COALESCE(EXCLUDED.title, product_blocklist.title),
+        wp_post_ids=EXCLUDED.wp_post_ids,
+        reason=COALESCE(EXCLUDED.reason, product_blocklist.reason),
+        blocked_by=COALESCE(EXCLUDED.blocked_by, product_blocklist.blocked_by)
+      RETURNING *`,
+    [value, productDetailId, styleNo, title, JSON.stringify(wpPostIds ?? []), reason, blockedBy]);
+    return saved.rows[0];
+  }
+
+  async function removeProductBlocklist(offerId) {
+    const value = String(offerId ?? '').trim();
+    if (!value) return false;
+    const result = await pool.query('DELETE FROM product_blocklist WHERE offer_id=$1', [value]);
+    if (result.rowCount) {
+      // The next scan re-evaluates the shop policy; clearing the blocklisted
+      // marker now keeps the product visible on the selection page meanwhile.
+      await pool.query(`UPDATE shop_products
+        SET ingestion_eligible=true, ingestion_policy=NULL, ingestion_reason=NULL
+        WHERE offer_id=$1 AND ingestion_reason LIKE '%blocklist%'`, [value]).catch(() => {});
+    }
+    return result.rowCount > 0;
+  }
+
+  /** Saved captures whose offer is blocklisted (pipeline skip helper). */
+  async function listBlockedProductDetailIds(ids) {
+    const list = [...new Set((ids ?? []).map(Number).filter((value) => Number.isInteger(value) && value > 0))];
+    if (!list.length) return [];
+    const result = await pool.query(`SELECT details.id FROM product_details details
+      JOIN product_blocklist blocked ON blocked.offer_id=details.offer_id
+      WHERE details.id = ANY($1::bigint[])`, [list]);
+    return result.rows.map((row) => Number(row.id));
+  }
+
+  async function listShopifyPublicationsForDetail(productDetailId) {
+    const result = await pool.query(
+      'SELECT * FROM product_shopify_publications WHERE product_detail_id=$1 ORDER BY last_synced_at DESC',
+      [productDetailId]);
+    return result.rows;
+  }
+
   async function createProductRagSync(productDetailId, values = {}) {
     const saved = await pool.query(`INSERT INTO product_rag_syncs
       (product_detail_id, trigger_type, canonical_product_id, active, request_summary)
@@ -3269,7 +3356,10 @@ export function createDatabase(databaseUrl) {
     saveWordPressArrivalDate, auditAndRepairProductPrices,
     saveWordPressPublication, applyWordpressPostStatus, recordWordpressStatusEvent,
     listWordpressStatusReconcileTargets, listSplitContentWpPostEntries,
-    pruneWordpressStatusEvents, createProductRagSync, startProductRagSync,
+    pruneWordpressStatusEvents,
+    isOfferBlocked, listBlockedOfferIds, listProductBlocklist, upsertProductBlocklist,
+    removeProductBlocklist, listBlockedProductDetailIds, listShopifyPublicationsForDetail,
+    createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,
     getProductSplitPlan, saveProductSplitPlan,
