@@ -290,8 +290,10 @@ function portalBadge(it){
   const tips = ['Portal staging'];
   if (it.portalProductId) tips.push('ID ' + it.portalProductId);
   if (it.portalState === 'published') {
-    tips.push(it.portalLive === null ? '实时状态未核对'
-      : (it.portalLive ? '实时核对：存在于 staging 目录' : '实时核对：不在 staging 目录（可能已移除）'));
+    if (it.portalLive === true) tips.push('实时核对：存在于 staging 目录');
+    else if (it.portalLive === false && it.portalTarget === 'staging') tips.push('实时核对：不在 staging 目录（可能已移除）');
+    else if (it.portalLive === false) tips.push('实时核对：不在 staging 目录（早期记录未标记目标，可能发布到生产目录）');
+    else tips.push('实时状态未核对');
   } else if (it.portalState === 'archived') {
     tips.push(it.portalTarget === 'staging' ? '已从 staging 移除/归档' : '历史记录');
   }
