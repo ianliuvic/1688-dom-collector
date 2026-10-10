@@ -2111,13 +2111,23 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       .sort((left, right) => (left.image_type !== right.image_type
         ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)));
     const source = selected.length ? [...selected, ...fallback] : fallback;
+    // The selected list and the gallery overlap by design; collapse identical
+    // rows (same image id) silently so they do not read as "removed" copies.
+    const seenIds = new Set();
+    const ordered = [];
+    for (const image of source) {
+      const imageId = String(image.id);
+      if (seenIds.has(imageId)) continue;
+      seenIds.add(imageId);
+      ordered.push(image);
+    }
     const removedById = new Map((Array.isArray(raw.imageDedupe?.removed) ? raw.imageDedupe.removed : [])
       .map((entry) => [String(entry?.imageId ?? ''), String(entry?.reason ?? 'duplicate')]));
     const seenUrl = new Set();
     const seenSha = new Set();
     const final = [];
     const excluded = [];
-    for (const image of source) {
+    for (const image of ordered) {
       const base = imagePublicPath(image.storage_path);
       const entry = { id: String(image.id), type: image.image_type,
         thumb: base ? `${base}?w=160` : (image.source_url || null) };
