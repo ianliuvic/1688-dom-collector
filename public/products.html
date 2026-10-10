@@ -85,6 +85,10 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .pp-table th,.pp-table td{border-bottom:1px solid var(--line);padding:3px 6px;text-align:left;vertical-align:top}
 .pp-table th{color:var(--muted);font-weight:600;font-size:11px}
 .pp-table tr:last-child td{border-bottom:none}
+.pp-th-group th.g-norm{background:#eff8ff;color:#175cd3;font-size:11px}
+.pp-th-group th.g-raw{background:#f2f4f7;color:#475467;font-size:11px}
+.pp-table td.col-norm{background:#f8fbff}
+.pp-table td.col-raw-start{border-left:2px solid var(--line)}
 .pp-swatches{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 .pp-swatch{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:6px;padding:2px 8px 2px 3px;font-size:12px;background:#fff}
 .pp-swatch img{width:26px;height:26px;object-fit:cover;border-radius:4px;display:block;background:#f2f4f7}
@@ -1188,9 +1192,25 @@ function fmtMoney(value, currency){
   return unit + Number(value).toFixed(value % 1 === 0 ? 0 : 2);
 }
 
-// One combined table for the raw SKU matrix and the normalized composed SKUs:
-// when normalization exists the raw rows are matched into the composed rows
-// (skuKey or colour+size), and any leftover raw rows are shown as 未规范化.
+// One combined table for the raw 1688 SKU matrix and the normalized composed
+// SKUs: rows are matched by skuKey (or raw colour+size), the left (蓝色) block
+// is the normalization result and the right (灰色) block the 1688 raw data.
+function rawVariantParts(row){
+  let colour = row.colour ?? null;
+  let size = row.size ?? null;
+  const key = String(row.skuKey ?? '');
+  if ((!colour || !size) && key) {
+    for (const part of key.split('|')) {
+      const idx = part.indexOf(':');
+      if (idx < 0) continue;
+      const name = part.slice(0, idx).trim().toLowerCase();
+      const value = part.slice(idx + 1).trim();
+      if (!colour && ['color', 'colour', '颜色'].includes(name)) colour = value;
+      if (!size && ['size', '尺码', '尺寸', '码数'].includes(name)) size = value;
+    }
+  }
+  return { colour, size, key };
+}
 function buildVariantsCard(data){
   const currency = (data.price && data.price.currency) || 'CNY';
   const rawRows = (data.variants && data.variants.rows) || [];
@@ -1199,9 +1219,9 @@ function buildVariantsCard(data){
     const rows = rawRows.slice(0, 20).map((row) => '<tr><td>' + esc(row.skuKey) + '</td>'
       + '<td>' + fmtMoney(row.price, currency) + '</td><td>' + (row.stock === null ? '—' : row.stock) + '</td>'
       + '<td class="pp-muted">' + esc(row.skuId || '') + '</td></tr>').join('');
-    return '<div class="pp-card pp-wide"><div class="pp-card-title">变体矩阵（' + ((data.variants && data.variants.total) || 0) + ' 行，显示前 20）</div>'
-      + '<table class="pp-table"><thead><tr><th>变体</th><th>源价</th><th>库存</th><th>skuId</th></tr></thead><tbody>' + rows + '</tbody></table>'
-      + '<div class="pp-muted" style="margin-top:4px">尚未运行变体规范化：以上为原始变体矩阵。</div></div>';
+    return '<div class="pp-card pp-wide"><div class="pp-card-title">变体矩阵（' + ((data.variants && data.variants.total) || 0) + ' 行，显示前 20 · 1688 原始数据）</div>'
+      + '<table class="pp-table"><thead><tr><th>原始变体</th><th>源价</th><th>库存</th><th>skuId</th></tr></thead><tbody>' + rows + '</tbody></table>'
+      + '<div class="pp-muted" style="margin-top:4px">尚未运行变体规范化：以上全部为 1688 原始变体矩阵。</div></div>';
   }
   const matchedKeys = new Set();
   for (const row of normSkus) {
@@ -1219,25 +1239,48 @@ function buildVariantsCard(data){
     extraRaw.push({ raw, colour, size });
   }
   const body = [];
+  const colourInfo = new Map();
+  for (const colour of ((data.normalization.result && data.normalization.result.colours) || [])) {
+    if (colour && colour.source) colourInfo.set(String(colour.source), colour);
+  }
   for (const row of normSkus.slice(0, 40)) {
-    body.push('<tr><td><code>' + esc(row.sku) + '</code>' + (row.pendingStyleNumber ? ' <span class="pp-chip gray">待款号</span>' : '') + '</td>'
-      + '<td>' + esc(row.colour || '') + (row.code ? ' <span class="pp-muted">' + esc(row.code) + '</span>' : '') + '</td>'
-      + '<td>' + esc(row.sizeText || row.size || '') + '</td>'
+    const raw = rawVariantParts(row);
+    const rawText = [raw.colour, raw.size].filter(Boolean).join(' / ');
+    const info = colourInfo.get(String(row.colour ?? '')) || null;
+    const normColourText = (info && info.text) ? String(info.text) : '';
+    const normCode = (info && info.code) ? String(info.code) : (row.code ? String(row.code) : '');
+    const normColourCell = normColourText
+      ? esc(normColourText) + (normCode ? ' <span class="pp-muted">' + esc(normCode) + '</span>' : '')
+      : (normCode ? '<span class="pp-muted">' + esc(normCode) + '</span>' : '<span class="pp-muted">—</span>');
+    body.push('<tr>'
+      + '<td class="col-norm"><code>' + esc(row.sku) + '</code>' + (row.pendingStyleNumber ? ' <span class="pp-chip gray">待款号</span>' : '') + '</td>'
+      + '<td class="col-norm">' + normColourCell + '</td>'
+      + '<td class="col-norm">' + esc(row.sizeText || row.size || '') + '</td>'
+      + '<td class="col-raw-start pp-muted"' + (raw.key ? ' title="' + esc(raw.key) + '"' : '') + '>'
+        + esc(rawText || raw.key || '—') + '</td>'
       + '<td>' + fmtMoney(row.price, currency) + '</td><td>' + (row.stock === null ? '—' : row.stock) + '</td>'
       + '<td class="pp-muted">' + esc(row.skuId || '') + '</td></tr>');
   }
   for (const item of extraRaw.slice(0, Math.max(0, 40 - body.length))) {
-    body.push('<tr><td><span class="pp-chip gray">未规范化</span></td>'
-      + '<td class="pp-muted">' + esc(String(item.colour ?? item.raw.skuKey ?? '')) + '</td>'
-      + '<td class="pp-muted">' + esc(String(item.size ?? '')) + '</td>'
+    const rawText = [String(item.colour ?? ''), String(item.size ?? '')].filter(Boolean).join(' / ');
+    body.push('<tr>'
+      + '<td class="col-norm"><span class="pp-chip warn">未规范化（发布时舍弃）</span></td>'
+      + '<td class="col-norm pp-muted">—</td><td class="col-norm pp-muted">—</td>'
+      + '<td class="col-raw-start pp-muted"' + (item.raw.skuKey ? ' title="' + esc(item.raw.skuKey) + '"' : '') + '>'
+        + esc(rawText || item.raw.skuKey || '—') + '</td>'
       + '<td>' + fmtMoney(item.raw.price, currency) + '</td><td>' + (item.raw.stock === null ? '—' : item.raw.stock) + '</td>'
       + '<td class="pp-muted">' + esc(item.raw.skuId || '') + '</td></tr>');
   }
+  const head = '<thead>'
+    + '<tr class="pp-th-group"><th class="g-norm" colspan="3">变体规范化结果（LLM）</th>'
+    + '<th class="g-raw" colspan="4">1688 原始数据</th></tr>'
+    + '<tr><th class="g-norm">组合 SKU</th><th class="g-norm">规范化颜色</th><th class="g-norm">规范化尺码</th>'
+    + '<th class="col-raw-start">原始变体</th><th>源价</th><th>库存</th><th>skuId</th></tr></thead>';
   return '<div class="pp-card pp-wide"><div class="pp-card-title">变体与组合 SKU（' + normSkus.length + ' 行'
     + (extraRaw.length ? ' + ' + extraRaw.length + ' 行未规范化' : '') + '）</div>'
-    + '<table class="pp-table"><thead><tr><th>组合 SKU</th><th>颜色</th><th>尺码</th><th>源价</th><th>库存</th><th>skuId</th></tr></thead><tbody>'
-    + body.join('') + '</tbody></table>'
-    + '<div class="pp-muted" style="margin-top:4px">组合 SKU = 款号-颜色缩写-尺码；未规范化的行发布时会被舍弃。</div></div>';
+    + '<table class="pp-table">' + head + '<tbody>' + body.join('') + '</tbody></table>'
+    + '<div class="pp-muted" style="margin-top:4px">蓝色列为规范化结果（组合 SKU = 款号-颜色缩写-尺码），灰色列为 1688 原始数据；'
+    + '「原始变体」悬停可见完整原始键；未规范化的行发布时会被舍弃。</div></div>';
 }
 
 async function togglePublishPreview(id){
@@ -1371,7 +1414,7 @@ function renderPublishPreview(id, data){
     + '<button type="button" data-pp-close="' + id + '">收起</button>'
     + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（只读）</span></div>'
     + '<div class="pp-chips">' + chips.join('') + '</div>'
-    + '<div class="pp-grid">' + normCard + translationCard + pricingCard + merch + imagesCard + variantsCard + '</div>';
+    + '<div class="pp-grid">' + normCard + variantsCard + translationCard + pricingCard + merch + imagesCard + '</div>';
 }
 
 async function runImageDedupe(id, button){
