@@ -95,6 +95,8 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .pp-thumbs{display:flex;flex-wrap:wrap;gap:5px}
 .pp-thumbs img{width:52px;height:52px;object-fit:cover;border-radius:4px;border:1px solid var(--line);background:#f2f4f7;display:block}
 .pp-thumbs img.removed{opacity:.3;filter:grayscale(1)}
+.pp-thumbs-lg img{width:64px;height:64px}
+.pp-thumbs-lg img.removed{opacity:.3;filter:grayscale(1)}
 .pp-muted{font-size:12px;color:var(--muted)}
 .pp-tags{display:flex;flex-wrap:wrap;gap:5px}
 .pp-tag{font-size:11.5px;border:1px solid var(--line);border-radius:999px;padding:1px 9px;background:#fff;color:var(--text)}
@@ -1384,16 +1386,18 @@ function renderPublishPreview(id, data){
   const publishFinal = publishInfo ? (publishInfo.final || []) : (data.images.gallery || []);
   const publishExcluded = publishInfo ? (publishInfo.excluded || []) : [];
   const removedLabel = { exact: '内容完全重复', near: '近似重复', 'same-url': '同一图片 URL', llm: '模型判定冗余' };
-  const publishThumbs = '<div class="pp-thumbs">'
+  const publishThumbs = '<div class="pp-thumbs pp-thumbs-lg">'
     + publishFinal.map((image) => '<img class="zoomable" src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">').join('')
     + publishExcluded.map((image) => '<img class="zoomable removed" src="' + esc(image.thumb) + '" title="'
       + esc('已剔除，不会发布：' + (removedLabel[image.reason] || image.reason)) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">').join('')
     + '</div>';
-  const imagesCard = '<div class="pp-card"><div class="pp-card-title">颜色与尺码（'
-    + (data.images.variantsTranslated ? '发布用译文' : '未翻译，显示采集原文') + '）</div>'
-    + (swatchHtml ? '<div class="pp-swatches">' + swatchHtml + '</div>' : '<div class="pp-muted">无颜色色卡</div>')
-    + (sizesHtml ? '<div class="pp-row" style="margin-bottom:6px"><span class="pp-muted" style="margin-right:6px">尺码</span><span class="pp-tags">' + sizesHtml + '</span></div>' : '')
-    + '<div class="pp-card-title" style="margin-top:6px">将发布到 WP 的图片（' + publishFinal.length + ' 张'
+  // Dedicated module ordered right after the variant tables and before the
+  // copy: the publisher generates the WP payload images (post-dedupe) before
+  // the English copy, so the preview mirrors that order.
+  const publishImagesCard = '<div class="pp-card pp-wide"><div class="pp-card-title">发布图片（去重后）'
+    + (data.images.dedupe && data.images.dedupe.updatedAt
+      ? ' · 去重 ' + esc(new Date(data.images.dedupe.updatedAt).toLocaleString()) : '') + '</div>'
+    + '<div class="pp-muted" style="margin-bottom:6px">将发布到 WP 的图片（' + publishFinal.length + ' 张'
     + (publishExcluded.length ? '，灰色 ' + publishExcluded.length + ' 张已剔除' : '') + '）</div>'
     + publishThumbs
     + '<div class="pp-muted" style="margin-top:6px">WP 商品图 = 主图+图库（去重后）· 详情图 ' + data.images.descriptionCount + ' 张（不进入 WP 商品图，仅选品/展示用）'
@@ -1402,8 +1406,14 @@ function renderPublishPreview(id, data){
     + (data.images.dedupe
       ? '<div class="pp-muted" style="margin-top:4px">图片去重：剔除 <b>' + (data.images.dedupe.removed || []).length + '</b> 张（精确 '
         + ((data.images.dedupe.counts || {}).exact || 0) + ' / 近似 ' + ((data.images.dedupe.counts || {}).near || 0)
-        + ' / 模型 ' + ((data.images.dedupe.counts || {}).llm || 0) + '）· ' + esc(new Date(data.images.dedupe.updatedAt).toLocaleString()) + '</div>'
+        + ' / 模型 ' + ((data.images.dedupe.counts || {}).llm || 0) + '）</div>'
       : '<div class="pp-muted" style="margin-top:4px">图片去重：未运行（发布时仍会做实时精确哈希去重）</div>')
+    + '</div>';
+  const imagesCard = '<div class="pp-card"><div class="pp-card-title">颜色与尺码（'
+    + (data.images.variantsTranslated ? '发布用译文' : '未翻译，显示采集原文') + '）</div>'
+    + (swatchHtml ? '<div class="pp-swatches">' + swatchHtml + '</div>' : '<div class="pp-muted">无颜色色卡</div>')
+    + (sizesHtml ? '<div class="pp-row" style="margin-bottom:6px"><span class="pp-muted" style="margin-right:6px">尺码</span><span class="pp-tags">' + sizesHtml + '</span></div>' : '')
+    + '<div class="pp-muted" style="margin-top:4px">色卡为变体图（不占用商品图集位置，发布图集见「发布图片（去重后）」）。</div>'
     + '</div>';
 
   const variantsCard = buildVariantsCard(data);
@@ -1445,7 +1455,7 @@ function renderPublishPreview(id, data){
     + '<button type="button" data-pp-close="' + id + '">收起</button>'
     + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（只读）</span></div>'
     + '<div class="pp-chips">' + chips.join('') + '</div>'
-    + '<div class="pp-grid">' + normCard + variantsCard + translationCard + pricingCard + merch + imagesCard + '</div>';
+    + '<div class="pp-grid">' + normCard + variantsCard + publishImagesCard + translationCard + pricingCard + merch + imagesCard + '</div>';
 }
 
 async function runImageDedupe(id, button){
