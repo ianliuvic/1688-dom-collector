@@ -97,6 +97,20 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .pp-thumbs img.removed{opacity:.3;filter:grayscale(1)}
 .pp-thumbs-lg img{width:64px;height:64px}
 .pp-thumbs-lg img.removed{opacity:.3;filter:grayscale(1)}
+.norm-edit-btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:2px 9px;font-size:11.5px;cursor:pointer}
+.norm-edit-btn:hover{border-color:#98a2b3}
+.pp-edit-btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:3px 12px;font-size:11.5px;cursor:pointer}
+.pp-edit-btn:hover{border-color:#98a2b3}
+.pick-grid{display:flex;flex-wrap:wrap;gap:6px;max-height:52vh;overflow:auto;padding:4px 2px}
+.pick-img{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px;cursor:pointer;display:flex;flex-direction:column;gap:3px;align-items:center;width:114px}
+.pick-img img{width:102px;height:102px;object-fit:cover;border-radius:6px;background:#f2f4f7;display:block}
+.pick-img:hover{border-color:#98a2b3}
+.pick-img-meta{font-size:11px;color:#475467;text-align:center}
+.pub-edit-strip{display:flex;flex-wrap:wrap;gap:8px;min-height:84px;border:1px dashed var(--line);border-radius:8px;padding:8px;margin:6px 0}
+.pub-edit-img{position:relative;cursor:grab}
+.pub-edit-img img{width:84px;height:84px;object-fit:cover;border-radius:6px;border:1px solid var(--line);display:block;background:#f2f4f7}
+.pub-edit-img.dragging{opacity:.4}
+.pub-edit-x{position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;border:1px solid var(--line);background:#fff;font-size:11px;line-height:1;padding:0;cursor:pointer;z-index:1}
 .pp-muted{font-size:12px;color:var(--muted)}
 .pp-tags{display:flex;flex-wrap:wrap;gap:5px}
 .pp-tag{font-size:11.5px;border:1px solid var(--line);border-radius:999px;padding:1px 9px;background:#fff;color:var(--text)}
@@ -593,6 +607,7 @@ async function setBundleStatus(id, value, stateEl){
 
 // --- bundle split editor -----------------------------------------------------
 const SPLITS = new Map();
+const PP_DATA = new Map();
 const SPLIT_CONTENTS = new Map();
 const SPLIT_IMAGES = new Map();
 const SPLIT_PUBLISH_SETS = new Map();
@@ -1323,6 +1338,7 @@ async function togglePublishPreview(id){
 function renderPublishPreview(id, data){
   const panel = document.getElementById('pp-panel-' + id);
   if (!panel) return;
+  PP_DATA.set(String(id), data);
   const chip = (label, cls) => '<span class="pp-chip ' + (cls || '') + '">' + label + '</span>';
   const chips = [];
   chips.push(data.wp.status
@@ -1333,6 +1349,14 @@ function renderPublishPreview(id, data){
   if (/^\d{10,13}$/.test(offerIdText)) {
     chips.push('<a class="pp-chip info" href="https://detail.1688.com/offer/' + esc(offerIdText)
       + '.html" target="_blank" rel="noopener" title="打开 1688 原商品页">原1688链接 ↗</a>');
+  }
+  if (data.edits && data.edits.lastEditAt) {
+    chips.push(data.edits.pending
+      ? '<span class="pp-chip warn" title="' + esc('最近修改：' + String(data.edits.lastEditAt || '').slice(0, 19) + ' · 尚未同步到 WP') + '">有未发布修改</span>'
+      : chip('已同步', 'gray'));
+  }
+  if (data.portal && data.portal.stagingStale) {
+    chips.push('<span class="pp-chip warn" title="该产品已发布到 Portal staging，但 WP 内容在上次 staging 同步之后又有更新">staging 有变化待推送</span>');
   }
   chips.push(data.gates.hasTranslation ? chip('已翻译', 'ok') : chip('未翻译（发布前需翻译）', 'bad'));
   chips.push(data.gates.priceVerified ? chip('可信价格', 'ok') : chip('价格未核实', 'warn'));
@@ -1392,7 +1416,7 @@ function renderPublishPreview(id, data){
   const publishInfo = data.images.publish || null;
   const publishFinal = publishInfo ? (publishInfo.final || []) : (data.images.gallery || []);
   const publishExcluded = publishInfo ? (publishInfo.excluded || []) : [];
-  const removedLabel = { exact: '内容完全重复', near: '近似重复', 'same-url': '同一图片 URL', llm: '模型判定冗余' };
+  const removedLabel = { exact: '内容完全重复', near: '近似重复', 'same-url': '同一图片 URL', llm: '模型判定冗余', manual: '手动移除' };
   const publishThumbs = '<div class="pp-thumbs pp-thumbs-lg">'
     + publishFinal.map((image) => '<img class="zoomable" src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">').join('')
     + publishExcluded.map((image) => '<img class="zoomable removed" src="' + esc(image.thumb) + '" title="'
@@ -1404,8 +1428,12 @@ function renderPublishPreview(id, data){
   const publishImagesCard = '<div class="pp-card pp-wide"><div class="pp-card-title">发布图片（去重后）'
     + (data.images.dedupe && data.images.dedupe.updatedAt
       ? ' · 去重 ' + esc(new Date(data.images.dedupe.updatedAt).toLocaleString()) : '') + '</div>'
-    + '<div class="pp-muted" style="margin-bottom:6px">将发布到 WP 的图片（' + publishFinal.length + ' 张'
-    + (publishExcluded.length ? '，灰色 ' + publishExcluded.length + ' 张已剔除' : '') + '）</div>'
+    + '<div class="pp-muted" style="margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+    + '<span>将发布到 WP 的图片（' + publishFinal.length + ' 张'
+    + (publishExcluded.length ? '，灰色 ' + publishExcluded.length + ' 张已剔除' : '') + '）'
+    + (data.edits && data.edits.manualImageOrder ? ' · 已手动调整' : '') + '</span>'
+    + '<button type="button" class="pp-edit-btn" data-pub-edit="' + esc(String(data.productDetailId)) + '">编辑…</button>'
+    + '</div>'
     + publishThumbs
     + '<div class="pp-muted" style="margin-top:6px">WP 商品图 = 主图+图库（去重后）· 详情图 ' + data.images.descriptionCount + ' 张（不进入 WP 商品图，仅选品/展示用）'
     + (data.images.publishedImageCount !== null ? ' · 上次已发布 ' + data.images.publishedImageCount + ' 张 / 色卡 ' + (data.images.publishedColorCount || 0) + ' / 尺码 ' + (data.images.publishedSizeCount || 0) : '')
@@ -1430,17 +1458,20 @@ function renderPublishPreview(id, data){
     ? '<div class="pp-card pp-wide"><div class="pp-card-title">变体规范化（LLM 建议'
       + (data.normalization.model ? ' · ' + esc(data.normalization.model) : '')
       + (data.normalization.updatedAt ? ' · ' + esc(new Date(data.normalization.updatedAt).toLocaleString()) : '') + '）</div>'
-      + '<table class="pp-table"><thead><tr><th>swatch 图</th><th>规范化文本</th><th>SKU 缩写</th><th>原文</th><th>置信度</th></tr></thead><tbody>'
+      + '<table class="pp-table"><thead><tr><th>swatch 图</th><th>规范化文本</th><th>SKU 缩写</th><th>原文</th><th>置信度</th><th>操作</th></tr></thead><tbody>'
       + (norm.colours || []).map((colour) => '<tr>'
         + '<td>' + (colour.thumb
           ? '<img class="zoomable" src="' + esc(colour.thumb) + '" style="width:26px;height:26px;object-fit:cover;border-radius:4px;display:block" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">'
           : '<span class="pp-muted">无</span>') + '</td>'
         + '<td>' + (colour.text ? esc(colour.text) : '<span class="pp-muted">待人工</span>')
+        + (colour.manual ? ' <span class="pp-chip info">手动</span>' : '')
         + (colour.placeholder ? ' <span class="pp-chip warn">占位</span>' : '')
         + (colour.needsReview ? ' <span class="pp-chip gray">待复核</span>' : '') + '</td>'
         + '<td>' + (colour.code ? '<code>' + esc(colour.code) + '</code>' : '—') + '</td>'
         + '<td class="pp-muted">' + esc(colour.source) + '</td>'
         + '<td>' + (colour.confidence === null || colour.confidence === undefined ? '—' : colour.confidence) + '</td>'
+        + '<td><button type="button" class="norm-edit-btn" data-norm-edit-id="' + esc(String(data.productDetailId))
+        + '" data-norm-edit="' + esc(String(colour.source)) + '">编辑</button></td>'
         + '</tr>').join('')
       + '</tbody></table>'
       + ((norm.sizes || []).length
@@ -1461,14 +1492,28 @@ function renderPublishPreview(id, data){
   // tables, so it is hidden to avoid duplicate content.
   const normCoversVariants = !!(norm
     && (((norm.colours || []).length) || ((norm.sizes || []).length)));
+  // Publish action state: only for products already on WordPress, with pending
+  // manual edits, and never for bundle listings (they use the split flow).
+  const isBundleGate = Boolean(data.gates && data.gates.bundle
+    && data.gates.bundle.status === 'bundle' && data.gates.bundle.manual !== 'clear');
+  const hasPublication = Boolean(data.gates && data.gates.hasPublication);
+  const publishPending = Boolean(data.edits && data.edits.pending);
+  const publishEnabled = hasPublication && !isBundleGate && publishPending;
+  const publishTitle = !hasPublication
+    ? '尚未发布到 WordPress，请走正常发布流程'
+    : isBundleGate ? '捆绑产品请使用拆分/发布流程'
+      : publishPending ? '将手动修改同步到 WordPress（保持产品当前状态）'
+        : '当前没有未发布的修改';
 
   panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 发布前预览</b>'
     + '<button type="button" data-pp-normalize="' + id + '">运行变体规范化（LLM）</button>'
     + '<button type="button" data-pp-dedupe="' + id + '">图片去重（hash+LLM）</button>'
     + '<button type="button" data-pp-retranslate="' + id + '" title="按当前图片重新生成英文标题与描述（本地生效，发布后更新 WP）">重新生成文案</button>'
+    + '<button type="button" data-pp-publish="' + id + '"' + (publishEnabled ? '' : ' disabled')
+    + ' title="' + esc(publishTitle) + '">发布更改到 WP</button>'
     + '<button type="button" data-pp-reload="' + id + '">刷新</button>'
     + '<button type="button" data-pp-close="' + id + '">收起</button>'
-    + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（只读）</span></div>'
+    + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（可编辑）</span></div>'
     + '<div class="pp-chips">' + chips.join('') + '</div>'
     + '<div class="pp-grid">' + normCard + variantsCard + publishImagesCard + translationCard + pricingCard + merch
     + (normCoversVariants ? '' : imagesCard) + '</div>';
@@ -1538,6 +1583,265 @@ async function runRetranslation(id, button){
   }
 }
 
+// --- review-console editing (normalization swatches + publish image set) -----
+let NORM_EDIT = null;
+let PUB_EDIT = null;
+let IMAGE_PICKER = null;
+
+async function reloadPanel(id){
+  const existing = document.getElementById('pp-panel-' + id);
+  if (existing) existing.remove();
+  await togglePublishPreview(id);
+}
+
+function openNormEdit(id, source){
+  const data = PP_DATA.get(String(id));
+  const norm = data && data.normalization && data.normalization.result;
+  const colour = norm && (norm.colours || []).find((entry) => String(entry.source) === String(source));
+  if (!colour) return;
+  NORM_EDIT = { id: String(id), source: String(source), text: colour.text || '', imageId: colour.imageId || null };
+  renderNormEditModal();
+}
+function renderNormEditModal(){
+  const st = NORM_EDIT;
+  if (!st) return;
+  const data = PP_DATA.get(st.id);
+  const colour = (((data && data.normalization && data.normalization.result) || {}).colours || [])
+    .find((entry) => String(entry.source) === st.source) || {};
+  const poolMatch = st.imageId
+    ? ((data && data.images && data.images.pool) || []).find((entry) => entry.id === String(st.imageId))
+    : null;
+  const thumb = (poolMatch && poolMatch.thumb) || colour.thumb || null;
+  showModal('<div class="modal-card" style="max-width:760px"><h3>编辑 swatch：' + esc(st.source) + '</h3>'
+    + '<div class="row-line">规范化文本：<input id="normEditText" value="' + esc(st.text) + '" maxlength="60"'
+    + ' style="min-width:280px;border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:13px"></div>'
+    + '<div class="row-line">swatch 图：' + (thumb
+      ? '<img src="' + esc(thumb) + '" style="width:46px;height:46px;object-fit:cover;border-radius:6px;border:1px solid var(--line);vertical-align:middle" referrerpolicy="no-referrer" alt=""> '
+      : '<span class="pp-muted">无</span> ')
+    + '<button type="button" class="ghost" id="normEditPick">选择图片…</button></div>'
+    + '<div class="row-line muted">保存后直接写入规范化结果并标记「手动」；重新运行「变体规范化（LLM）」会覆盖本次修改。</div>'
+    + '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button>'
+    + '<button class="primary" id="normEditSave">保存</button></div>'
+    + '<div class="row-line warn" id="normEditError"></div></div>');
+  wireModalClose();
+  const save = document.getElementById('normEditSave');
+  if (save) save.addEventListener('click', () => { void saveNormEdit(); });
+  const pick = document.getElementById('normEditPick');
+  if (pick) pick.addEventListener('click', () => {
+    openImagePicker(st.id, { title: '选择 swatch 图片', onPick: (image) => {
+      if (NORM_EDIT) NORM_EDIT.imageId = image.id;
+      renderNormEditModal();
+    } });
+  });
+}
+async function saveNormEdit(){
+  const st = NORM_EDIT;
+  if (!st) return;
+  const input = document.getElementById('normEditText');
+  if (input) st.text = input.value;
+  const btn = document.getElementById('normEditSave');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  try {
+    const res = await fetch('/api/product-details/' + st.id + '/variant-normalization', {
+      method: 'PATCH', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ source: st.source, text: st.text, imageId: st.imageId }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.reason || body.error)) || ('HTTP ' + res.status));
+    const id = st.id;
+    NORM_EDIT = null;
+    closeModal();
+    await reloadPanel(id);
+  } catch (e) {
+    const err = document.getElementById('normEditError');
+    if (err) err.textContent = '保存失败：' + String((e && e.message) || e);
+    if (btn) { btn.disabled = false; btn.textContent = '保存'; }
+  }
+}
+
+// Shared image picker over the product's main/gallery/description images.
+function openImagePicker(id, { onPick = null, excludeIds = [], title = '选择图片' } = {}){
+  const data = PP_DATA.get(String(id));
+  if (!data || !data.images) return;
+  IMAGE_PICKER = { id: String(id), onPick, excludeIds: new Set((excludeIds || []).map(String)) };
+  const typeLabel = { main: '主图', gallery: '图库', description: '详情图' };
+  const cells = (data.images.pool || []).map((image) => {
+    const dim = IMAGE_PICKER.excludeIds.has(image.id) ? ' style="opacity:.35"' : '';
+    return '<button type="button" class="pick-img" data-pick-img="' + esc(image.id) + '"' + dim + '>'
+      + '<img src="' + esc(image.thumb || image.source || '') + '" loading="lazy" referrerpolicy="no-referrer" alt="">'
+      + '<span class="pick-img-meta">' + esc(typeLabel[image.type] || image.type)
+      + (image.inPublish ? ' · <span style="color:#067647">已在发布集</span>' : '')
+      + (image.local === false ? ' · <span style="color:#b54708">需下载</span>' : '') + '</span>'
+      + '</button>';
+  }).join('');
+  showModal('<div class="modal-card" style="max-width:880px"><h3>' + esc(title) + '（' + (data.images.pool || []).length + ' 张）</h3>'
+    + '<div class="pick-grid">' + (cells || '<div class="pp-muted">没有可选图片</div>') + '</div>'
+    + '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button></div></div>');
+  wireModalClose();
+  document.querySelectorAll('#modalRoot button[data-pick-img]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const imageId = String(btn.dataset.pickImg);
+      const image = (data.images.pool || []).find((entry) => entry.id === imageId);
+      const handler = IMAGE_PICKER && IMAGE_PICKER.onPick;
+      IMAGE_PICKER = null;
+      closeModal();
+      if (handler && image) handler(image);
+    });
+  });
+}
+
+function enableDragReorder(container){
+  let dragEl = null;
+  container.querySelectorAll('[draggable="true"]').forEach((el) => {
+    el.addEventListener('dragstart', (e) => {
+      dragEl = el;
+      el.classList.add('dragging');
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      dragEl = null;
+      syncPubEditOrder();
+    });
+    el.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      if (!dragEl || dragEl === el) return;
+      const rect = el.getBoundingClientRect();
+      const after = (e.clientX - rect.left) > rect.width / 2;
+      container.insertBefore(dragEl, after ? el.nextSibling : el);
+    });
+  });
+}
+function syncPubEditOrder(){
+  const strip = document.getElementById('pubEditStrip');
+  if (!strip || !PUB_EDIT) return;
+  const ids = [...strip.querySelectorAll('[data-pub-img]')].map((el) => String(el.dataset.pubImg));
+  const byId = new Map(PUB_EDIT.items.map((item) => [item.id, item]));
+  PUB_EDIT.items = ids.map((imageId) => byId.get(imageId)).filter(Boolean);
+}
+
+function openPublishImagesEdit(id){
+  const data = PP_DATA.get(String(id));
+  if (!data || !data.images || !data.images.publish) return;
+  PUB_EDIT = { id: String(id), items: (data.images.publish.final || []).map((entry) => ({
+    id: String(entry.id), thumb: entry.thumb, type: entry.type,
+  })) };
+  renderPubEditModal();
+}
+function renderPubEditModal(){
+  const st = PUB_EDIT;
+  if (!st) return;
+  const items = st.items.map((item) => '<div class="pub-edit-img" draggable="true" data-pub-img="' + esc(item.id) + '">'
+    + '<img src="' + esc(item.thumb || '') + '" referrerpolicy="no-referrer" alt="">'
+    + '<button type="button" class="pub-edit-x" data-pub-remove="' + esc(item.id) + '" title="移除">✕</button>'
+    + '</div>').join('');
+  showModal('<div class="modal-card" style="max-width:880px"><h3>编辑发布图片（' + st.items.length + ' 张）</h3>'
+    + '<div class="row-line muted">拖拽调整顺序；✕ 移除；「添加图片」可加入主图/图库/详情图（被去重剔除的图也能加回）。</div>'
+    + '<div class="pub-edit-strip" id="pubEditStrip">' + (items || '<span class="pp-muted">当前为空，请添加图片</span>') + '</div>'
+    + '<div class="modal-actions" style="justify-content:space-between">'
+    + '<span><button class="ghost" id="pubEditAdd">＋ 添加图片</button> <button class="ghost" id="pubEditReset">恢复默认</button></span>'
+    + '<span><button class="ghost" data-modal-close>取消</button> <button class="primary" id="pubEditSave">保存</button></span>'
+    + '</div><div class="row-line warn" id="pubEditError"></div></div>');
+  wireModalClose();
+  document.querySelectorAll('#modalRoot button[data-pub-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!PUB_EDIT) return;
+      PUB_EDIT.items = PUB_EDIT.items.filter((item) => item.id !== String(btn.dataset.pubRemove));
+      renderPubEditModal();
+    });
+  });
+  const strip = document.getElementById('pubEditStrip');
+  if (strip) enableDragReorder(strip);
+  const add = document.getElementById('pubEditAdd');
+  if (add) add.addEventListener('click', () => {
+    openImagePicker(st.id, {
+      title: '添加图片到发布集',
+      excludeIds: st.items.map((item) => item.id),
+      onPick: (image) => {
+        if (!PUB_EDIT) return;
+        PUB_EDIT.items.push({ id: String(image.id), thumb: image.thumb || image.source, type: image.type });
+        renderPubEditModal();
+      },
+    });
+  });
+  const reset = document.getElementById('pubEditReset');
+  if (reset) reset.addEventListener('click', () => { void resetPublishImages(st.id); });
+  const save = document.getElementById('pubEditSave');
+  if (save) save.addEventListener('click', () => { void savePublishImages(); });
+}
+async function savePublishImages(){
+  const st = PUB_EDIT;
+  if (!st) return;
+  syncPubEditOrder();
+  const btn = document.getElementById('pubEditSave');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  try {
+    const res = await fetch('/api/product-details/' + st.id + '/publish-images', {
+      method: 'PUT', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ order: st.items.map((item) => Number(item.id)) }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const failed = body && Array.isArray(body.failed) && body.failed.length
+        ? '（图片 ' + body.failed.map((entry) => '#' + entry.imageId).join('、') + ' 下载失败）' : '';
+      throw new Error(((body && (body.message || body.error)) || ('HTTP ' + res.status)) + failed);
+    }
+    const id = st.id;
+    PUB_EDIT = null;
+    closeModal();
+    await reloadPanel(id);
+  } catch (e) {
+    const err = document.getElementById('pubEditError');
+    if (err) err.textContent = '保存失败：' + String((e && e.message) || e);
+    if (btn) { btn.disabled = false; btn.textContent = '保存'; }
+  }
+}
+async function resetPublishImages(id){
+  if (!window.confirm('恢复为自动发布图集（清除手动增删与排序）？')) return;
+  try {
+    const res = await fetch('/api/product-details/' + id + '/publish-images', {
+      method: 'PUT', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ reset: true }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    PUB_EDIT = null;
+    closeModal();
+    await reloadPanel(id);
+  } catch (e) {
+    const err = document.getElementById('pubEditError');
+    if (err) err.textContent = '恢复失败：' + String((e && e.message) || e);
+  }
+}
+
+// Publish the manual edits to the existing WordPress product (current status
+// preserved) and surface the Portal staging follow-up notice.
+async function runPublishChanges(id, button){
+  if (button) { button.disabled = true; button.textContent = '发布中…约 30–90 秒'; }
+  try {
+    const res = await fetch('/api/product-details/' + id + '/publish-changes', {
+      method: 'POST', headers: { accept: 'application/json' },
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    await reloadPanel(id);
+    const wp = body.wp || {};
+    const stagingNote = body.staging && body.staging.needsUpdate
+      ? '<div class="row-line warn">⚠ 该产品已发布到 Portal staging（ID ' + esc(String(body.staging.portalProductId || ''))
+        + '），本次修改尚未同步到 staging；如需更新请到「选品」页重新推送。</div>'
+      : '';
+    showModal('<div class="modal-card"><h3>✔ 已同步到 WordPress</h3>'
+      + '<div class="row-line">WP 状态：' + esc(String(wp.status || '')) + ' · 图片 ' + (wp.images ?? '—') + ' 张（+'
+      + (wp.imagesAdded || 0) + ' / −' + (wp.imagesRemoved || 0) + '）' + (wp.variantChanges ? ' · 变体名/色卡有更新' : '') + '</div>'
+      + (wp.url ? '<div class="row-line"><a href="' + esc(wp.url) + '" target="_blank" rel="noopener">查看线上页面 ↗</a></div>' : '')
+      + stagingNote
+      + '<div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
+    wireModalClose();
+  } catch (e) {
+    if (button) { button.disabled = false; button.textContent = '发布更改到 WP'; }
+    window.alert('发布失败：' + String((e && e.message) || e));
+  }
+}
+
 function unassignSplitImage(id, kind, ref, index){  const plan = SPLITS.get(String(id));
   const product = plan && (plan.products || [])[index];
   if (!product) return;
@@ -1600,6 +1904,15 @@ document.addEventListener('click', (e) => {
   if (ppDedupe) { void runImageDedupe(String(ppDedupe.dataset.ppDedupe), ppDedupe); return; }
   const ppRetranslate = e.target.closest('button[data-pp-retranslate]');
   if (ppRetranslate) { void runRetranslation(String(ppRetranslate.dataset.ppRetranslate), ppRetranslate); return; }
+  const normEdit = e.target.closest('button[data-norm-edit]');
+  if (normEdit) {
+    openNormEdit(String(normEdit.dataset.normEditId), String(normEdit.dataset.normEdit));
+    return;
+  }
+  const pubEdit = e.target.closest('button[data-pub-edit]');
+  if (pubEdit) { openPublishImagesEdit(String(pubEdit.dataset.pubEdit)); return; }
+  const ppPublish = e.target.closest('button[data-pp-publish]');
+  if (ppPublish) { void runPublishChanges(String(ppPublish.dataset.ppPublish), ppPublish); return; }
   const splitContentBtn = e.target.closest('button[data-split-content]');
   if (splitContentBtn) { void runSplitContent(String(splitContentBtn.dataset.splitContent), splitContentBtn); return; }
   const addGroup = e.target.closest('button[data-split-addgroup]');

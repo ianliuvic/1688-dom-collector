@@ -16,6 +16,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   syncWordPressProductPricing, replaceWordPressBestSellers,
   resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
   fetchWordPressProductStatuses, deleteWordPressProduct, fetchWordPressTaxonomies,
+  resolvePublishImagesDetailed,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
   resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
@@ -1944,9 +1945,53 @@ async function downloadDetailImageUrls(detail, urls) {
   return results;
 }
 
-// Variant normalization: the model proposes a swatch text/code/image for every
-// existing colour option plus standardized size labels; the server validates
-// the one-to-one mapping and stores the result for the publisher and the UI.
+// Download one stored image row that has only a source URL (used when the
+// review console picks a URL-only image for a swatch or the publish set).
+async function ensureImageDownloaded(detail, imageId) {
+  const image = (detail?.images ?? []).find((item) => String(item.id) === String(imageId));
+  if (!image) return { ok: false, reason: 'image_not_found' };
+  if (image.storage_path) return { ok: true, image };
+  const url = /^https:\/\//i.test(image.source_url || '') ? String(image.source_url) : null;
+  if (!url) return { ok: false, reason: 'no_source_url' };
+  try {
+    const response = await fetch(url, {
+      headers: { referer: 'https://detail.1688.com/', 'user-agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(45000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length < 64) throw new Error('image too small');
+    const root = path.resolve(config.storagePath, 'product-images');
+    const folder = path.resolve(root, String(detail.offer_id ?? ''));
+    if (!folder.startsWith(`${root}${path.sep}`)) throw new Error('invalid storage folder');
+    await fs.mkdir(folder, { recursive: true });
+    const extension = (url.split('?')[0].match(/\.(jpe?g|png|webp|gif|avif)$/i) || ['.jpg'])[0].toLowerCase();
+    const sha = crypto.createHash('sha256').update(bytes).digest('hex');
+    const fileName = `${String(image.image_type || 'extra').replace(/[^a-z0-9_-]/gi, '')}-${sha.slice(0, 12)}${extension}`;
+    const filePath = path.join(folder, fileName);
+    await fs.writeFile(filePath, bytes);
+    const saved = await db.addProductImage(detail.id, {
+      type: image.image_type || 'gallery',
+      sortOrder: Number(image.sort_order) || 500,
+      sourceUrl: url, storagePath: filePath,
+      mimeType: String(response.headers.get('content-type') || '').split(';')[0] || 'image/jpeg',
+      contentSha256: sha, byteSize: bytes.length,
+    });
+    return { ok: true, image: saved };
+  } catch (error) {
+    return { ok: false, reason: String(error?.message ?? error).slice(0, 200) };
+  }
+}
+
+// Append one manual edit to the detail's light audit log (last 50 entries).
+async function appendManualEditLog(productDetailId, entry) {
+  try {
+    const detail = await db.getProductDetail(productDetailId);
+    const log = Array.isArray(detail?.raw_data?.manualEditLog) ? detail.raw_data.manualEditLog : [];
+    log.push(entry);
+    await db.updateProductRawData(productDetailId, { manualEditLog: log.slice(-50) });
+  } catch { /* best effort */ }
+}
 app.post('/api/product-details/:id/normalize-variants', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
@@ -2039,12 +2084,13 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
-  const [translation, publication, sourceListings, normalization, taxonomies] = await Promise.all([
+  const [translation, publication, sourceListings, normalization, taxonomies, portal] = await Promise.all([
     db.getLatestProductTranslation(id, 'en'),
     db.getWordPressPublication(id),
     db.listShopProductSources(detail.offer_id),
     db.getVariantNormalization(id),
     getWordPressTaxonomiesCached(),
+    db.getPortalPublication(id).catch(() => null),
   ]);
   const policy = evaluateShopProductPolicy(sourceListings);
   let pricing = null;
@@ -2116,52 +2162,49 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       const base = imagePublicPath(image.storage_path);
       return { id: String(image.id), type: image.image_type, thumb: base ? `${base}?w=160` : (image.source_url || null) };
     });
-  // Final WordPress gallery, mirroring selectPublishingImages exactly:
-  // translation-selected images first then the full gallery, same-URL
-  // collapse, stored dedupe decisions drop flagged ids, and a live exact-sha
-  // guard removes exact duplicates. Detail images never enter the WP gallery.
-  const publishSet = (() => {
-    const byId = new Map((detail.images ?? []).map((image) => [String(image.id), image]));
-    const selected = (translation?.image_sources ?? [])
-      .map((source) => byId.get(String(source?.imageId)))
-      .filter(Boolean);
-    const fallback = (detail.images ?? [])
-      .filter((image) => image.image_type === 'main' || image.image_type === 'gallery')
-      .sort((left, right) => (left.image_type !== right.image_type
-        ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)));
-    const source = selected.length ? [...selected, ...fallback] : fallback;
-    // The selected list and the gallery overlap by design; collapse identical
-    // rows (same image id) silently so they do not read as "removed" copies.
-    const seenIds = new Set();
-    const ordered = [];
-    for (const image of source) {
-      const imageId = String(image.id);
-      if (seenIds.has(imageId)) continue;
-      seenIds.add(imageId);
-      ordered.push(image);
+  // Final WordPress gallery with the manual edit layer, computed by the SAME
+  // resolver the publisher uses (wordpress-publisher.js) so preview === publish.
+  const publishDetailed = (() => {
+    try {
+      return resolvePublishImagesDetailed(detail, translation, 'translated', raw?.gallery?.complete !== true);
+    } catch {
+      return { rows: [], excluded: [] };
     }
-    const removedById = new Map((Array.isArray(raw.imageDedupe?.removed) ? raw.imageDedupe.removed : [])
-      .map((entry) => [String(entry?.imageId ?? ''), String(entry?.reason ?? 'duplicate')]));
-    const seenUrl = new Set();
-    const seenSha = new Set();
-    const final = [];
-    const excluded = [];
-    for (const image of ordered) {
-      const base = imagePublicPath(image.storage_path);
-      const entry = { id: String(image.id), type: image.image_type,
-        thumb: base ? `${base}?w=160` : (image.source_url || null) };
-      const urlKey = normalizedSourceImageKey(image.source_url);
-      const dedupeReason = removedById.get(String(image.id)) ?? null;
-      if (urlKey && seenUrl.has(urlKey)) { excluded.push({ ...entry, reason: 'same-url' }); continue; }
-      if (urlKey) seenUrl.add(urlKey);
-      if (dedupeReason) { excluded.push({ ...entry, reason: dedupeReason }); continue; }
-      const sha = String(image.content_sha256 ?? '');
-      if (sha && seenSha.has(sha)) { excluded.push({ ...entry, reason: 'exact' }); continue; }
-      if (sha) seenSha.add(sha);
-      final.push(entry);
-    }
-    return { final, excluded };
   })();
+  const thumbOf = (image) => {
+    const base = imagePublicPath(image?.storage_path);
+    return base ? `${base}?w=160` : (image?.source_url || null);
+  };
+  const publishFinal = publishDetailed.rows.map((image) => ({
+    id: String(image.id), type: image.image_type, thumb: thumbOf(image),
+    source: image.source_url || null,
+  }));
+  const publishExcluded = publishDetailed.excluded.map((entry) => ({
+    id: String(entry.id), type: entry.image?.image_type ?? null,
+    thumb: thumbOf(entry.image), source: entry.image?.source_url || null,
+    reason: entry.reason,
+  }));
+  const publishIds = new Set(publishFinal.map((entry) => entry.id));
+  const publishPool = (detail.images ?? [])
+    .filter((image) => ['main', 'gallery', 'description'].includes(image.image_type))
+    .sort((left, right) => {
+      const rank = (type) => (type === 'main' ? 0 : type === 'gallery' ? 1 : 2);
+      if (rank(left.image_type) !== rank(right.image_type)) return rank(left.image_type) - rank(right.image_type);
+      return Number(left.sort_order) - Number(right.sort_order);
+    })
+    .map((image) => ({
+      id: String(image.id), type: image.image_type, thumb: thumbOf(image),
+      source: image.source_url || null, local: Boolean(image.storage_path),
+      inPublish: publishIds.has(String(image.id)),
+    }));
+  // Pending unpublished edits: any review action newer than the last WP sync.
+  const editTimes = [
+    normalization?.updated_at, raw.imageDedupe?.updatedAt, raw.publishImages?.updatedAt,
+  ].map((value) => (value ? Date.parse(value) : NaN)).filter(Number.isFinite);
+  const lastEditAt = editTimes.length ? new Date(Math.max(...editTimes)).toISOString() : null;
+  const publicationUpdatedAt = publication?.updated_at ? new Date(publication.updated_at).toISOString() : null;
+  const pendingEdits = Boolean(publication?.wp_post_id && lastEditAt
+    && (!publicationUpdatedAt || Date.parse(lastEditAt) > Date.parse(publicationUpdatedAt)));
   const payloadMeta = publication?.payload?.meta ?? {};
   const payloadColors = publication?.payload?.colors?.colors ?? [];
   const payloadSizes = publication?.payload?.sizes?.sizes ?? [];
@@ -2241,7 +2284,8 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
     },
     images: {
       gallery: galleryImages,
-      publish: { final: publishSet.final, excluded: publishSet.excluded },
+      publish: { final: publishFinal, excluded: publishExcluded },
+      pool: publishPool,
       swatches,
       sizes,
       variantsTranslated: sizesTranslated,
@@ -2251,6 +2295,24 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       publishedColorCount: payloadColors.length || null,
       publishedSizeCount: payloadSizes.length || null,
     },
+    edits: {
+      pending: pendingEdits,
+      lastEditAt,
+      publicationUpdatedAt,
+      manualImageOrder: Array.isArray(raw.publishImages?.order) ? raw.publishImages.order.length : 0,
+    },
+    portal: portal ? {
+      portalProductId: portal.portal_product_id ? String(portal.portal_product_id) : null,
+      status: portal.portal_status ?? null,
+      target: portal.result?.target ?? null,
+      lastSyncedAt: portal.last_synced_at ? String(portal.last_synced_at) : null,
+      stagingStale: Boolean(portal.portal_product_id
+        && portal.result?.target === 'staging'
+        && String(portal.portal_status ?? '').toUpperCase() !== 'ARCHIVED'
+        && publicationUpdatedAt
+        && portal.last_synced_at
+        && Date.parse(publicationUpdatedAt) > Date.parse(String(portal.last_synced_at))),
+    } : null,
     variants: {
       dimensions: raw.skuDimensions ?? [],
       rows: skuRows.slice(0, 60).map((row) => ({
@@ -2307,10 +2369,77 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
 });
 
 // Refresh re-sync for already-published, non-bundle products: rebuilds the WP
-// payload from the existing translation + the latest images (deduped) +
-// normalized variants, REUSES the attachments already on WordPress (uploads
-// only new images), keeps the stored taxonomies/material/style number (no
-// merchandising model call) and syncs to the same post. Five-way concurrency.
+// payload from the existing translation + the latest images (with the review
+// console's manual edit layer) + normalized variants, REUSES the attachments
+// already on WordPress (uploads only new images), keeps the stored
+// taxonomies/material/style number (no merchandising model call) and syncs to
+// the same post. Extracted so the bulk job and the single-product publish
+// action share one implementation.
+async function refreshPublishedProduct(productDetailId, { statusOverride = null } = {}) {
+  const detail = await db.getProductDetail(productDetailId);
+  const publication = await db.getWordPressPublication(productDetailId);
+  const translation = await db.getLatestProductTranslation(productDetailId, 'en');
+  if (!detail || !publication?.wp_post_id || !publication.payload || !translation) {
+    return { skipped: true };
+  }
+  const normalization = await db.getVariantNormalization(productDetailId);
+  const previousPayload = publication.payload;
+  const requestStatus = ['publish', 'draft', 'private', 'pending', 'future'].includes(String(statusOverride))
+    ? String(statusOverride) : 'publish';
+  const options = {
+    status: requestStatus,
+    styleNo: publication.style_no ?? '',
+    categoryMode: (previousPayload.category_ids ?? []).length ? 'manual' : 'auto',
+    categoryIds: previousPayload.category_ids ?? [],
+    tagMode: ((previousPayload.tag_ids ?? []).length || (previousPayload.tags ?? []).length) ? 'manual' : 'auto',
+    tagIds: previousPayload.tag_ids ?? [],
+    tags: previousPayload.tags ?? [],
+    primaryCategoryId: Number(previousPayload.meta?.primary_category_id) || 0,
+    material: previousPayload.meta?.material ?? '',
+    imageMode: 'translated',
+    allowUnverifiedGallery: detail.raw_data?.gallery?.complete !== true,
+    reuseMedia: true,
+    previousPayload,
+    normalizedVariants: normalization?.result
+      ? { colours: normalization.result.colours ?? [], sizes: normalization.result.sizes ?? [] }
+      : null,
+  };
+  const published = await publishProductToWordPress({
+    detail, translation, options, config,
+    optionOverrides: await db.listProductOptionOverrides(productDetailId),
+  });
+  const payload = published.payload;
+  const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  await db.saveWordPressPublication(productDetailId, {
+    translationId: translation.id, externalId: published.draft.externalId,
+    styleNo: published.draft.styleNo,
+    wpPostId: published.wordpress.post_id ?? publication.wp_post_id,
+    wpUrl: published.wordpress.permalink ?? publication.wp_url,
+    wpEditUrl: published.wordpress.edit_link ?? publication.wp_edit_url,
+    wpStatus: published.wordpress.status ?? requestStatus,
+    syncHash, payload, result: published.wordpress, lastError: null,
+  });
+  const beforeImages = new Set((previousPayload.images ?? [])
+    .map((image) => normalizedImageUrl(image?.source_url)).filter(Boolean));
+  const afterImages = new Set((payload.images ?? [])
+    .map((image) => normalizedImageUrl(image?.source_url)).filter(Boolean));
+  const removed = [...beforeImages].filter((key) => !afterImages.has(key)).length;
+  const added = [...afterImages].filter((key) => !beforeImages.has(key)).length;
+  const labelsBefore = (previousPayload.colors?.colors ?? []).map((colour) => `${colour.label}|${colour.code ?? ''}`).join('\u0001');
+  const labelsAfter = (payload.colors?.colors ?? []).map((colour) => `${colour.label}|${colour.code ?? ''}`).join('\u0001');
+  const reused = published.media.filter((item) => item.reused).length;
+  return {
+    skipped: false,
+    productDetailId,
+    styleNo: published.draft.styleNo,
+    wp: published.wordpress,
+    imagesBefore: beforeImages.size, imagesAfter: afterImages.size,
+    removed, added,
+    variantChanges: labelsBefore !== labelsAfter,
+    reused, uploaded: published.media.length - reused,
+  };
+}
+
 const wordpressRefreshJobs = new Map();
 
 app.post('/api/wordpress/refresh-published', { preHandler: requireApiKey }, async (request, reply) => {
@@ -2342,69 +2471,23 @@ app.post('/api/wordpress/refresh-published', { preHandler: requireApiKey }, asyn
           const productDetailId = Number(rows[index].product_detail_id);
           job.processed += 1;
           try {
-            const detail = await db.getProductDetail(productDetailId);
-            const publication = await db.getWordPressPublication(productDetailId);
-            const translation = await db.getLatestProductTranslation(productDetailId, 'en');
-            if (!detail || !publication?.wp_post_id || !publication.payload || !translation) {
+            const result = await refreshPublishedProduct(productDetailId);
+            if (result.skipped) {
               job.skipped += 1;
               continue;
             }
-            const normalization = await db.getVariantNormalization(productDetailId);
-            const previousPayload = publication.payload;
-            const options = {
-              status: 'publish',
-              styleNo: publication.style_no ?? '',
-              categoryMode: (previousPayload.category_ids ?? []).length ? 'manual' : 'auto',
-              categoryIds: previousPayload.category_ids ?? [],
-              tagMode: ((previousPayload.tag_ids ?? []).length || (previousPayload.tags ?? []).length) ? 'manual' : 'auto',
-              tagIds: previousPayload.tag_ids ?? [],
-              tags: previousPayload.tags ?? [],
-              primaryCategoryId: Number(previousPayload.meta?.primary_category_id) || 0,
-              material: previousPayload.meta?.material ?? '',
-              imageMode: 'translated',
-              allowUnverifiedGallery: detail.raw_data?.gallery?.complete !== true,
-              reuseMedia: true,
-              previousPayload,
-              normalizedVariants: normalization?.result
-                ? { colours: normalization.result.colours ?? [], sizes: normalization.result.sizes ?? [] }
-                : null,
-            };
-            const published = await publishProductToWordPress({
-              detail, translation, options, config,
-              optionOverrides: await db.listProductOptionOverrides(productDetailId),
-            });
-            const payload = published.payload;
-            const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-            await db.saveWordPressPublication(productDetailId, {
-              translationId: translation.id, externalId: published.draft.externalId,
-              styleNo: published.draft.styleNo,
-              wpPostId: published.wordpress.post_id ?? publication.wp_post_id,
-              wpUrl: published.wordpress.permalink ?? publication.wp_url,
-              wpEditUrl: published.wordpress.edit_link ?? publication.wp_edit_url,
-              wpStatus: published.wordpress.status ?? 'publish',
-              syncHash, payload, result: published.wordpress, lastError: null,
-            });
-            const beforeImages = new Set((previousPayload.images ?? [])
-              .map((image) => normalizedImageUrl(image?.source_url)).filter(Boolean));
-            const afterImages = new Set((payload.images ?? [])
-              .map((image) => normalizedImageUrl(image?.source_url)).filter(Boolean));
-            const removed = [...beforeImages].filter((key) => !afterImages.has(key)).length;
-            const added = [...afterImages].filter((key) => !beforeImages.has(key)).length;
-            const labelsBefore = (previousPayload.colors?.colors ?? []).map((colour) => `${colour.label}|${colour.code ?? ''}`).join('\u0001');
-            const labelsAfter = (payload.colors?.colors ?? []).map((colour) => `${colour.label}|${colour.code ?? ''}`).join('\u0001');
-            const variantChanges = labelsBefore !== labelsAfter ? 1 : 0;
-            const reused = published.media.filter((item) => item.reused).length;
             job.updated += 1;
-            job.imagesRemoved += removed;
-            job.imagesAdded += added;
-            job.mediaReused += reused;
-            job.mediaUploaded += published.media.length - reused;
-            job.variantChanges += variantChanges;
+            job.imagesRemoved += result.removed;
+            job.imagesAdded += result.added;
+            job.mediaReused += result.reused;
+            job.mediaUploaded += result.uploaded;
+            job.variantChanges += result.variantChanges ? 1 : 0;
             if (job.results.length < 400) {
               job.results.push({
-                productDetailId, styleNo: published.draft.styleNo,
-                imagesBefore: beforeImages.size, imagesAfter: afterImages.size,
-                removed, added, variantChanges: variantChanges === 1, reused, uploaded: published.media.length - reused,
+                productDetailId, styleNo: result.styleNo,
+                imagesBefore: result.imagesBefore, imagesAfter: result.imagesAfter,
+                removed: result.removed, added: result.added,
+                variantChanges: result.variantChanges, reused: result.reused, uploaded: result.uploaded,
               });
             }
           } catch (error) {
@@ -2432,6 +2515,175 @@ app.post('/api/wordpress/refresh-published', { preHandler: requireApiKey }, asyn
 app.get('/api/wordpress-refresh-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
   const job = wordpressRefreshJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+// ---- Review console: manual edits + the single-product publish action --------
+
+// Adjust one normalized colour: swatch text and/or swatch image. Edits are
+// stored directly in the normalization result (marked manual) and are
+// overwritten the next time the LLM normalization runs for the product.
+app.patch('/api/product-details/:id/variant-normalization', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const record = await db.getVariantNormalization(id);
+  if (!record?.result) return reply.code(409).send({ error: 'normalization_required' });
+  const body = request.body ?? {};
+  const source = String(body.source ?? '').trim();
+  if (!source) return reply.code(400).send({ error: 'source_required' });
+  const result = structuredClone(record.result);
+  const colour = (Array.isArray(result.colours) ? result.colours : [])
+    .find((entry) => String(entry?.source ?? '') === source);
+  if (!colour) return reply.code(404).send({ error: 'colour_not_found' });
+  const now = new Date().toISOString();
+  if (body.text !== undefined) {
+    const text = String(body.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    colour.text = text || null;
+    colour.placeholder = false;
+    colour.needsReview = false;
+    colour.manual = true;
+  }
+  if (body.imageId !== undefined && body.imageId !== null && body.imageId !== '') {
+    const ensured = await ensureImageDownloaded(detail, body.imageId);
+    if (!ensured.ok) return reply.code(422).send({ error: 'image_download_failed', reason: ensured.reason });
+    const image = ensured.image;
+    colour.imageId = String(image.id);
+    colour.imageUrl = /^https:\/\//i.test(image.source_url || '') ? image.source_url : (colour.imageUrl ?? null);
+    colour.imageRole = image.image_type ?? colour.imageRole ?? null;
+    colour.needsReview = false;
+    colour.manual = true;
+  }
+  result.manualUpdatedAt = now;
+  await db.saveVariantNormalization(id, result, record.model ?? null);
+  await appendManualEditLog(id, {
+    at: now, action: 'variant_normalization_edit', source,
+    text: colour.text ?? null, imageId: colour.imageId ?? null,
+  });
+  return { productDetailId: id, colour };
+});
+
+// Save the manually ordered publish image set: the endpoint diffs the desired
+// order against the untouched default set and stores order/excluded/added.
+app.put('/api/product-details/:id/publish-images', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  let detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const body = request.body ?? {};
+  if (body.reset === true) {
+    await db.updateProductRawData(id, { publishImages: null });
+    await appendManualEditLog(id, { at: new Date().toISOString(), action: 'publish_images_reset' });
+    return { productDetailId: id, reset: true };
+  }
+  const order = [...new Set((Array.isArray(body.order) ? body.order : [])
+    .map(Number).filter((value) => Number.isInteger(value) && value > 0))].slice(0, 300);
+  if (!order.length) return reply.code(400).send({ error: 'order_required' });
+  const allowedTypes = new Set(['main', 'gallery', 'description']);
+  const byId = new Map((detail.images ?? []).map((image) => [Number(image.id), image]));
+  const desired = order.filter((imageId) => {
+    const image = byId.get(imageId);
+    return image && allowedTypes.has(image.image_type);
+  });
+  if (!desired.length) return reply.code(400).send({ error: 'no_valid_images' });
+  // URL-only picks are downloaded now so the publisher can upload them later.
+  const failed = [];
+  for (const imageId of desired) {
+    const image = byId.get(imageId);
+    if (image.storage_path) continue;
+    const ensured = await ensureImageDownloaded(detail, imageId);
+    if (!ensured.ok) failed.push({ imageId, reason: ensured.reason });
+  }
+  if (failed.length) return reply.code(422).send({ error: 'image_download_failed', failed });
+  detail = await db.getProductDetail(id);
+  const translation = await db.getLatestProductTranslation(id, 'en');
+  const freshById = new Map((detail.images ?? []).map((image) => [Number(image.id), image]));
+  const desiredIds = desired.filter((imageId) => freshById.has(imageId));
+  let defaultBase = [];
+  try {
+    defaultBase = resolvePublishImagesDetailed(detail, translation, 'translated',
+      detail.raw_data?.gallery?.complete !== true, { ignoreEdits: true }).rows.map((row) => Number(row.id));
+  } catch { defaultBase = []; }
+  const baseSet = new Set(defaultBase);
+  const desiredSet = new Set(desiredIds);
+  const excluded = defaultBase.filter((imageId) => !desiredSet.has(imageId));
+  const added = desiredIds.filter((imageId) => !baseSet.has(imageId));
+  const value = { order: desiredIds, excluded, added, updatedAt: new Date().toISOString() };
+  await db.updateProductRawData(id, { publishImages: value });
+  await appendManualEditLog(id, {
+    at: value.updatedAt, action: 'publish_images_edit',
+    count: desiredIds.length, removed: excluded.length, added: added.length,
+  });
+  return { productDetailId: id, publishImages: value };
+});
+
+// Publish the accumulated manual edits to the existing WordPress product,
+// keeping its current WP status (a draft stays a draft). Portal staging is NOT
+// touched: the response flags it so the console can prompt for a re-push.
+app.post('/api/product-details/:id/publish-changes', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (detail.bundle_status === 'bundle') {
+    return reply.code(409).send({ error: 'bundle_split_flow',
+      message: '捆绑产品请使用拆分/发布流程。' });
+  }
+  const publication = await db.getWordPressPublication(id);
+  if (!publication?.wp_post_id) {
+    return reply.code(409).send({ error: 'not_published',
+      message: '尚未发布到 WordPress，请走正常发布流程。' });
+  }
+  const blocking = purgeBlockingJobs(id);
+  if (blocking.length) {
+    return reply.code(409).send({ error: 'maintenance_job_running', jobs: blocking,
+      message: '有发布/维护任务进行中，请稍后重试。' });
+  }
+  try {
+    // URL-only manual picks must exist locally before the sync uploads them.
+    const editImageIds = [...new Set([
+      ...(Array.isArray(detail.raw_data?.publishImages?.order) ? detail.raw_data.publishImages.order : []),
+      ...(Array.isArray(detail.raw_data?.publishImages?.added) ? detail.raw_data.publishImages.added : []),
+    ].map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0))];
+    const byId = new Map((detail.images ?? []).map((image) => [Number(image.id), image]));
+    for (const imageId of editImageIds) {
+      const image = byId.get(imageId);
+      if (!image || image.storage_path) continue;
+      await ensureImageDownloaded(detail, imageId).catch(() => null);
+    }
+    const result = await refreshPublishedProduct(id, { statusOverride: publication.wp_status });
+    if (result.skipped) {
+      return reply.code(409).send({ error: 'nothing_to_sync',
+        message: '缺少翻译或发布记录，无法同步。' });
+    }
+    const portal = await db.getPortalPublication(id).catch(() => null);
+    const staging = portal?.portal_product_id
+      && portal.result?.target === 'staging'
+      && String(portal.portal_status ?? '').toUpperCase() !== 'ARCHIVED'
+      ? { needsUpdate: true, portalProductId: String(portal.portal_product_id),
+          lastSyncedAt: portal.last_synced_at ? String(portal.last_synced_at) : null }
+      : null;
+    await appendManualEditLog(id, {
+      at: new Date().toISOString(), action: 'publish_changes',
+      wpStatus: result.wp?.status ?? publication.wp_status,
+      stagingNeedsUpdate: Boolean(staging),
+    });
+    return {
+      published: true, productDetailId: id,
+      wp: {
+        status: result.wp?.status ?? publication.wp_status,
+        postId: result.wp?.post_id ?? publication.wp_post_id,
+        url: result.wp?.permalink ?? publication.wp_url,
+        images: result.imagesAfter, imagesAdded: result.added, imagesRemoved: result.removed,
+        variantChanges: result.variantChanges,
+      },
+      staging,
+    };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: id }, 'publish changes failed');
+    return reply.code(502).send({ error: 'publish_changes_failed',
+      message: String(error?.message || error).slice(0, 300) });
+  }
 });
 
 // Publish the split products of published bundles: the original post is updated

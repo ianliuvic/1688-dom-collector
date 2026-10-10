@@ -145,14 +145,23 @@ function optionValue(options, names) {
   return '';
 }
 
-function selectPublishingImages(detail, translation, imageMode = 'translated', allowUnverifiedGallery = false) {
-  const available = new Map((detail.images ?? []).map((image) => [String(image.id), image]));
+/**
+ * Final publish images with the manual edit layer applied (order / excluded /
+ * added from raw_data.publishImages, written by the review console).
+ * Returns { rows, excluded } where each excluded entry is
+ * { id, image, reason } with reasons: a stored dedupe reason, 'manual' (the
+ * reviewer removed it), 'same-url' or 'exact' (live guard). With ignoreEdits
+ * the untouched default set is returned (used to diff manual edits).
+ */
+export function resolvePublishImagesDetailed(detail, translation, imageMode = 'translated', allowUnverifiedGallery = false, { ignoreEdits = false } = {}) {
+  const all = detail?.images ?? [];
+  const available = new Map(all.map((image) => [String(image.id), image]));
   const translatedSources = translation?.image_sources ?? [];
   const selected = translatedSources
     .map((source) => available.get(String(source.imageId)))
     .filter(Boolean);
 
-  const fallback = (detail.images ?? [])
+  const fallback = all
     .filter((image) => ['main', 'gallery'].includes(image.image_type))
     .sort((a, b) => {
       if (a.image_type !== b.image_type) return a.image_type === 'main' ? -1 : 1;
@@ -161,7 +170,7 @@ function selectPublishingImages(detail, translation, imageMode = 'translated', a
 
   if (imageMode === 'main_only') {
     const main = fallback.find((image) => image.image_type === 'main') ?? fallback[0];
-    return main ? [main] : [];
+    return { rows: main ? [main] : [], excluded: [] };
   }
 
   if (detail?.raw_data?.gallery?.complete !== true && allowUnverifiedGallery !== true) {
@@ -171,28 +180,58 @@ function selectPublishingImages(detail, translation, imageMode = 'translated', a
   // Model input is deliberately bounded, but WordPress should receive every
   // image from the verified product Gallery after the prioritized subset.
   const source = selected.length ? [...selected, ...fallback] : fallback;
-  const seen = new Set();
-  let kept = source.filter((image) => {
-    const key = normalizedSourceImageKey(image.source_url);
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  // Duplicate removal for publishing: stored dedupe decisions (exact / near /
-  // LLM-confirmed) plus a live exact-content-hash guard. Files stay on disk.
-  const removedIds = new Set((Array.isArray(detail?.raw_data?.imageDedupe?.removed)
-    ? detail.raw_data.imageDedupe.removed : [])
-    .map((entry) => String(entry?.imageId ?? ''))
-    .filter(Boolean));
-  if (removedIds.size) kept = kept.filter((image) => !removedIds.has(String(image.id)));
+  const seenIds = new Set();
+  const seenUrl = new Set();
+  const base = [];
+  for (const image of source) {
+    const imageId = String(image.id);
+    if (seenIds.has(imageId)) continue;
+    seenIds.add(imageId);
+    const urlKey = normalizedSourceImageKey(image.source_url);
+    if (urlKey && seenUrl.has(urlKey)) continue;
+    if (urlKey) seenUrl.add(urlKey);
+    base.push(image);
+  }
+
+  const edits = (!ignoreEdits && detail?.raw_data?.publishImages) || null;
+  const storedRemoved = new Map((ignoreEdits || !Array.isArray(detail?.raw_data?.imageDedupe?.removed)
+    ? [] : detail.raw_data.imageDedupe.removed)
+    .map((entry) => [String(entry?.imageId ?? ''), String(entry?.reason ?? 'dedupe')]));
+  const excludedIds = new Set((edits?.excluded ?? []).map(String));
+  const addedIds = new Set((edits?.added ?? []).map(String));
+
+  const rows = [];
+  const excluded = [];
   const seenSha = new Set();
-  kept = kept.filter((image) => {
+  for (const image of base) {
+    const imageId = String(image.id);
+    if (excludedIds.has(imageId)) { excluded.push({ id: imageId, image, reason: 'manual' }); continue; }
+    const dedupeReason = storedRemoved.get(imageId) ?? null;
+    if (dedupeReason && !addedIds.has(imageId)) { excluded.push({ id: imageId, image, reason: dedupeReason }); continue; }
     const sha = clean(image.content_sha256);
-    if (sha && seenSha.has(sha)) return false;
+    if (sha && seenSha.has(sha)) { excluded.push({ id: imageId, image, reason: 'exact' }); continue; }
     if (sha) seenSha.add(sha);
-    return true;
-  });
-  return kept;
+    rows.push(image);
+  }
+  // Manual additions (main/gallery/description images): bypass the stored
+  // dedupe decisions, but never introduce exact or same-URL duplicates.
+  if (edits && addedIds.size) {
+    for (const imageId of addedIds) {
+      const image = available.get(imageId);
+      if (!image || !['main', 'gallery', 'description'].includes(image.image_type)) continue;
+      if (excludedIds.has(imageId)) continue;
+      if (rows.some((row) => String(row.id) === imageId)) continue;
+      const sha = clean(image.content_sha256);
+      if (sha && seenSha.has(sha)) { excluded.push({ id: imageId, image, reason: 'exact' }); continue; }
+      if (sha) seenSha.add(sha);
+      rows.push(image);
+    }
+  }
+  return { rows: applyPublishOrder(rows, edits?.order), excluded };
+}
+
+function selectPublishingImages(detail, translation, imageMode = 'translated', allowUnverifiedGallery = false) {
+  return resolvePublishImagesDetailed(detail, translation, imageMode, allowUnverifiedGallery).rows;
 }
 
 function buildSkuMatrix(detail, translation, overrideIndex = null, normalizedColours = null, normalizedColourBySource = null, normalizedSizeBySource = null) {
@@ -314,13 +353,17 @@ function buildColorOptions(detail, translation, overrideIndex = null, normalized
     const normalized = normalizedColours?.get(clean(sourceLabel)) ?? null;
     const label = clean(normalized?.text)
       || resolveOptionDisplayLabel(overrideIndex, sourceLabel) || sourceLabel;
+    // A swatch image manually chosen in the review console (normalized.manual)
+    // wins over the captured own swatch; otherwise the own swatch stays
+    // authoritative and the normalization pick is only the fallback.
+    const manualImageId = normalized?.manual === true ? clean(normalized?.imageId) : '';
     return {
       label,
       value: `color-${index + 1}`,
       ...(label === sourceLabel ? {} : { source_label: sourceLabel }),
       ...(clean(normalized?.code) ? { code: clean(normalized.code) } : {}),
       source_image_url: imageUrl,
-      image_source_id: matched?.id ? String(matched.id) : (clean(normalized?.imageId) || ''),
+      image_source_id: manualImageId || (matched?.id ? String(matched.id) : (clean(normalized?.imageId) || '')),
     };
   });
 }
