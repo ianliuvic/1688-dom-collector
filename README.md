@@ -29,6 +29,8 @@ This framework does not bypass CAPTCHAs, signatures, access controls, or platfor
 | `SAVED_AUDIT_CONCURRENCY` | no | `3` (maximum `5`); queued/running saved audits recover after restart |
 | `SAVED_AUDITS_START_PAUSED` | no | `false`; set `true` to deploy without consuming a saved-audit backlog |
 | `WORDPRESS_PUBLISH_CONCURRENCY` | no | `3` (maximum `5`); maintenance jobs remain serialized |
+| `WP_STATUS_EVENT_TOKEN` | no | empty; dedicated bearer token that WordPress uses to push product status events to `POST /api/wordpress/status-events` (503 until set) |
+| `WP_STATUS_RECONCILE_MINUTES` | no | `15`; interval of the live WordPress status reconcile sweep (self-heals missed events) |
 | `PROXY_SERVER` | no | - |
 | `PROXY_USERNAME` | no | - |
 | `PROXY_PASSWORD` | no | - |
@@ -77,6 +79,20 @@ the normal `GET /api/jobs/:id` endpoint.
 
 `GET /api/jobs/:id` and `GET /api/session` use the same bearer token.
 `GET /api/jobs/:id/dom` downloads the archived HTML and is also bearer-token protected.
+
+## WordPress status truth
+
+`product_wordpress_publications.wp_status` is kept true to the real WordPress
+state through three inputs: the wearhongxiu WPCode snippet pushes product post
+status changes to `POST /api/wordpress/status-events` (dedicated
+`WP_STATUS_EVENT_TOKEN`); an in-process reconcile sweep re-reads live statuses
+every `WP_STATUS_RECONCILE_MINUTES`; and `POST /api/wordpress/statuses/sync`
+(on-demand, dashboard Basic or bearer auth) live-checks the given
+`productDetailIds` (keeper posts plus split siblings) and refreshes the stored
+copy. Keeper posts are matched through `product_wordpress_publications`,
+sibling posts through `product_split_contents`; an actual status change also
+queues a products RAG sync so the RAG matches the real store state. Every
+observation is recorded in `product_wp_status_events`.
 
 ## Review queue
 
