@@ -1448,6 +1448,13 @@ function renderPublishPreview(id, data){
       + '</div>'
     : '';
 
+  // The 颜色与尺码 card is the translation-level view; once a normalization
+  // with colours/sizes exists its information is fully covered (swatches,
+  // original text, standardized sizes) by the normalization and merged-SKU
+  // tables, so it is hidden to avoid duplicate content.
+  const normCoversVariants = !!(norm
+    && (((norm.colours || []).length) || ((norm.sizes || []).length)));
+
   panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 发布前预览</b>'
     + '<button type="button" data-pp-normalize="' + id + '">运行变体规范化（LLM）</button>'
     + '<button type="button" data-pp-dedupe="' + id + '">图片去重（hash+LLM）</button>'
@@ -1455,7 +1462,8 @@ function renderPublishPreview(id, data){
     + '<button type="button" data-pp-close="' + id + '">收起</button>'
     + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（只读）</span></div>'
     + '<div class="pp-chips">' + chips.join('') + '</div>'
-    + '<div class="pp-grid">' + normCard + variantsCard + publishImagesCard + translationCard + pricingCard + merch + imagesCard + '</div>';
+    + '<div class="pp-grid">' + normCard + variantsCard + publishImagesCard + translationCard + pricingCard + merch
+    + (normCoversVariants ? '' : imagesCard) + '</div>';
 }
 
 async function runImageDedupe(id, button){
