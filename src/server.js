@@ -6734,7 +6734,7 @@ function catalogLastManualEdit(row) {
   const log = Array.isArray(row.manual_edit_log) ? row.manual_edit_log : [];
   let last = null;
   for (const entry of log) {
-    if (!['variant_normalization_edit', 'publish_images_edit', 'publish_images_reset'].includes(String(entry?.action))) continue;
+    if (!['variant_normalization_edit', 'publish_images_edit', 'publish_images_reset', 'classification_edit'].includes(String(entry?.action))) continue;
     const timestamp = entry?.at ? Date.parse(entry.at) : NaN;
     if (Number.isFinite(timestamp) && (last === null || timestamp > last)) last = timestamp;
   }
