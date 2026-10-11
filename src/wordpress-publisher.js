@@ -330,10 +330,16 @@ function droppedVariantColours(detail) {
     .map((entry) => clean(typeof entry === 'string' ? entry : entry?.source)).filter(Boolean));
 }
 
-function buildColorOptions(detail, translation, overrideIndex = null, normalizedColours = null) {
+const PLACEHOLDER_COLOUR_RE = /[\u4e00-\u9fff]|in stock|rest assured|buy with confidence|order with|picture color|image color|photo color|color as|as (picture|image)|shown in (the )?(picture|image)/i;
+
+function buildColorOptions(detail, translation, overrideIndex = null, normalizedColours = null,
+  normalizedColourBySource = null, normalizedEntries = null) {
   const dimension = findDimension(translation, ['color', '颜色']);
   const colors = unique(dimension?.values ?? []);
+  const sourceOptions = Array.isArray(translation?.source_data?.skuOptions)
+    ? translation.source_data.skuOptions : [];
   const optionImages = new Map();
+  const optionImagesBySource = new Map();
   for (const option of translation?.sku_options ?? []) {
     const dimensionName = clean(option?.dimensionName).toLowerCase();
     if (dimensionName && !['color', '颜色'].includes(dimensionName)) continue;
@@ -344,17 +350,31 @@ function buildColorOptions(detail, translation, overrideIndex = null, normalized
     // "BH25254B30 One Size Cover-up".
     const labelOnly = /^(stock|size|库存|尺码)(\s*[:：].*)?$/i.test(text);
     if (text && imageUrl && !labelOnly) optionImages.set(text, imageUrl);
+    const sourceText = clean(sourceOptions[Number(option?.index)]?.text);
+    if (sourceText && imageUrl && !labelOnly) optionImagesBySource.set(sourceText, imageUrl);
   }
   const skuImages = new Map((detail.images ?? [])
     .filter((image) => image.image_type === 'sku')
     .map((image) => [normalizedImageKey(image.source_url), image]));
-  return colors.map((sourceLabel, index) => {
+
+  // Resolve a translated dimension value to its variant-normalization entry.
+  // The stored value may be the translated option text ("Picture color") or the
+  // captured source text ("图片色") depending on how the translator handled the
+  // dimension; both keys must be tried. (A mismatch here was why normalization
+  // results could silently fall back to the raw placeholder label before.)
+  const resolveNormalized = (value) => (
+    normalizedColours?.get(clean(value)) || normalizedColourBySource?.get(clean(value)) || null
+  );
+
+  const used = new Set();
+  const list = colors.map((sourceLabel, index) => {
+    const normalized = resolveNormalized(sourceLabel);
+    if (normalized) used.add(normalized);
     // The swatch image is keyed by the captured text, so resolve it before the
     // display label is replaced by an override.
-    const imageUrl = optionImages.get(sourceLabel) || '';
+    const imageUrl = optionImages.get(sourceLabel) || optionImagesBySource.get(sourceLabel) || '';
     const matched = skuImages.get(normalizedImageKey(imageUrl)) ?? null;
     // Priority: variant-normalization text/code > manual override > translated label.
-    const normalized = normalizedColours?.get(clean(sourceLabel)) ?? null;
     const label = clean(normalized?.text)
       || resolveOptionDisplayLabel(overrideIndex, sourceLabel) || sourceLabel;
     // A swatch image manually chosen in the review console (normalized.manual)
@@ -370,6 +390,36 @@ function buildColorOptions(detail, translation, overrideIndex = null, normalized
       image_source_id: manualImageId || (matched?.id ? String(matched.id) : (clean(normalized?.imageId) || '')),
     };
   });
+
+  // Source data sometimes keeps the real colours only inside the normalization
+  // (e.g. the captured colour option was a chatter line like "现货，放心拍~").
+  // Those normalization entries have no translated counterpart: drop the
+  // unmatched chatter option and append the authoritative normalized colours.
+  const unmatched = (Array.isArray(normalizedEntries) ? normalizedEntries : [])
+    .filter((entry) => entry && !used.has(entry) && clean(entry?.text));
+  if (unmatched.length) {
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const item = list[i];
+      const raw = clean(item.source_label || item.label);
+      if (!clean(item.code) && !resolveNormalized(raw)
+        && !resolveOptionDisplayLabel(overrideIndex, raw)
+        && PLACEHOLDER_COLOUR_RE.test(raw)) {
+        list.splice(i, 1);
+      }
+    }
+    for (const entry of unmatched) {
+      const text = clean(entry.text);
+      const source = clean(entry.source);
+      list.push({
+        label: text,
+        value: `color-${list.length + 1}`,
+        ...(source && source !== text ? { source_label: source } : {}),
+        ...(clean(entry.code) ? { code: clean(entry.code) } : {}),
+        image_source_id: clean(entry.imageId) || '',
+      });
+    }
+  }
+  return list.map((item, index) => ({ ...item, value: `color-${index + 1}` }));
 }
 
 // Re-applies the manual option overrides to an already saved publication
@@ -413,19 +463,20 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   const sizes = unique(sizeDimension?.values ?? []);
   const normalizedColours = buildNormalizedTranslatedMap(translation, options.normalizedVariants?.colours, ['color', '颜色']);
   const normalizedSizes = buildNormalizedTranslatedMap(translation, options.normalizedVariants?.sizes, ['size', '尺码']);
+  const normalizedColourBySource = new Map((options.normalizedVariants?.colours ?? [])
+    .map((colour) => [clean(colour?.source), colour]));
+  const normalizedSizeBySource = new Map((options.normalizedVariants?.sizes ?? [])
+    .map((size) => [clean(size?.source), size]));
   const sizeLabel = (value) => clean(normalizedSizes?.get(clean(value))?.text) || value;
   const droppedColours = droppedVariantColours(detail);
-  const colorOptions = buildColorOptions(detail, translation, overrideIndex, normalizedColours)
+  const colorOptions = buildColorOptions(detail, translation, overrideIndex, normalizedColours,
+    normalizedColourBySource, options.normalizedVariants?.colours ?? null)
     .filter((color) => !droppedColours.size || !droppedColours.has(clean(color.source_label ?? color.label)));
   const swatchImageIds = new Set(colorOptions.map((color) => color.image_source_id).filter(Boolean));
   const swatchImages = options.imageMode === 'main_only' ? []
     : (detail.images ?? []).filter((image) => swatchImageIds.has(String(image.id)));
   const uploadImages = [...publishingImages, ...swatchImages]
     .filter((image, index, values) => values.findIndex((candidate) => String(candidate.id) === String(image.id)) === index);
-  const normalizedColourBySource = new Map((options.normalizedVariants?.colours ?? [])
-    .map((colour) => [clean(colour?.source), colour]));
-  const normalizedSizeBySource = new Map((options.normalizedVariants?.sizes ?? [])
-    .map((size) => [clean(size?.source), size]));
   const skuMatrix = buildSkuMatrix(detail, translation, overrideIndex, normalizedColours, normalizedColourBySource, normalizedSizeBySource);
   const selection = resolveMerchandisingSelection({ options, merchandising, taxonomies });
   const material = selection.material || attributes.get('fabric composition')
