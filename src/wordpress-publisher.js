@@ -73,6 +73,68 @@ function allSkuRowsInStock(rows) {
   return rows.length > 0 && rows.every((row) => row.source_stock !== null && row.source_stock > 0);
 }
 
+// 口径（2026-10-11 用户确认）：整款"无库存/按需"仅当所有尺码库存全为 0；
+// 只要任一尺码有货就按"有库存"发布（影响前台的打样费/起订量展示）。
+function anySkuRowInStock(rows) {
+  return rows.some((row) => row.source_stock !== null && row.source_stock !== undefined
+    && row.source_stock !== '' && Number(row.source_stock) > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Size completeness guard: the size list published to WordPress must never lose
+// a size captured from 1688. Older translations sometimes carry a truncated size
+// dimension ("尺码"), so the publisher merges the source sizes back in.
+// ---------------------------------------------------------------------------
+const SIZE_DIMENSION_RE = /尺|码数|size/i;
+
+function sourceSizeValues(detail) {
+  const raw = detail?.raw_data ?? {};
+  const dims = Array.isArray(raw.skuDimensions) ? raw.skuDimensions : [];
+  const dim = dims.find((item) => SIZE_DIMENSION_RE.test(String(item?.name ?? '')));
+  let values = Array.isArray(dim?.values) ? dim.values : [];
+  if (!values.length) {
+    values = (Array.isArray(raw.skuOptions) ? raw.skuOptions : [])
+      .filter((option) => SIZE_DIMENSION_RE.test(String(option?.dimensionName ?? '')))
+      .map((option) => option?.text);
+  }
+  return unique(values.map((value) => clean(value)).filter(Boolean));
+}
+
+function sizeTokens(value) {
+  const text = clean(value).toLowerCase();
+  return {
+    onesize: /^(均码|one ?size|free ?size|free|os)$/.test(text),
+    digits: (text.match(/\d+(?:\.\d+)?/g) || []).join('-'),
+    letters: (text.match(/[a-z]+/g) || [])
+      .filter((token) => !['size', 'sizes', 'y', 'yr', 'yrs', 'year', 'years', 'a', 'cm'].includes(token))
+      .join('-'),
+  };
+}
+
+// True when a translated size label and a captured source size describe the same
+// size ("Size 2" ~ "2码", "One Size" ~ "均码", "86/92" ~ "86/92").
+function sizeMatches(a, b) {
+  if (!clean(a) || !clean(b)) return false;
+  if (clean(a).toLowerCase() === clean(b).toLowerCase()) return true;
+  const left = sizeTokens(a);
+  const right = sizeTokens(b);
+  if (left.onesize && right.onesize) return true;
+  if (left.digits && right.digits && left.digits === right.digits) {
+    if (left.letters && right.letters) return left.letters === right.letters;
+    return true;
+  }
+  return false;
+}
+
+function defaultSizeLabel(value) {
+  const text = clean(value);
+  if (!text) return '';
+  if (/^均码$/.test(text)) return 'One Size';
+  const match = text.match(/^(\d+)\s*码$/);
+  if (match) return `Size ${match[1]}`;
+  return text;
+}
+
 function taxonomyById(taxonomies, id) {
   return (taxonomies?.categories ?? []).find((item) => Number(item.id) === Number(id)) ?? null;
 }
@@ -468,6 +530,19 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   const normalizedSizeBySource = new Map((options.normalizedVariants?.sizes ?? [])
     .map((size) => [clean(size?.source), size]));
   const sizeLabel = (value) => clean(normalizedSizes?.get(clean(value))?.text) || value;
+  // Size completeness guard: merge the translation's size list with the captured
+  // source sizes so no size is ever lost at publish (stale translations can be
+  // truncated). Labels keep the translation/normalization wording when possible.
+  const sizeEntries = [];
+  for (const value of unique(sizeDimension?.values ?? [])) {
+    sizeEntries.push({ value, label: sizeLabel(value) });
+  }
+  for (const sourceValue of sourceSizeValues(detail)) {
+    if (sizeEntries.some((entry) => sizeMatches(entry.value, sourceValue)
+      || sizeMatches(entry.label, sourceValue))) continue;
+    const override = clean(normalizedSizeBySource?.get(clean(sourceValue))?.text);
+    sizeEntries.push({ value: sourceValue, label: override || defaultSizeLabel(sourceValue) });
+  }
   const droppedColours = droppedVariantColours(detail);
   const colorOptions = buildColorOptions(detail, translation, overrideIndex, normalizedColours,
     normalizedColourBySource, options.normalizedVariants?.colours ?? null)
@@ -482,7 +557,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   const material = selection.material || attributes.get('fabric composition')
     || attributes.get('fabric name') || 'Polyester';
   const pricing = buildWearHongxiuPricing(detail);
-  const hasAllSkuStock = allSkuRowsInStock(skuMatrix);
+  const anySkuInStock = anySkuRowInStock(skuMatrix);
   const sourceCurrency = clean(detail.currency) || 'CNY';
   const externalId = `1688:${detail.offer_id}`;
   const publicationDate = normalizePublicationDate(detail.publication_date || detail.first_seen_at);
@@ -506,10 +581,10 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
       style: selection.primaryCategory,
       primary_category_id: selection.primaryCategoryId ? String(selection.primaryCategoryId) : '',
       primary_category: selection.primaryCategory,
-      sample_available: hasAllSkuStock,
+      sample_available: anySkuInStock,
       sample_price: '50.00',
-      sample_lead_time: hasAllSkuStock ? '3 working days' : '7 to 14 working days',
-      lead_time: hasAllSkuStock ? '3 working days' : '7 to 14 working days',
+      sample_lead_time: anySkuInStock ? '3 working days' : '7 to 14 working days',
+      lead_time: anySkuInStock ? '3 working days' : '7 to 14 working days',
       moq: '50 pcs',
       bulk_lead_time: '~28 days',
       material,
@@ -541,9 +616,9 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
       alt: `${clean(translation.title)}${index ? ` view ${index + 1}` : ''}`,
     })),
     bulk_pricing: pricing,
-    sizes: sizes.length ? {
-      default: sizeLabel(sizes[0]),
-      sizes: sizes.map((value) => ({ label: sizeLabel(value), value })),
+    sizes: sizeEntries.length ? {
+      default: sizeEntries[0].label,
+      sizes: sizeEntries.map((entry) => ({ label: entry.label, value: entry.value })),
     } : null,
     size_chart: null,
     colors: colorOptions.length ? {
@@ -1456,7 +1531,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     const colours = await buildColours(keeper);
     const { pricing: prices, sourceMin, sourceMax } = pricingFor(keeper);
     const keeperSkuRows = buildSkuRows(keeper, keeperStyleNo);
-    const keeperInStock = keeperSkuRows.length > 0 && keeperSkuRows.every((row) => row.available === true);
+    const keeperInStock = keeperSkuRows.some((row) => row.available === true);
     const payload = {
       ...template,
       external_id: template.external_id,
@@ -1566,7 +1641,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       const { pricing: prices, sourceMin: siblingMin, sourceMax: siblingMax } = pricingFor(content);
       const categoryName = allCategories.find((item) => Number(item.id) === Number(categoryId))?.name ?? clean(template.meta?.primary_category);
       const siblingSkuRows = buildSkuRows(content, styleNo);
-      const siblingInStock = siblingSkuRows.length > 0 && siblingSkuRows.every((row) => row.available === true);
+      const siblingInStock = siblingSkuRows.some((row) => row.available === true);
       const payload = {
         ...template,
         external_id: externalId,

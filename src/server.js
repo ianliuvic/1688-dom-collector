@@ -2135,7 +2135,8 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
   const sourcePrices = skuRows.map((row) => Number(row.price)).filter((value) => Number.isFinite(value) && value > 0);
   const skuPriceMax = sourcePrices.length ? Math.max(...sourcePrices) : null;
   const stockKnown = skuRows.length > 0 && skuRows.every((row) => row.stock !== null && Number(row.stock) >= 0);
-  const allInStock = skuRows.length > 0 && skuRows.every((row) => row.stock !== null && Number(row.stock) > 0);
+  // 口径：仅当所有尺码库存全为 0 才按"无库存/按需"，任一有货即"有库存"。
+  const anyInStock = skuRows.some((row) => row.stock !== null && Number(row.stock) > 0);
 
   // Swatch mapping: colour option text -> local thumbnail when the source URL
   // matches a stored SKU image (same rule the publisher uses).
@@ -2341,7 +2342,7 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       pricing,
       samplePrice: '50.00',
       moqText: '50 pcs',
-      retailAvailable: allInStock,
+      retailAvailable: anyInStock,
       stockKnown,
     },
     images: {
@@ -5815,15 +5816,16 @@ app.post('/api/wordpress/publications/stock-audit/repair', { preHandler: require
           const payload = publication?.payload;
           if (!publication || !payload) { job.failed += 1; continue; }
           const skuRows = Array.isArray(payload.sku_matrix?.rows) ? payload.sku_matrix.rows : [];
-          const inStock = skuRows.length > 0 && skuRows.every((sku) => {
+          // 口径：全零才按无库存；任一有货即按有库存。
+          const anyInStock = skuRows.some((sku) => {
             const value = sku?.source_stock;
             return value !== null && value !== undefined && value !== '' && Number(value) > 0;
           });
           payload.meta = {
             ...(payload.meta ?? {}),
-            sample_available: inStock,
-            sample_lead_time: inStock ? '3 working days' : '7 to 14 working days',
-            lead_time: inStock ? '3 working days' : '7 to 14 working days',
+            sample_available: anyInStock,
+            sample_lead_time: anyInStock ? '3 working days' : '7 to 14 working days',
+            lead_time: anyInStock ? '3 working days' : '7 to 14 working days',
           };
           await updateWordPressProductStyleNumber({
             publication, styleNo: publication.style_no, config,

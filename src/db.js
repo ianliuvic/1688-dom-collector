@@ -2761,9 +2761,9 @@ export function createDatabase(databaseUrl) {
         count(*) FILTER (WHERE skus.total = 0)::int AS no_skus,
         count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') IN ('1', 'true'))::int AS page_sample_available,
         count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') IN ('1', 'true')
-          AND (skus.total = 0 OR skus.not_positive > 0))::int AS sample_available_but_not_in_stock,
+          AND (skus.total = 0 OR skus.not_positive = skus.total))::int AS sample_available_but_not_in_stock,
         count(*) FILTER (WHERE coalesce(pubs.payload->'meta'->>'sample_available', '') NOT IN ('1', 'true')
-          AND skus.total > 0 AND skus.not_positive = 0)::int AS not_available_but_in_stock,
+          AND skus.total > 0 AND skus.not_positive < skus.total)::int AS not_available_but_in_stock,
         count(*) FILTER (WHERE skus.total > 0 AND skus.not_positive > 0
           AND coalesce(d.raw_data->'gallery'->>'source', '') = 'linkfox')::int AS linkfox_with_zero_or_unknown,
         count(*) FILTER (WHERE coalesce(d.raw_data->'gallery'->>'source', '') = 'linkfox')::int AS linkfox_published
@@ -2780,7 +2780,7 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? {};
   }
 
-  /** Published pages that still claim "sample available" although their payload SKUs are not all in stock. */
+  /** Published pages that claim "sample available" although ALL their payload SKUs are out of stock. */
   async function listSampleAvailabilityMismatches(limit = 50) {
     const result = await pool.query(`
       SELECT pubs.style_no, pubs.wp_url, d.id AS product_detail_id, skus.total, skus.not_positive,
@@ -2796,7 +2796,7 @@ export function createDatabase(databaseUrl) {
       ) skus ON TRUE
       WHERE pubs.wp_status = 'publish'
         AND coalesce(pubs.payload->'meta'->>'sample_available', '') IN ('1', 'true')
-        AND (skus.total = 0 OR skus.not_positive > 0)
+        AND (skus.total = 0 OR skus.not_positive = skus.total)
       ORDER BY pubs.last_synced_at DESC NULLS LAST
       LIMIT $1`, [Math.min(Math.max(Number(limit) || 50, 1), 200)]);
     return result.rows;
