@@ -1956,7 +1956,11 @@ async function runPublishChanges(id, button){
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
-    await reloadPanel(id, { refreshList: true });
+    // Refresh the list so row badges update, but close the dropdown after
+    // publishing (removed explicitly so a skipped refresh cannot leave it open).
+    const closedPanel = document.getElementById('pp-panel-' + id);
+    if (closedPanel) closedPanel.remove();
+    await loadPage();
     const wp = body.wp || {};
     const stagingNote = body.staging && body.staging.needsUpdate
       ? '<div class="row-line warn">⚠ 该产品已发布到 Portal staging（ID ' + esc(String(body.staging.portalProductId || ''))
