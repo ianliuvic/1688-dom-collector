@@ -6728,17 +6728,29 @@ function extractDescriptionImageUrls(html) {
   return urls;
 }
 
-// Latest manual content edit from the audit log (publish/status actions are
-// excluded: this answers "when was this product last adjusted by hand").
-function catalogLastManualEdit(row) {
+// Manual edit timestamps from the audit log (publish/status actions are
+// excluded). Classification edits sync to WordPress immediately, so they count
+// for "last edited" but never for "pending publish"; only the content edits
+// that need the publish button do.
+function catalogManualEditTimes(row) {
   const log = Array.isArray(row.manual_edit_log) ? row.manual_edit_log : [];
-  let last = null;
+  const contentActions = new Set(['variant_normalization_edit', 'publish_images_edit', 'publish_images_reset']);
+  let lastEdit = null;
+  let lastContentEdit = null;
   for (const entry of log) {
-    if (!['variant_normalization_edit', 'publish_images_edit', 'publish_images_reset', 'classification_edit'].includes(String(entry?.action))) continue;
+    const action = String(entry?.action ?? '');
+    if (!contentActions.has(action) && action !== 'classification_edit') continue;
     const timestamp = entry?.at ? Date.parse(entry.at) : NaN;
-    if (Number.isFinite(timestamp) && (last === null || timestamp > last)) last = timestamp;
+    if (!Number.isFinite(timestamp)) continue;
+    if (lastEdit === null || timestamp > lastEdit) lastEdit = timestamp;
+    if (contentActions.has(action) && (lastContentEdit === null || timestamp > lastContentEdit)) {
+      lastContentEdit = timestamp;
+    }
   }
-  return last === null ? null : new Date(last).toISOString();
+  return {
+    lastEditAt: lastEdit === null ? null : new Date(lastEdit).toISOString(),
+    lastContentEditAt: lastContentEdit === null ? null : new Date(lastContentEdit).toISOString(),
+  };
 }
 
 // Portal staging state for a catalog row, mirroring the selection page: the
@@ -6779,15 +6791,16 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
   ]);
   const liveIds = staging.ids ? new Set([...staging.ids].map(String)) : null;
   const items = result.items.map((row) => {
-    const lastEditAt = catalogLastManualEdit(row);
+    const editTimes = catalogManualEditTimes(row);
     const publicationUpdatedAt = row.publication_updated_at
       ? new Date(row.publication_updated_at).toISOString() : null;
     return {
       ...toProductCatalogItem(row),
       portalState: catalogPortalState(row, liveIds),
       portalLive: row.portal_product_id && liveIds ? liveIds.has(String(row.portal_product_id)) : null,
-      lastEditAt,
-      editsPending: Boolean(lastEditAt && (!publicationUpdatedAt || Date.parse(lastEditAt) > Date.parse(publicationUpdatedAt))),
+      lastEditAt: editTimes.lastEditAt,
+      editsPending: Boolean(editTimes.lastContentEditAt
+        && (!publicationUpdatedAt || Date.parse(editTimes.lastContentEditAt) > Date.parse(publicationUpdatedAt))),
     };
   });
   // Merge the original description images from the LinkFox data so the row
