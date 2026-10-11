@@ -1407,6 +1407,20 @@ function renderPublishPreview(id, data){
   if (data.dates.publicationDate) chips.push(chip('排序日期 ' + esc(String(data.dates.publicationDate).slice(0, 10)), 'gray'));
   if (data.dates.arrivalDate) chips.push(chip('到货批次 ' + esc(data.dates.arrivalDate), 'gray'));
 
+  // Publish action state: only for products already on WordPress, with pending
+  // manual edits, and never for bundle listings (they use the split flow).
+  // Declared before the cards because the merchandising card also uses it.
+  const isBundleGate = Boolean(data.gates && data.gates.bundle
+    && data.gates.bundle.status === 'bundle' && data.gates.bundle.manual !== 'clear');
+  const hasPublication = Boolean(data.gates && data.gates.hasPublication);
+  const publishPending = Boolean(data.edits && data.edits.pending);
+  const publishEnabled = hasPublication && !isBundleGate && publishPending;
+  const publishTitle = !hasPublication
+    ? '尚未发布到 WordPress，请走正常发布流程'
+    : isBundleGate ? '捆绑产品请使用拆分/发布流程'
+      : publishPending ? '将手动修改同步到 WordPress（保持产品当前状态）'
+        : '当前没有未发布的修改';
+
   const translationCard = data.translation
     ? '<div class="pp-card"><div class="pp-card-title">英文标题与描述（将发布到 WP 的文案）</div>'
       + '<div class="pp-title">' + esc(data.translation.title || '（无标题）') + '</div>'
@@ -1533,18 +1547,6 @@ function renderPublishPreview(id, data){
   // tables, so it is hidden to avoid duplicate content.
   const normCoversVariants = !!(norm
     && (((norm.colours || []).length) || ((norm.sizes || []).length)));
-  // Publish action state: only for products already on WordPress, with pending
-  // manual edits, and never for bundle listings (they use the split flow).
-  const isBundleGate = Boolean(data.gates && data.gates.bundle
-    && data.gates.bundle.status === 'bundle' && data.gates.bundle.manual !== 'clear');
-  const hasPublication = Boolean(data.gates && data.gates.hasPublication);
-  const publishPending = Boolean(data.edits && data.edits.pending);
-  const publishEnabled = hasPublication && !isBundleGate && publishPending;
-  const publishTitle = !hasPublication
-    ? '尚未发布到 WordPress，请走正常发布流程'
-    : isBundleGate ? '捆绑产品请使用拆分/发布流程'
-      : publishPending ? '将手动修改同步到 WordPress（保持产品当前状态）'
-        : '当前没有未发布的修改';
 
   panel.innerHTML = '<div class="sp-head"><b>#' + id + ' · 发布前预览</b>'
     + '<button type="button" data-pp-normalize="' + id + '">运行变体规范化（LLM）</button>'
