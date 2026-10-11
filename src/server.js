@@ -16,6 +16,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   syncWordPressProductPricing, replaceWordPressBestSellers,
   resolveWordPressProduct, updateWordPressProductStyleNumber, buildWearHongxiuPricing,
   fetchWordPressProductStatuses, deleteWordPressProduct, fetchWordPressTaxonomies,
+  reserveWordPressStyleNumber, applyWordPressProductCategories, fetchWordPressProductCategoryIds,
   resolvePublishImagesDetailed,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
   resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows } from './wordpress-publisher.js';
@@ -2409,7 +2410,8 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
 // taxonomies/material/style number (no merchandising model call) and syncs to
 // the same post. Extracted so the bulk job and the single-product publish
 // action share one implementation.
-async function refreshPublishedProduct(productDetailId, { statusOverride = null } = {}) {
+async function refreshPublishedProduct(productDetailId, { statusOverride = null,
+  styleOverride = null, categoryOverride = null } = {}) {
   const detail = await db.getProductDetail(productDetailId);
   const publication = await db.getWordPressPublication(productDetailId);
   const translation = await db.getLatestProductTranslation(productDetailId, 'en');
@@ -2420,15 +2422,19 @@ async function refreshPublishedProduct(productDetailId, { statusOverride = null 
   const previousPayload = publication.payload;
   const requestStatus = ['publish', 'draft', 'private', 'pending', 'future'].includes(String(statusOverride))
     ? String(statusOverride) : 'publish';
+  const overrideCategoryIds = Array.isArray(categoryOverride?.categoryIds)
+    ? categoryOverride.categoryIds.map(Number).filter((value) => Number.isInteger(value) && value > 0) : null;
+  const hasOverrideCategories = Boolean(overrideCategoryIds && overrideCategoryIds.length);
   const options = {
     status: requestStatus,
-    styleNo: publication.style_no ?? '',
-    categoryMode: (previousPayload.category_ids ?? []).length ? 'manual' : 'auto',
-    categoryIds: previousPayload.category_ids ?? [],
+    styleNo: styleOverride ? String(styleOverride) : (publication.style_no ?? ''),
+    categoryMode: (hasOverrideCategories || (previousPayload.category_ids ?? []).length) ? 'manual' : 'auto',
+    categoryIds: hasOverrideCategories ? overrideCategoryIds : (previousPayload.category_ids ?? []),
     tagMode: ((previousPayload.tag_ids ?? []).length || (previousPayload.tags ?? []).length) ? 'manual' : 'auto',
     tagIds: previousPayload.tag_ids ?? [],
     tags: previousPayload.tags ?? [],
-    primaryCategoryId: Number(previousPayload.meta?.primary_category_id) || 0,
+    primaryCategoryId: Number(categoryOverride?.primaryCategoryId)
+      || Number(previousPayload.meta?.primary_category_id) || 0,
     material: previousPayload.meta?.material ?? '',
     imageMode: 'translated',
     allowUnverifiedGallery: detail.raw_data?.gallery?.complete !== true,
@@ -5671,7 +5677,7 @@ app.get('/api/wordpress/products/resolve', { preHandler: requireApiKey }, async 
   }
 });
 
-app.post('/api/product-details/:id/wordpress/style-number', { preHandler: requireApiKey }, async (request, reply) => {
+app.post('/api/product-details/:id/wordpress/style-number', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   const publication = await db.getWordPressPublication(detail.id);
@@ -5704,6 +5710,155 @@ app.post('/api/product-details/:id/wordpress/style-number', { preHandler: requir
     request.log.error({ err: error, productDetailId: detail.id }, 'WordPress style number update failed');
     return reply.code(502).send({ error: 'wordpress_style_number_update_failed', message: error.message });
   }
+});
+
+// Category list for the classification editor (same 10-minute cache the
+// publish preview uses to resolve category names).
+app.get('/api/wordpress/taxonomies', { preHandler: requireDashboardOrApiKey }, async (_request, reply) => {
+  const taxonomies = await getWordPressTaxonomiesCached();
+  if (!taxonomies) return reply.code(503).send({ error: 'wordpress_taxonomies_unavailable' });
+  return {
+    categories: (taxonomies.categories ?? [])
+      .filter((category) => category?.id && category?.name)
+      .map((category) => ({
+        id: Number(category.id),
+        name: String(category.name),
+        slug: category.slug ? String(category.slug) : null,
+        parent: Number(category.parent) || 0,
+      })),
+  };
+});
+
+// Manually fix a product's category set and/or style number. Categories are
+// applied directly on the WordPress post (curated categories preserved); a
+// changed style number recomposes the local variant SKUs and then runs one
+// refresh sync that rebuilds the payload (new style + categories) with the
+// product's current images/copy while keeping its existing WP status.
+app.post('/api/product-details/:id/wordpress/classification', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (detail.bundle_status === 'bundle') {
+    return reply.code(409).send({ error: 'bundle_split_flow',
+      message: '捆绑产品请使用拆分/发布流程调整类目。' });
+  }
+  const publication = await db.getWordPressPublication(id);
+  if (!publication?.wp_post_id || !publication.payload) {
+    return reply.code(409).send({ error: 'wordpress_publication_required',
+      message: '尚未发布到 WordPress，请走正常发布流程。' });
+  }
+  const taxonomies = await getWordPressTaxonomiesCached();
+  if (!taxonomies) return reply.code(503).send({ error: 'wordpress_taxonomies_unavailable' });
+  const known = new Map((taxonomies.categories ?? [])
+    .filter((category) => category?.id && category?.name)
+    .map((category) => [Number(category.id), String(category.name)]));
+  const requestedIds = [...new Set((Array.isArray(request.body?.categoryIds) ? request.body.categoryIds : [])
+    .map(Number).filter((value) => Number.isInteger(value) && value > 0))]
+    .filter((value) => known.has(value))
+    .slice(0, 30);
+  const primaryCategoryId = Number(request.body?.primaryCategoryId);
+  if (!requestedIds.length || !Number.isInteger(primaryCategoryId) || !requestedIds.includes(primaryCategoryId)) {
+    return reply.code(400).send({ error: 'invalid_categories',
+      message: '至少一个有效类目，且主类目必须包含在所选的类目集合中。' });
+  }
+  let styleNo = request.body?.styleNo === undefined ? null : String(request.body.styleNo ?? '').trim().toUpperCase();
+  const renumber = request.body?.renumber === true;
+  if (styleNo !== null && styleNo !== '' && !/^[A-Z][A-Z0-9_-]{1,39}$/.test(styleNo)) {
+    return reply.code(400).send({ error: 'invalid_style_number' });
+  }
+  if (styleNo === '' || styleNo === publication.style_no) styleNo = null;
+  if (renumber && !styleNo) {
+    styleNo = await reserveWordPressStyleNumber({ categoryId: primaryCategoryId, config }).catch(() => null);
+    if (!styleNo) return reply.code(502).send({ error: 'style_number_reserve_failed' });
+  }
+  if (styleNo) {
+    const conflicts = await db.resolveWordPressPublication({ styleNo });
+    if (conflicts.some((row) => Number(row.product_detail_id) !== Number(id))) {
+      return reply.code(409).send({ error: 'style_number_conflict', message: '款号已被占用。' });
+    }
+  }
+
+  // Preserve curated categories that are already on the post (managed apart
+  // from the product-type categories).
+  let currentWpCategoryIds = [];
+  try {
+    currentWpCategoryIds = await fetchWordPressProductCategoryIds({ postId: publication.wp_post_id, config });
+  } catch { currentWpCategoryIds = []; }
+  const curatedSlugs = new Set(['best-sellers', 'factory-quality-choice']);
+  const curatedIds = (taxonomies.categories ?? [])
+    .filter((category) => curatedSlugs.has(String(category.slug)))
+    .map((category) => Number(category.id));
+  const preservedCurated = currentWpCategoryIds
+    .filter((categoryId) => curatedIds.includes(categoryId) && !requestedIds.includes(categoryId));
+  const finalCategoryIds = [...new Set([...requestedIds, ...preservedCurated])];
+  const primaryCategory = known.get(primaryCategoryId) ?? '';
+  const before = {
+    categoryIds: (publication.payload.category_ids ?? []).map(Number),
+    primaryCategoryId: Number(publication.payload.meta?.primary_category_id) || 0,
+    styleNo: publication.style_no ?? null,
+  };
+
+  try {
+    if (styleNo) {
+      // Style change: recompose the local variant SKUs first (the refresh
+      // rebuilds the payload's SKU matrix from them), then one refresh sync
+      // applies both the new style number and the new categories.
+      const normalization = await db.getVariantNormalization(id);
+      if (normalization) {
+        await saveComposedSkus(detail, normalization, styleNo).catch(() => null);
+      }
+      const result = await refreshPublishedProduct(id, {
+        statusOverride: publication.wp_status,
+        styleOverride: styleNo,
+        categoryOverride: { categoryIds: finalCategoryIds, primaryCategoryId },
+      });
+      if (result.skipped) {
+        return reply.code(409).send({ error: 'nothing_to_sync',
+          message: '缺少翻译或发布记录，无法同步。' });
+      }
+    } else {
+      // Categories only: direct classification on the post + local payload fix.
+      await applyWordPressProductCategories({
+        postId: publication.wp_post_id, categoryIds: finalCategoryIds,
+        primaryCategoryId, config,
+      });
+      const payload = structuredClone(publication.payload);
+      payload.category_ids = finalCategoryIds;
+      payload.meta = { ...(payload.meta ?? {}),
+        primary_category_id: String(primaryCategoryId), primary_category: primaryCategory };
+      const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+      await db.saveWordPressPublication(id, {
+        translationId: publication.translation_id, externalId: publication.external_id,
+        styleNo: publication.style_no, wpPostId: publication.wp_post_id,
+        wpUrl: publication.wp_url, wpEditUrl: publication.wp_edit_url,
+        wpStatus: publication.wp_status ?? 'publish', syncHash, payload,
+        result: publication.result, lastError: null,
+      });
+    }
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: id }, 'classification update failed');
+    return reply.code(502).send({ error: 'classification_update_failed',
+      message: String(error?.message ?? error).slice(0, 300) });
+  }
+
+  const rag = await scheduleProductRagSync(id, { trigger: 'wordpress_classification_update' })
+    .catch(() => null);
+  await appendManualEditLog(id, {
+    at: new Date().toISOString(), action: 'classification_edit',
+    categoryIds: finalCategoryIds, primaryCategoryId, primaryCategory,
+    ...(styleNo ? { styleNo, previousStyleNo: before.styleNo } : {}),
+  });
+  return {
+    status: 'updated', productDetailId: id,
+    categories: {
+      before: { categoryIds: before.categoryIds, primaryCategoryId: before.primaryCategoryId },
+      after: { categoryIds: finalCategoryIds, primaryCategoryId, primaryCategory: primaryCategory },
+      preservedCurated,
+    },
+    style: styleNo ? { before: before.styleNo, after: styleNo } : null,
+    ragSyncScheduled: rag?.scheduled === true,
+  };
 });
 
 // A captured option label can be a bare merchant code (for example `9007`).

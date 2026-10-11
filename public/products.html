@@ -112,6 +112,13 @@ header{padding:18px 24px 6px}h1{margin:0 0 6px;font-size:19px}.sub{color:var(--m
 .pub-edit-img img{width:84px;height:84px;object-fit:cover;border-radius:6px;border:1px solid var(--line);display:block;background:#f2f4f7}
 .pub-edit-img.dragging{opacity:.4}
 .pub-edit-x{position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;border:1px solid var(--line);background:#fff;font-size:11px;line-height:1;padding:0;cursor:pointer;z-index:1}
+.cls-list{max-height:44vh;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:4px}
+.cls-row{display:flex;align-items:center;gap:8px;padding:5px 10px;border-bottom:1px solid var(--line);font-size:12.5px}
+.cls-row:last-child{border-bottom:none}
+.cls-row input[type=checkbox]{width:14px;height:14px;margin:0;cursor:pointer}
+.cls-name{flex:1;min-width:0}
+.cls-primary-btn{border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:11px;cursor:pointer;background:#fff;color:#475467}
+.cls-primary-btn:hover{border-color:#98a2b3}
 .pp-muted{font-size:12px;color:var(--muted)}
 .pp-tags{display:flex;flex-wrap:wrap;gap:5px}
 .pp-tag{font-size:11.5px;border:1px solid var(--line);border-radius:999px;padding:1px 9px;background:#fff;color:var(--text)}
@@ -1423,9 +1430,16 @@ function renderPublishPreview(id, data){
   const merchCats = (data.merchandising && data.merchandising.categories) || null;
   const primaryCat = merchCats ? (merchCats.find((c) => c.primary) || merchCats[0] || null) : null;
   const otherCats = merchCats && primaryCat ? merchCats.filter((c) => c !== primaryCat) : [];
+  const merchEditable = Boolean(data.gates && data.gates.hasPublication) && !isBundleGate;
   const merch = data.merchandising
-    ? '<div class="pp-card"><div class="pp-card-title">类目 / 标签 / 材质（上次发布结果）</div>'
-      + '<div class="pp-muted">主类目：' + esc((primaryCat && (primaryCat.name || ('#' + primaryCat.id))) || data.merchandising.primaryCategory || '—') + '</div>'
+    ? '<div class="pp-card"><div class="pp-card-title" style="display:flex;justify-content:space-between;align-items:center;gap:8px">'
+      + '<span>类目 / 标签 / 材质（上次发布结果）</span>'
+      + (merchEditable
+        ? '<button type="button" class="pp-edit-btn" data-cls-edit="' + esc(String(data.productDetailId)) + '">调整类目/款号…</button>'
+        : '')
+      + '</div>'
+      + '<div class="pp-muted">主类目：' + esc((primaryCat && (primaryCat.name || ('#' + primaryCat.id))) || data.merchandising.primaryCategory || '—')
+      + (data.wp.styleNo ? ' · 款号：<b>' + esc(data.wp.styleNo) + '</b>' : '') + '</div>'
       + (otherCats.length
         ? '<div class="pp-muted" style="margin-top:2px">其他类目：' + otherCats.map((c) => '<span title="类目 ID：' + esc(String(c.id)) + '">' + esc(c.name || ('#' + c.id)) + '</span>').join('、') + '</div>'
         : '')
@@ -1964,6 +1978,167 @@ async function runPublishChanges(id, button){
   }
 }
 
+// --- classification / style number editor -------------------------------------
+let CLS_EDIT = null;
+async function openClassificationEdit(id){
+  const data = PP_DATA.get(String(id));
+  if (!data) return;
+  showModal('<div class="modal-card"><h3>调整类目与款号</h3><div class="row-line">正在加载类目清单…</div></div>');
+  let taxonomies = null;
+  try {
+    const res = await fetch('/api/wordpress/taxonomies', { headers: { accept: 'application/json' } });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    taxonomies = body;
+  } catch (e) {
+    showModal('<div class="modal-card"><h3>调整类目与款号</h3><div class="row-line warn">类目清单加载失败：' + esc(String((e && e.message) || e)) + '</div>'
+      + '<div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
+    wireModalClose();
+    return;
+  }
+  const currentIds = ((data.merchandising && data.merchandising.categories) || []).map((c) => Number(c.id));
+  const currentPrimary = Number(data.merchandising && data.merchandising.primaryCategoryId) || 0;
+  CLS_EDIT = {
+    id: String(id),
+    categories: (taxonomies.categories || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh')),
+    selected: new Set(currentIds.filter(Boolean).map(String)),
+    primaryId: currentPrimary ? String(currentPrimary) : (currentIds[0] ? String(currentIds[0]) : ''),
+    styleNo: String((data.wp && data.wp.styleNo) || ''),
+    renumber: false,
+    search: '',
+  };
+  renderClassificationEdit();
+}
+function renderClassificationEdit(){
+  const st = CLS_EDIT;
+  if (!st) return;
+  const term = st.search.trim().toLowerCase();
+  const list = st.categories.filter((c) => !term
+    || String(c.name).toLowerCase().includes(term) || String(c.id) === term);
+  const rows = list.slice(0, 200).map((category) => {
+    const categoryId = String(category.id);
+    const checked = st.selected.has(categoryId);
+    const primary = st.primaryId === categoryId;
+    return '<div class="cls-row">'
+      + '<input type="checkbox" data-cls-cat="' + categoryId + '"' + (checked ? ' checked' : '') + '>'
+      + '<span class="cls-name">' + esc(category.name) + '</span>'
+      + (primary
+        ? '<span class="pp-chip info">主类目</span>'
+        : '<button type="button" class="cls-primary-btn" data-cls-primary="' + categoryId + '">设为主类目</button>')
+      + '</div>';
+  }).join('');
+  const selectedNames = [...st.selected].map((categoryId) => {
+    const category = st.categories.find((c) => String(c.id) === categoryId);
+    return (categoryId === st.primaryId ? '★ ' : '') + (category ? category.name : '#' + categoryId);
+  });
+  showModal('<div class="modal-card" style="max-width:820px"><h3>调整类目与款号</h3>'
+    + '<div class="row-line muted">只能选现有类目；主类目必须包含在所选集合中。保存后立即同步到 WordPress（站点 curated 类目会自动保留）。</div>'
+    + '<div class="row-line">已选：' + (selectedNames.length ? esc(selectedNames.join('、')) : '<span class="pp-muted">无</span>') + '</div>'
+    + '<div class="row-line">搜索：<input id="clsSearch" value="' + esc(st.search) + '" placeholder="按名称或 ID 过滤…"'
+    + ' style="min-width:260px;border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:13px"></div>'
+    + '<div class="cls-list">' + (rows || '<div class="pp-muted" style="padding:8px">没有匹配的类目</div>')
+    + (list.length > 200 ? '<div class="pp-muted" style="padding:6px 10px">…共 ' + list.length + ' 个，仅显示前 200 个，请用搜索框缩小范围</div>' : '') + '</div>'
+    + '<div class="row-line" style="margin-top:8px">款号：<input id="clsStyle" value="' + esc(st.styleNo) + '" maxlength="40"'
+    + (st.renumber ? ' disabled' : '')
+    + ' style="min-width:200px;border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:13px;text-transform:uppercase">'
+    + ' <label style="margin-left:8px"><input type="checkbox" id="clsRenumber"' + (st.renumber ? ' checked' : '')
+    + '> 按新主类目重新配号</label></div>'
+    + '<div class="row-line muted">改款号会重组变体 SKU 前缀并重新同步；勾选「重新配号」会自动预留新前缀的号码。</div>'
+    + '<div class="row-line warn" id="clsError"></div>'
+    + '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button>'
+    + '<button class="primary" id="clsSave">保存并同步</button></div></div>');
+  wireModalClose();
+  const search = document.getElementById('clsSearch');
+  if (search) search.addEventListener('input', () => {
+    CLS_EDIT.search = search.value;
+    renderClassificationEdit();
+    setTimeout(() => {
+      const el = document.getElementById('clsSearch');
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    }, 0);
+  });
+  document.querySelectorAll('#modalRoot input[data-cls-cat]').forEach((box) => {
+    box.addEventListener('change', () => {
+      if (!CLS_EDIT) return;
+      const categoryId = String(box.dataset.clsCat);
+      if (box.checked) CLS_EDIT.selected.add(categoryId);
+      else CLS_EDIT.selected.delete(categoryId);
+      if (!CLS_EDIT.selected.has(CLS_EDIT.primaryId)) {
+        CLS_EDIT.primaryId = [...CLS_EDIT.selected][0] || '';
+      }
+      renderClassificationEdit();
+    });
+  });
+  document.querySelectorAll('#modalRoot button[data-cls-primary]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!CLS_EDIT) return;
+      const categoryId = String(btn.dataset.clsPrimary);
+      CLS_EDIT.primaryId = categoryId;
+      CLS_EDIT.selected.add(categoryId);
+      renderClassificationEdit();
+    });
+  });
+  const renumber = document.getElementById('clsRenumber');
+  if (renumber) renumber.addEventListener('change', () => {
+    if (!CLS_EDIT) return;
+    CLS_EDIT.renumber = renumber.checked;
+    renderClassificationEdit();
+  });
+  const style = document.getElementById('clsStyle');
+  if (style) style.addEventListener('input', () => { if (CLS_EDIT) CLS_EDIT.styleNo = style.value; });
+  const save = document.getElementById('clsSave');
+  if (save) save.addEventListener('click', () => { void saveClassificationEdit(); });
+}
+async function saveClassificationEdit(){
+  const st = CLS_EDIT;
+  if (!st) return;
+  const categoryIds = [...st.selected].map(Number).filter((value) => Number.isInteger(value) && value > 0);
+  const primaryCategoryId = Number(st.primaryId);
+  if (!categoryIds.length || !categoryIds.includes(primaryCategoryId)) {
+    const err = document.getElementById('clsError');
+    if (err) err.textContent = '请至少选择一个类目，并确保主类目在所选集合中。';
+    return;
+  }
+  const currentStyle = String(((PP_DATA.get(st.id) || {}).wp || {}).styleNo || '').toUpperCase();
+  const body = { categoryIds, primaryCategoryId };
+  if (st.renumber) {
+    body.renumber = true;
+  } else if (st.styleNo.trim() && st.styleNo.trim().toUpperCase() !== currentStyle) {
+    body.styleNo = st.styleNo.trim().toUpperCase();
+  }
+  const btn = document.getElementById('clsSave');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…约 10–60 秒'; }
+  try {
+    const res = await fetch('/api/product-details/' + st.id + '/wordpress/classification', {
+      method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const result = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((result && (result.message || result.error)) || ('HTTP ' + res.status));
+    const id = st.id;
+    CLS_EDIT = null;
+    closeModal();
+    await reloadPanel(id);
+    const cats = result.categories || {};
+    const afterIds = (cats.after && cats.after.categoryIds) || [];
+    const styleInfo = result.style
+      ? '<div class="row-line">款号：' + esc(String(result.style.before || '—')) + ' → <b>' + esc(String(result.style.after)) + '</b></div>'
+      : '';
+    const preserved = (cats.preservedCurated || []).length ? '<div class="row-line muted">已自动保留站点 curated 类目。</div>' : '';
+    showModal('<div class="modal-card"><h3>✔ 类目/款号已更新</h3>'
+      + '<div class="row-line">主类目：' + esc(String((cats.after && cats.after.primaryCategory) || '—'))
+      + ' · 共 ' + afterIds.length + ' 个类目</div>'
+      + styleInfo + preserved
+      + '<div class="row-line muted">RAG 同步：' + (result.ragSyncScheduled ? '已排队' : '未配置/跳过') + '</div>'
+      + '<div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
+    wireModalClose();
+  } catch (e) {
+    const err = document.getElementById('clsError');
+    if (err) err.textContent = '保存失败：' + String((e && e.message) || e);
+    if (btn) { btn.disabled = false; btn.textContent = '保存并同步'; }
+  }
+}
+
 function unassignSplitImage(id, kind, ref, index){  const plan = SPLITS.get(String(id));
   const product = plan && (plan.products || [])[index];
   if (!product) return;
@@ -2035,6 +2210,8 @@ document.addEventListener('click', (e) => {
   if (pubEdit) { openPublishImagesEdit(String(pubEdit.dataset.pubEdit)); return; }
   const ppPublish = e.target.closest('button[data-pp-publish]');
   if (ppPublish) { void runPublishChanges(String(ppPublish.dataset.ppPublish), ppPublish); return; }
+  const clsEdit = e.target.closest('button[data-cls-edit]');
+  if (clsEdit) { void openClassificationEdit(String(clsEdit.dataset.clsEdit)); return; }
   const splitContentBtn = e.target.closest('button[data-split-content]');
   if (splitContentBtn) { void runSplitContent(String(splitContentBtn.dataset.splitContent), splitContentBtn); return; }
   const addGroup = e.target.closest('button[data-split-addgroup]');

@@ -775,6 +775,37 @@ export async function fetchWordPressTaxonomies({ config }) {
   return wp('/wp-json/hx/v1/products/taxonomies', { timeoutMs: 30000 });
 }
 
+/** Reserve a fresh style number for a category (manual renumber). */
+export async function reserveWordPressStyleNumber({ categoryId, config }) {
+  const wp = wordpressClient(config);
+  const allocated = await wp('/wp-json/hx/v1/products/style-number', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ external_id: `hx-renumber-${crypto.randomUUID()}`,
+      primary_category_id: Number(categoryId) || 0, reserve: true }),
+    timeoutMs: 30000,
+  });
+  return clean(allocated?.style_no) || null;
+}
+
+/** Apply a category set to an existing WordPress product (keeps the post). */
+export async function applyWordPressProductCategories({ postId, categoryIds, primaryCategoryId, config }) {
+  const wp = wordpressClient(config);
+  return wp('/wp-json/hx/v1/products/classification', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ post_id: Number(postId),
+      category_ids: (categoryIds ?? []).map(Number).filter(Boolean),
+      primary_category_id: Number(primaryCategoryId) || 0 }),
+    timeoutMs: 60000,
+  });
+}
+
+/** Current category ids on a WordPress product (for curated-category preserve). */
+export async function fetchWordPressProductCategoryIds({ postId, config }) {
+  const wp = wordpressClient(config);
+  const product = await wp(`/wp-json/wp/v2/product/${Number(postId)}?context=edit&_fields=id,product_cat`, { timeoutMs: 30000 });
+  return [...new Set((product?.product_cat ?? []).map(Number).filter(Boolean))];
+}
+
 /**
  * Live-read the current post status for the given post ids (100 per REST
  * batch). Posts missing from the response are trashed or permanently deleted
