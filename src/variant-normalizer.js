@@ -224,6 +224,7 @@ async function runNormalizeModel({ title, colourValues, sizeValues, images, conf
 - 为每个颜色选项输出：简洁准确的英文名称（≤4 个单词，如 Black and White、Leopard、Sky Blue）、一个用于构建 SKU 的短缩写（大写字母/数字/连字符，≤8 字符，如 BW、LEOP、SKYBLU）、最能代表该变体的图片编号。
 - 图片编号优先选"变体色卡"图；没有色卡图时，从商品图/详情图里选出能看清该颜色的那张；都看不出来时 imageNumber 用 null，confidence 给低分。
 - 如果某个颜色文本没有意义（如"现货放心拍""包邮""图片色"这类占位或卖家文案），仍要输出一行，但 placeholder 设为 true，同时根据图片给出正确的英文名称（如果确实能从图片看出颜色）。
+- 如果颜色文本本身是颜色词、但与图片明显不符（例如原文写“香槟色”但图片明显是米白配藏青条纹，或原文写“粉色”而实物为红色），以图片为准输出正确的英文名称：source 仍逐字保留原文，placeholder 保持 false，缩写按改正后的名称生成，并在 notes 里简短说明“已按图片改正”。不要为了忠实原文而保留与图片不符的名称。
 - 绝不能编造不存在的颜色，也不能遗漏或多出任何选项，source 必须逐字使用给出的原文。
 二、尺码规范化。为每个尺码选项输出标准英文标签（如 均码→One Size、加大码→XL），去掉占位/无意义项（placeholder=true），不要合并不同尺码。
 输出格式：
