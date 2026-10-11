@@ -1831,6 +1831,8 @@ app.post('/api/product-details/:id/image-dedupe', { preHandler: requireDashboard
     updatedAt: new Date().toISOString(),
   };
   await db.updateProductRawData(id, { imageDedupe: result });
+  await appendManualEditLog(id, { at: new Date().toISOString(), action: 'image_dedupe_regen',
+    mode, removed: removed.length });
   return { productDetailId: id, ...result };
 });
 
@@ -2023,6 +2025,7 @@ app.post('/api/product-details/:id/normalize-variants', { preHandler: requireDas
     const saved = await db.saveVariantNormalization(id, result, config.complexModel ?? null);
     const publication = await db.getWordPressPublication(id);
     const composed = await saveComposedSkus(await db.getProductDetail(id), saved, publication?.style_no ?? null);
+    await appendManualEditLog(id, { at: new Date().toISOString(), action: 'variant_normalization_regen' });
     return {
       productDetailId: id,
       result: composed?.result ?? saved.result,
@@ -6739,7 +6742,8 @@ function extractDescriptionImageUrls(html) {
 // that need the publish button do.
 function catalogManualEditTimes(row) {
   const log = Array.isArray(row.manual_edit_log) ? row.manual_edit_log : [];
-  const contentActions = new Set(['variant_normalization_edit', 'publish_images_edit', 'publish_images_reset', 'translation_regenerated']);
+  const contentActions = new Set(['variant_normalization_edit', 'variant_normalization_regen',
+    'publish_images_edit', 'publish_images_reset', 'translation_regenerated', 'image_dedupe_regen']);
   let lastEdit = null;
   let lastContentEdit = null;
   for (const entry of log) {

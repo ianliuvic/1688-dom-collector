@@ -1570,9 +1570,7 @@ async function runImageDedupe(id, button){
       body: JSON.stringify({ mode: 'hash+llm' }),
     });
     if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 100));
-    const existing = document.getElementById('pp-panel-' + id);
-    if (existing) existing.remove();
-    await togglePublishPreview(id);
+    await reloadPanel(id, { refreshList: true });
   } catch (e) {
     if (button) button.textContent = '失败：' + String((e && e.message) || e).slice(0, 50);
   } finally {
@@ -1586,9 +1584,7 @@ async function runVariantNormalization(id, button){
   try {
     const res = await fetch('/api/product-details/' + id + '/normalize-variants', { method: 'POST' });
     if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 120));
-    const existing = document.getElementById('pp-panel-' + id);
-    if (existing) existing.remove();
-    await togglePublishPreview(id);
+    await reloadPanel(id, { refreshList: true });
   } catch (e) {
     if (button) { button.textContent = '失败：' + String((e && e.message) || e); }
   } finally {
@@ -1618,9 +1614,7 @@ async function runRetranslation(id, button){
     }
     if (state.status === 'failed') throw new Error(state.error || 'translation_failed');
     if (state.status !== 'completed') throw new Error('生成超时，请稍后刷新查看');
-    const existing = document.getElementById('pp-panel-' + id);
-    if (existing) existing.remove();
-    await togglePublishPreview(id);
+    await reloadPanel(id, { refreshList: true });
   } catch (e) {
     if (button) { button.disabled = false; button.textContent = '失败：' + String((e && e.message) || e).slice(0, 60); }
   }
@@ -1631,7 +1625,8 @@ let NORM_EDIT = null;
 let PUB_EDIT = null;
 let IMAGE_PICKER = null;
 
-async function reloadPanel(id){
+async function reloadPanel(id, { refreshList = false } = {}){
+  if (refreshList) await loadPage();
   const existing = document.getElementById('pp-panel-' + id);
   if (existing) existing.remove();
   await togglePublishPreview(id);
@@ -1695,7 +1690,7 @@ async function saveNormEdit(){
     const id = st.id;
     NORM_EDIT = null;
     closeModal();
-    await reloadPanel(id);
+    await reloadPanel(id, { refreshList: true });
   } catch (e) {
     const err = document.getElementById('normEditError');
     if (err) err.textContent = '保存失败：' + String((e && e.message) || e);
@@ -1927,7 +1922,7 @@ async function savePublishImages(){
     const id = st.id;
     PUB_EDIT = null;
     closeModal();
-    await reloadPanel(id);
+    await reloadPanel(id, { refreshList: true });
   } catch (e) {
     const err = document.getElementById('pubEditError');
     if (err) err.textContent = '保存失败：' + String((e && e.message) || e);
@@ -1944,7 +1939,7 @@ async function resetPublishImages(id){
     if (!res.ok) throw new Error('HTTP ' + res.status);
     PUB_EDIT = null;
     closeModal();
-    await reloadPanel(id);
+    await reloadPanel(id, { refreshList: true });
   } catch (e) {
     const err = document.getElementById('pubEditError');
     if (err) err.textContent = '恢复失败：' + String((e && e.message) || e);
@@ -1961,7 +1956,7 @@ async function runPublishChanges(id, button){
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
-    await reloadPanel(id);
+    await reloadPanel(id, { refreshList: true });
     const wp = body.wp || {};
     const stagingNote = body.staging && body.staging.needsUpdate
       ? '<div class="row-line warn">⚠ 该产品已发布到 Portal staging（ID ' + esc(String(body.staging.portalProductId || ''))
@@ -2120,7 +2115,7 @@ async function saveClassificationEdit(){
     const id = st.id;
     CLS_EDIT = null;
     closeModal();
-    await reloadPanel(id);
+    await reloadPanel(id, { refreshList: true });
     const cats = result.categories || {};
     const afterIds = (cats.after && cats.after.categoryIds) || [];
     const styleInfo = result.style
