@@ -2232,9 +2232,11 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       }
     }
   } catch { /* URL-only additions are best effort */ }
-  // Pending unpublished edits: any review action newer than the last WP sync.
+  // Pending unpublished edits: any review action newer than the last WP sync
+  // (normalization, dedupe, publish-image edits, or a regenerated translation).
   const editTimes = [
     normalization?.updated_at, raw.imageDedupe?.updatedAt, raw.publishImages?.updatedAt,
+    translation?.updated_at,
   ].map((value) => (value ? Date.parse(value) : NaN)).filter(Number.isFinite);
   const lastEditAt = editTimes.length ? new Date(Math.max(...editTimes)).toISOString() : null;
   const publicationUpdatedAt = publication?.updated_at ? new Date(publication.updated_at).toISOString() : null;
@@ -2263,6 +2265,7 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
       description: translation.description ?? null,
       model: translation.model ?? null,
       createdAt: translation.created_at ?? null,
+      updatedAt: translation.updated_at ?? null,
     } : null,
     merchandising: publication ? (() => {
       // All assigned categories with resolved names: the payload stores every
@@ -5071,6 +5074,8 @@ app.post('/api/product-details/:id/translations', { preHandler: requireDashboard
         translated.namingStrategy = 'preserved_catalog_copy_sku_refresh';
       }
       const saved = await db.saveProductTranslation(detail.id, translated);
+      await appendManualEditLog(detail.id, { at: new Date().toISOString(),
+        action: 'translation_regenerated', translationId: saved.id });
       await scheduleProductRagSync(detail.id, { trigger: 'translation' });
       job.translationId = saved.id;
       job.result = saved;
@@ -6734,7 +6739,7 @@ function extractDescriptionImageUrls(html) {
 // that need the publish button do.
 function catalogManualEditTimes(row) {
   const log = Array.isArray(row.manual_edit_log) ? row.manual_edit_log : [];
-  const contentActions = new Set(['variant_normalization_edit', 'publish_images_edit', 'publish_images_reset']);
+  const contentActions = new Set(['variant_normalization_edit', 'publish_images_edit', 'publish_images_reset', 'translation_regenerated']);
   let lastEdit = null;
   let lastContentEdit = null;
   for (const entry of log) {
