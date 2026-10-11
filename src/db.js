@@ -2802,6 +2802,28 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  /** Published pages whose SKU stock is NOT all-zero but still carry the made-to-order flag. */
+  async function listNotAvailableButInStock(limit = 200) {
+    const result = await pool.query(`
+      SELECT pubs.style_no, pubs.wp_url, d.id AS product_detail_id, skus.total, skus.not_positive,
+        coalesce(pubs.payload->'meta'->>'sample_available', '') AS page_sample_available,
+        pubs.last_synced_at
+      FROM product_wordpress_publications pubs
+      JOIN product_details d ON d.id = pubs.product_detail_id
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE NOT ((row->>'source_stock') ~ '^[0-9]+(\\.[0-9]+)?$'
+                 AND (row->>'source_stock')::numeric > 0))::int AS not_positive
+        FROM jsonb_array_elements(coalesce(pubs.payload->'sku_matrix'->'rows', '[]'::jsonb)) AS row
+      ) skus ON TRUE
+      WHERE pubs.wp_status = 'publish'
+        AND coalesce(pubs.payload->'meta'->>'sample_available', '') NOT IN ('1', 'true')
+        AND skus.total > 0 AND skus.not_positive < skus.total
+      ORDER BY pubs.last_synced_at DESC NULLS LAST
+      LIMIT $1`, [Math.min(Math.max(Number(limit) || 200, 1), 500)]);
+    return result.rows;
+  }
+
   async function samplePublicationStocks(limit = 8) {
     const result = await pool.query(`
       SELECT pubs.style_no, pubs.wp_url, d.id AS product_detail_id,
@@ -3431,6 +3453,7 @@ export function createDatabase(databaseUrl) {
     listSelectionProducts, listSelectionFacets, getSelectionProductMedia, getSelectionProductSkus,
     listPortalDelistedProducts,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
+    listNotAvailableButInStock,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
     findMainImagePerceptualExactMatches, upsertProductMainImageHash, importPerceptualHashes,
     getPerceptualHashSummary, backfillPerceptualHashOffers,

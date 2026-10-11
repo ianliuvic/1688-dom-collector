@@ -5789,6 +5789,7 @@ app.post('/api/selection/products/:id/portal-unpublish', { preHandler: requireDa
 app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboardOrApiKey }, async (request) => ({
   counts: await db.auditPublicationStock(),
   mismatches: await db.listSampleAvailabilityMismatches(request.query?.limit),
+  staleUnavailable: await db.listNotAvailableButInStock(request.query?.limit ?? 300),
   samples: await db.samplePublicationStocks(request.query?.limit),
 }));
 
