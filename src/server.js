@@ -2097,14 +2097,35 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
-  const [translation, publication, sourceListings, normalization, taxonomies, portal] = await Promise.all([
+  const [translation, publication, sourceListings, normalization, taxonomies, portal, ragSyncs] = await Promise.all([
     db.getLatestProductTranslation(id, 'en'),
     db.getWordPressPublication(id),
     db.listShopProductSources(detail.offer_id),
     db.getVariantNormalization(id),
     getWordPressTaxonomiesCached(),
     db.getPortalPublication(id).catch(() => null),
+    db.listProductRagSyncs(id, 10).catch(() => []),
   ]);
+  const latestRag = (Array.isArray(ragSyncs) ? ragSyncs.slice() : [])
+    .sort((left, right) => Number(right.id) - Number(left.id))[0] ?? null;
+  const ragState = !latestRag ? 'none'
+    : ['queued', 'running'].includes(String(latestRag.status)) ? 'pending'
+      : String(latestRag.status) === 'failed' ? 'failed'
+        : String(latestRag.status) === 'completed'
+          ? (latestRag.active === true ? 'active' : 'inactive') : 'none';
+  const ragInfo = {
+    state: ragState,
+    active: latestRag ? latestRag.active === true : null,
+    trigger: latestRag?.trigger_type ?? null,
+    canonicalId: latestRag?.canonical_product_id ?? null,
+    lastAt: latestRag?.completed_at ? String(latestRag.completed_at)
+      : (latestRag?.created_at ? String(latestRag.created_at) : null),
+    error: latestRag?.error ? String(latestRag.error).slice(0, 200) : null,
+    history: (Array.isArray(ragSyncs) ? ragSyncs : []).slice(0, 5).map((row) => ({
+      trigger: row.trigger_type, status: row.status, active: row.active === true,
+      at: row.completed_at ? String(row.completed_at) : String(row.created_at),
+    })),
+  };
   const policy = evaluateShopProductPolicy(sourceListings);
   let pricing = null;
   try { pricing = buildWearHongxiuPricing(detail); } catch { pricing = null; }
@@ -2354,6 +2375,7 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
         && portal.last_synced_at
         && Date.parse(publicationUpdatedAt) > Date.parse(String(portal.last_synced_at))),
     } : null,
+    rag: ragInfo,
     variants: {
       dimensions: raw.skuDimensions ?? [],
       rows: skuRows.slice(0, 60).map((row) => ({
@@ -6950,6 +6972,18 @@ function catalogManualEditTimes(row) {
   };
 }
 
+// RAG ingestion state from the latest local sync record: pending while a job
+// is queued/running; completed records carry the active flag; failures keep
+// their error; no record means the product was never successfully ingested.
+function catalogRagState(row) {
+  const status = String(row.rag_status ?? '');
+  if (!status) return 'none';
+  if (status === 'queued' || status === 'running') return 'pending';
+  if (status === 'failed') return 'failed';
+  if (status === 'completed') return row.rag_active === true ? 'active' : 'inactive';
+  return 'none';
+}
+
 // Portal staging state for a catalog row, mirroring the selection page: the
 // live staging catalog (60s cache) decides published-vs-removed; the stored
 // record covers failures and archived entries.
@@ -6998,6 +7032,12 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
       lastEditAt: editTimes.lastEditAt,
       editsPending: Boolean(editTimes.lastContentEditAt
         && (!publicationUpdatedAt || Date.parse(editTimes.lastContentEditAt) > Date.parse(publicationUpdatedAt))),
+      ragState: catalogRagState(row),
+      ragTrigger: row.rag_trigger ?? null,
+      ragCanonicalId: row.rag_canonical_id ?? null,
+      ragError: row.rag_error ? String(row.rag_error).slice(0, 160) : null,
+      ragLastAt: row.rag_completed_at ? new Date(row.rag_completed_at).toISOString()
+        : (row.rag_created_at ? new Date(row.rag_created_at).toISOString() : null),
     };
   });
   // Merge the original description images from the LinkFox data so the row

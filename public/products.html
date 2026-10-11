@@ -147,6 +147,11 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 .badge.portalfail{background:#b42318;font-weight:600}
 .badge.editpending{background:#b54708;font-weight:600}
 .badge.editdone{background:#98a2b3;font-weight:600}
+.badge.ragok{background:#067647;font-weight:600}
+.badge.ragoff{background:#667085;font-weight:600}
+.badge.ragpending{background:#b54708;font-weight:600}
+.badge.ragfail{background:#b42318;font-weight:600}
+.badge.ragnone{background:#e4e7ec;color:#475467;font-weight:600}
 img.zoomable{cursor:zoom-in}
 .lightbox-mask{position:fixed;inset:0;background:rgba(15,23,42,.85);z-index:80;display:flex;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}
 .lightbox-mask img{max-width:96vw;max-height:90vh;border-radius:8px;background:#fff;box-shadow:0 20px 60px rgba(0,0,0,.5)}
@@ -378,6 +383,28 @@ function offerLine(it){
   }
   return '<span class="muted">offer ' + esc(offerId) + '</span>';
 }
+function ragBadge(it){
+  const state = it.ragState || 'none';
+  const map = {
+    active: ['ragok', 'RAG 已收录'],
+    inactive: ['ragoff', 'RAG 已停用'],
+    pending: ['ragpending', 'RAG 待同步'],
+    failed: ['ragfail', 'RAG 失败'],
+    none: ['ragnone', 'RAG 未收录'],
+  };
+  const [cls, label] = map[state] || map.none;
+  const tips = [];
+  if (state === 'active') tips.push('已收录且有效');
+  else if (state === 'inactive') tips.push('已收录但当前 inactive（未发布/已下架）');
+  else if (state === 'pending') tips.push('有排队/进行中的同步任务');
+  else if (state === 'failed') tips.push('最近一次同步失败');
+  else tips.push('从未记录到成功的 RAG 同步');
+  if (it.ragCanonicalId) tips.push('ID ' + it.ragCanonicalId);
+  if (it.ragTrigger) tips.push('最近触发：' + it.ragTrigger);
+  if (it.ragLastAt) tips.push('时间：' + new Date(it.ragLastAt).toLocaleString());
+  if (it.ragError) tips.push('错误：' + String(it.ragError).slice(0, 90));
+  return '<span class="badge ' + cls + '" title="' + esc(tips.join(' · ')) + '">' + label + '</span>';
+}
 function row(it){
   const isBundle = it.status === 'bundle';
   const manual = it.bundleManual || null;
@@ -400,7 +427,7 @@ function row(it){
     + '<span class="muted">采集 ' + esc(it.date || '') + '</span>'
     + offerLine(it)
     + (it.shopName ? '<span class="muted">店铺 ' + esc(it.shopName) + '</span>' : '')
-    + wpBadge(it) + listingBadge(it) + portalBadge(it) + editBadge(it)
+    + wpBadge(it) + listingBadge(it) + portalBadge(it) + editBadge(it) + ragBadge(it)
     + '</div>'
     + '<div class="body"><div class="title">' + esc(it.title || '') + '</div>'
     + '<div class="dims">' + (it.dims.length ? it.dims.map(dimRow).join('') : '<div class="muted" style="font-size:12px;color:var(--muted)">（无变体选项）</div>') + '</div>'
@@ -1391,6 +1418,22 @@ function renderPublishPreview(id, data){
   }
   if (data.portal && data.portal.stagingStale) {
     chips.push('<span class="pp-chip warn" title="该产品已发布到 Portal staging，但 WP 内容在上次 staging 同步之后又有更新">staging 有变化待推送</span>');
+  }
+  if (data.rag) {
+    const ragMap = { active: ['ok', 'RAG 已收录'], inactive: ['gray', 'RAG 已停用'],
+      pending: ['warn', 'RAG 待同步'], failed: ['bad', 'RAG 同步失败'], none: ['gray', 'RAG 未收录'] };
+    const [ragCls, ragLabel] = ragMap[data.rag.state] || ragMap.none;
+    const ragTips = [];
+    if (data.rag.state === 'active') ragTips.push('已收录且有效');
+    else if (data.rag.state === 'inactive') ragTips.push('已收录但当前 inactive（未发布/已下架）');
+    else if (data.rag.state === 'pending') ragTips.push('有排队/进行中的同步任务');
+    else if (data.rag.state === 'failed') ragTips.push('最近一次同步失败');
+    else ragTips.push('从未记录到成功的 RAG 同步');
+    if (data.rag.canonicalId) ragTips.push('ID ' + data.rag.canonicalId);
+    if (data.rag.trigger) ragTips.push('最近触发：' + data.rag.trigger);
+    if (data.rag.lastAt) ragTips.push('时间：' + new Date(data.rag.lastAt).toLocaleString());
+    if (data.rag.error) ragTips.push('错误：' + String(data.rag.error).slice(0, 120));
+    chips.push('<span class="pp-chip ' + ragCls + '" title="' + esc(ragTips.join(' · ')) + '">' + ragLabel + '</span>');
   }
   chips.push(data.gates.hasTranslation ? chip('已翻译', 'ok') : chip('未翻译（发布前需翻译）', 'bad'));
   chips.push(data.gates.priceVerified ? chip('可信价格', 'ok') : chip('价格未核实', 'warn'));

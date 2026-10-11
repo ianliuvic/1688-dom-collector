@@ -1186,6 +1186,9 @@ export function createDatabase(databaseUrl) {
         publications.status_checked_at AS wp_status_checked_at,
         publications.updated_at AS publication_updated_at,
         details.raw_data->'manualEditLog' AS manual_edit_log,
+        rag.status AS rag_status, rag.active AS rag_active, rag.trigger_type AS rag_trigger,
+        rag.canonical_product_id AS rag_canonical_id, rag.error AS rag_error,
+        rag.created_at AS rag_created_at, rag.completed_at AS rag_completed_at,
         portal.portal_product_id, portal.portal_status, portal.last_error AS portal_error,
         portal.result->>'target' AS portal_target, portal.last_synced_at AS portal_synced_at,
         source.shop_id, source.shop_name, source.availability_status, source.delisted_at,
@@ -1194,6 +1197,13 @@ export function createDatabase(databaseUrl) {
       FROM product_details details
       LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
       LEFT JOIN product_portal_publications portal ON portal.product_detail_id=details.id
+      LEFT JOIN LATERAL (
+        SELECT syncs.status, syncs.active, syncs.trigger_type, syncs.canonical_product_id,
+          syncs.error, syncs.created_at, syncs.completed_at
+        FROM product_rag_syncs syncs
+        WHERE syncs.product_detail_id = details.id
+        ORDER BY syncs.id DESC LIMIT 1
+      ) rag ON true
       LEFT JOIN LATERAL (
         SELECT products.shop_id,
           coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name,
