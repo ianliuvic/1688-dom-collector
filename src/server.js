@@ -2694,6 +2694,140 @@ app.post('/api/product-details/:id/publish-images/materialize', { preHandler: re
   }
 });
 
+// ---- First publish for products with no WordPress record yet -----------------
+// Mirrors the pipeline's publish block (auto categories/tags/material, style
+// allocation, fresh variant-SKU recomposition + one re-sync) but keeps every
+// stored manual adjustment (normalization, publish-image edits, dedupe) as-is
+// and never re-runs pipeline steps. Runs as a job because a fresh product
+// uploads all of its media.
+const firstPublishJobs = new Map();
+
+async function runFirstPublish(productDetailId, { status = 'publish' } = {}) {
+  const detail = await db.getProductDetail(productDetailId);
+  if (!detail) throw new Error('product_detail_not_found');
+  const translation = await db.getLatestProductTranslation(productDetailId, 'en');
+  if (!translation) {
+    throw Object.assign(new Error('english_translation_required'), { code: 'english_translation_required' });
+  }
+  const sourceListings = await db.listShopProductSources(detail.offer_id);
+  const policy = evaluateShopProductPolicy(sourceListings);
+  if (!policy.allowed) {
+    throw Object.assign(new Error('shop_product_policy_rejected'),
+      { code: 'shop_product_policy_rejected', policy });
+  }
+  const normalizationRecord = await db.getVariantNormalization(productDetailId);
+  const fresh = await db.getProductDetail(productDetailId);
+  const published = await publishProductToWordPress({
+    detail: fresh, translation, config,
+    optionOverrides: await db.listProductOptionOverrides(productDetailId),
+    options: {
+      status: status === 'draft' ? 'draft' : 'publish',
+      categoryMode: 'auto', tagMode: 'auto', imageMode: 'full',
+      normalizedVariants: normalizationRecord?.result ?? null,
+      allowUnverifiedGallery: fresh.raw_data?.gallery?.source === 'linkfox'
+        || fresh.raw_data?.gallery?.complete === false,
+    },
+  });
+  const wp = published.wordpress;
+  // Recompose the variant SKUs with the freshly allocated style number so the
+  // published supplier SKUs follow {STYLE}-{CODE}-{SIZE}, then re-sync once.
+  let payload = published.payload;
+  try {
+    const composed = await saveComposedSkus(
+      await db.getProductDetail(productDetailId), normalizationRecord, published.draft.styleNo,
+    );
+    const byKey = new Map((composed?.rows ?? []).map((row) => [String(row.skuKey), row.sku]));
+    if (byKey.size) {
+      payload = structuredClone(published.payload);
+      let changed = false;
+      for (const row of payload.sku_matrix?.rows ?? []) {
+        const sku = byKey.get(String(row.source_sku_key));
+        if (sku && row.supplier_sku !== sku) { row.supplier_sku = sku; changed = true; }
+      }
+      if (changed) {
+        const replayed = await updateWordPressProductStyleNumber({
+          publication: { payload }, styleNo: published.draft.styleNo, config,
+        });
+        payload = replayed.payload;
+      }
+    }
+  } catch { /* style-prefixed SKUs are best-effort */ }
+  const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  await db.saveWordPressPublication(productDetailId, {
+    translationId: translation.id, externalId: published.draft.externalId,
+    styleNo: published.draft.styleNo, wpPostId: wp.post_id ?? null,
+    wpUrl: wp.permalink ?? null, wpEditUrl: wp.edit_link ?? null,
+    wpStatus: wp.status ?? (status === 'draft' ? 'draft' : 'publish'), syncHash,
+    payload, result: wp, lastError: null,
+  });
+  await scheduleProductRagSync(productDetailId, { trigger: 'first_publish' }).catch(() => {});
+  await appendManualEditLog(productDetailId, { at: new Date().toISOString(),
+    action: 'first_publish', status, styleNo: published.draft.styleNo });
+  return {
+    status: 'published', styleNo: published.draft.styleNo,
+    wp: { status: wp.status ?? null, postId: wp.post_id ?? null, url: wp.permalink ?? null },
+    images: Array.isArray(payload.images) ? payload.images.length : null,
+  };
+}
+
+app.post('/api/product-details/:id/wordpress/first-publish', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (detail.bundle_status === 'bundle') {
+    return reply.code(409).send({ error: 'bundle_split_flow',
+      message: '捆绑产品请使用拆分/发布流程。' });
+  }
+  const existing = await db.getWordPressPublication(id);
+  if (existing?.wp_post_id) {
+    return reply.code(409).send({ error: 'already_published',
+      message: '该产品已有 WordPress 记录，请使用「发布更改到 WP」。' });
+  }
+  const translation = await db.getLatestProductTranslation(id, 'en');
+  if (!translation) {
+    return reply.code(409).send({ error: 'english_translation_required',
+      message: '尚未生成文案：请先在面板点「重新生成文案」。' });
+  }
+  const alreadyRunning = [...firstPublishJobs.values()]
+    .find((job) => job.productDetailId === id && ['queued', 'running'].includes(job.status));
+  if (alreadyRunning) {
+    return reply.code(409).send({ error: 'first_publish_already_running', jobId: alreadyRunning.id });
+  }
+  const blocking = purgeBlockingJobs(id);
+  if (blocking.length) {
+    return reply.code(409).send({ error: 'maintenance_job_running', jobs: blocking,
+      message: '有发布/维护任务进行中，请稍后重试。' });
+  }
+  const job = {
+    id: crypto.randomUUID(), productDetailId: id, status: 'running',
+    publishStatus: request.body?.status === 'draft' ? 'draft' : 'publish',
+    createdAt: new Date().toISOString(), startedAt: new Date().toISOString(),
+    completedAt: null, result: null, error: null, errorCode: null, policy: null,
+  };
+  firstPublishJobs.set(job.id, job);
+  trimTerminalJobs(firstPublishJobs);
+  (async () => {
+    try {
+      job.result = await runFirstPublish(id, { status: job.publishStatus });
+      job.status = 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+      job.errorCode = error?.code ?? null;
+      job.policy = error?.policy ?? null;
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/first-publish-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const job = firstPublishJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
 // Publish the accumulated manual edits to the existing WordPress product,
 // keeping its current WP status (a draft stays a draft). Portal staging is NOT
 // touched: the response flags it so the console can prompt for a re-push.

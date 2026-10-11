@@ -1460,7 +1460,7 @@ function renderPublishPreview(id, data){
       + '<div class="pp-muted" style="margin-top:2px">材质：' + esc(data.merchandising.material || '—') + '</div>'
       + ((data.merchandising.tags || []).length ? '<div class="pp-tags" style="margin-top:6px">' + data.merchandising.tags.map((tag) => '<span class="pp-tag">' + esc(tag) + '</span>').join('') + '</div>' : '')
       + '</div>'
-    : '<div class="pp-card"><div class="pp-card-title">类目 / 标签 / 材质</div><div class="pp-muted">发布时由模型自动选择（尚无发布记录）。</div></div>';
+    : '<div class="pp-card"><div class="pp-card-title">类目 / 标签 / 材质</div><div class="pp-muted">首次发布时由模型自动选择类目 / 标签 / 材质（发布后可在本卡调整）。</div></div>';
 
   const swatchHtml = (data.images.swatches || []).map((swatch) => '<span class="pp-swatch">'
     + (swatch.thumb ? '<img class="zoomable" src="' + esc(swatch.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" alt="">' : '')
@@ -1552,8 +1552,11 @@ function renderPublishPreview(id, data){
     + '<button type="button" data-pp-normalize="' + id + '">运行变体规范化（LLM）</button>'
     + '<button type="button" data-pp-dedupe="' + id + '">图片去重（hash+LLM）</button>'
     + '<button type="button" data-pp-retranslate="' + id + '" title="按当前图片重新生成英文标题与描述（本地生效，发布后更新 WP）">重新生成文案</button>'
-    + '<button type="button" data-pp-publish="' + id + '"' + (publishEnabled ? '' : ' disabled')
-    + ' title="' + esc(publishTitle) + '">发布更改到 WP</button>'
+    + (!hasPublication && !isBundleGate
+      ? '<button type="button" data-pp-first-publish="' + id
+        + '" title="首次发布：自动选择类目/标签/材质、分配款号并上传图片（使用当前规范化与图片调整）">首次发布到 WP</button>'
+      : '<button type="button" data-pp-publish="' + id + '"' + (publishEnabled ? '' : ' disabled')
+        + ' title="' + esc(publishTitle) + '">发布更改到 WP</button>')
     + '<button type="button" data-pp-reload="' + id + '">刷新</button>'
     + '<button type="button" data-pp-close="' + id + '">收起</button>'
     + '<span class="sp-status">源数据 → 处理 → 发布 WP 之间的中间态（可编辑）</span></div>'
@@ -1946,6 +1949,87 @@ async function resetPublishImages(id){
   }
 }
 
+// First publish for products with no WordPress record yet: confirms, starts
+// the server-side job and polls it; the panel closes on success.
+async function runFirstPublish(id, button){
+  const data = PP_DATA.get(String(id));
+  if (!data) return;
+  if (!(data.gates && data.gates.hasTranslation)) {
+    window.alert('尚未生成文案：请先在面板点「重新生成文案」，完成后再首次发布。');
+    return;
+  }
+  if (data.gates.shopPolicy && data.gates.shopPolicy.allowed === false) {
+    window.alert('店铺政策限制：该商品不允许发布（' + (data.gates.shopPolicy.reason || '店铺类目策略') + '）。');
+    return;
+  }
+  const normReady = Boolean(data.normalization && data.normalization.result);
+  const dedupeReady = Boolean(data.images && data.images.dedupe);
+  const galleryOk = Boolean(data.gates.gallery && data.gates.gallery.complete);
+  showModal('<div class="modal-card"><h3>首次发布到 WordPress</h3>'
+    + '<div class="row-line"><b>#' + esc(String(id)) + '</b> ' + esc((data.translation && data.translation.title) || data.sourceTitle || '') + '</div>'
+    + '<div class="row-line">发布时会自动完成：类目 / 标签 / 材质选择（模型）→ 款号分配 → 全部图片上传 → 同步 WordPress → 排队 RAG。约需 1–3 分钟。</div>'
+    + '<div class="row-line muted">当前准备状态：文案 ✅'
+    + ' · 变体规范化 ' + (normReady ? '✅（使用当前结果，含手动调整）' : '（未运行，颜色将回退翻译标签）')
+    + ' · 图片去重 ' + (dedupeReady ? '✅（使用当前结果）' : '（未运行，仅实时哈希防重）')
+    + ' · 图库 ' + (galleryOk ? '完整' : '未验证（按 LinkFox 放宽规则发布）') + '</div>'
+    + '<div class="row-line">发布方式：<label style="margin-right:12px"><input type="radio" name="fpStatus" value="publish" checked> 直接上架</label>'
+    + '<label><input type="radio" name="fpStatus" value="draft"> 先建草稿</label></div>'
+    + '<div class="row-line warn" id="fpError"></div>'
+    + '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button>'
+    + '<button class="primary" id="fpConfirm">确认发布</button></div></div>');
+  wireModalClose();
+  const confirm = document.getElementById('fpConfirm');
+  if (confirm) confirm.addEventListener('click', () => { void confirmFirstPublish(id); });
+}
+async function confirmFirstPublish(id){
+  const chosen = document.querySelector('#modalRoot input[name="fpStatus"]:checked');
+  const status = chosen ? chosen.value : 'publish';
+  const btn = document.getElementById('fpConfirm');
+  if (btn) { btn.disabled = true; btn.textContent = '发布中…约 1–3 分钟'; }
+  try {
+    const res = await fetch('/api/product-details/' + id + '/wordpress/first-publish', {
+      method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    const job = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((job && (job.message || job.error)) || ('HTTP ' + res.status));
+    if (!job || !job.id) throw new Error('first_publish_job_missing');
+    let state = job;
+    for (let attempt = 0; attempt < 150 && !['completed', 'failed'].includes(String(state.status)); attempt += 1) {
+      if (btn && attempt % 5 === 0 && attempt > 0) {
+        btn.textContent = '发布中…已 ' + (attempt * 4) + ' 秒（约 1–3 分钟）';
+      }
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      const poll = await fetch('/api/first-publish-jobs/' + job.id, { headers: { accept: 'application/json' } });
+      state = await poll.json().catch(() => ({}));
+      if (!poll.ok) throw new Error('HTTP ' + poll.status);
+    }
+    if (state.status === 'failed') {
+      const message = state.errorCode === 'shop_product_policy_rejected'
+        ? '店铺政策限制：该商品不允许发布。' : (state.error || '首次发布失败');
+      throw new Error(message);
+    }
+    if (state.status !== 'completed') throw new Error('发布超时，请稍后刷新页面查看结果');
+    closeModal();
+    const panel = document.getElementById('pp-panel-' + id);
+    if (panel) panel.remove();
+    await loadPage();
+    const result = state.result || {};
+    showModal('<div class="modal-card"><h3>✔ 首次发布完成</h3>'
+      + '<div class="row-line">款号：<b>' + esc(String(result.styleNo || '')) + '</b> · WP 状态：'
+      + esc(String((result.wp && result.wp.status) || '')) + ' · 图片 ' + (result.images ?? '—') + ' 张</div>'
+      + (result.wp && result.wp.url
+        ? '<div class="row-line"><a href="' + esc(result.wp.url) + '" target="_blank" rel="noopener">查看线上页面 ↗</a></div>' : '')
+      + '<div class="row-line muted">类目 / 标签 / 材质已由模型自动选择；如需修改可在本面板「调整类目/款号…」中调整。</div>'
+      + '<div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
+    wireModalClose();
+  } catch (e) {
+    const err = document.getElementById('fpError');
+    if (err) err.textContent = '发布失败：' + String((e && e.message) || e);
+    if (btn) { btn.disabled = false; btn.textContent = '确认发布'; }
+  }
+}
+
 // Publish the manual edits to the existing WordPress product (current status
 // preserved) and surface the Portal staging follow-up notice.
 async function runPublishChanges(id, button){
@@ -2211,6 +2295,8 @@ document.addEventListener('click', (e) => {
   if (pubEdit) { openPublishImagesEdit(String(pubEdit.dataset.pubEdit)); return; }
   const ppPublish = e.target.closest('button[data-pp-publish]');
   if (ppPublish) { void runPublishChanges(String(ppPublish.dataset.ppPublish), ppPublish); return; }
+  const ppFirstPublish = e.target.closest('button[data-pp-first-publish]');
+  if (ppFirstPublish) { void runFirstPublish(String(ppFirstPublish.dataset.ppFirstPublish), ppFirstPublish); return; }
   const clsEdit = e.target.closest('button[data-cls-edit]');
   if (clsEdit) { void openClassificationEdit(String(clsEdit.dataset.clsEdit)); return; }
   const splitContentBtn = e.target.closest('button[data-split-content]');
