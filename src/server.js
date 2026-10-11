@@ -2828,6 +2828,60 @@ app.get('/api/first-publish-jobs/:id', { preHandler: requireDashboardOrApiKey },
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
+// One-off maintenance after the publish-image diff-basis fix: recompute
+// excluded/added for products whose edits were recorded against the old basis
+// (dedupe removals mislabelled as manual exclusions, attempted add-backs not
+// registered). The order and the original updatedAt are preserved so pending
+// states do not flip.
+app.post('/api/product-details/backfill-publish-image-edits', { preHandler: requireApiKey }, async (request) => {
+  const limit = Number(request.body?.limit) > 0 ? Math.min(Number(request.body.limit), 20000) : 5000;
+  const ids = await db.listPublishImageEditProductIds(limit);
+  let scanned = 0;
+  let changed = 0;
+  let skipped = 0;
+  const changedIds = [];
+  for (const id of ids) {
+    scanned += 1;
+    try {
+      const detail = await db.getProductDetail(id);
+      const previous = detail?.raw_data?.publishImages;
+      if (!previous || !Array.isArray(previous.order)) { skipped += 1; continue; }
+      const translation = await db.getLatestProductTranslation(id, 'en');
+      const byId = new Map((detail.images ?? []).map((image) => [Number(image.id), image]));
+      const allowedTypes = new Set(['main', 'gallery', 'description']);
+      const desired = [...new Set(previous.order.map(Number))]
+        .filter((imageId) => {
+          const image = byId.get(imageId);
+          return image && allowedTypes.has(image.image_type);
+        });
+      if (!desired.length) { skipped += 1; continue; }
+      let defaultBase = [];
+      try {
+        defaultBase = resolvePublishImagesDetailed(detail, translation, 'translated',
+          detail.raw_data?.gallery?.complete !== true, { ignoreEdits: true }).rows.map((row) => Number(row.id));
+      } catch { defaultBase = []; }
+      const baseSet = new Set(defaultBase);
+      const desiredSet = new Set(desired);
+      const excluded = defaultBase.filter((imageId) => !desiredSet.has(imageId));
+      const added = desired.filter((imageId) => !baseSet.has(imageId));
+      const previousExcluded = (Array.isArray(previous.excluded) ? previous.excluded : []).map(Number);
+      const previousAdded = (Array.isArray(previous.added) ? previous.added : []).map(Number);
+      const same = JSON.stringify(excluded) === JSON.stringify(previousExcluded)
+        && JSON.stringify(added) === JSON.stringify(previousAdded);
+      if (same) { skipped += 1; continue; }
+      await db.updateProductRawData(id, { publishImages: {
+        order: desired, excluded, added,
+        updatedAt: previous.updatedAt ?? new Date().toISOString(),
+      } });
+      changed += 1;
+      if (changedIds.length < 200) changedIds.push(id);
+    } catch {
+      skipped += 1;
+    }
+  }
+  return { scanned, changed, skipped, changedIds };
+});
+
 // Publish the accumulated manual edits to the existing WordPress product,
 // keeping its current WP status (a draft stays a draft). Portal staging is NOT
 // touched: the response flags it so the console can prompt for a re-push.

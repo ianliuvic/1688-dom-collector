@@ -2237,6 +2237,15 @@ export function createDatabase(databaseUrl) {
     return result.rowCount ?? 0;
   }
 
+  /** Product ids that carry manual publish-image edits (edit-basis migration). */
+  async function listPublishImageEditProductIds(limit = 5000) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 5000, 1), 20000);
+    const result = await pool.query(`SELECT id FROM product_details
+      WHERE jsonb_typeof(raw_data->'publishImages'->'order') = 'array'
+      ORDER BY id LIMIT $1`, [safeLimit]);
+    return result.rows.map((row) => Number(row.id));
+  }
+
   async function createProductRagSync(productDetailId, values = {}) {
     const saved = await pool.query(`INSERT INTO product_rag_syncs
       (product_detail_id, trigger_type, canonical_product_id, active, request_summary)
@@ -3429,6 +3438,7 @@ export function createDatabase(databaseUrl) {
     removeProductBlocklist, listBlockedProductDetailIds, listShopifyPublicationsForDetail,
     getLinkfoxDetailSources, saveLinkfoxDetailImageUrls,
     listLinkfoxSkuPriceBackfillCandidates, updateProductSkuPricesFromLinkfox,
+    listPublishImageEditProductIds,
     createProductRagSync, startProductRagSync,
     completeProductRagSync, failProductRagSync, listProductRagSyncs, getDashboardStats,
     listProductOptionOverrides, upsertProductOptionOverride, deleteProductOptionOverride,

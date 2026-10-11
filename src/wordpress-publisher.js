@@ -194,8 +194,12 @@ export function resolvePublishImagesDetailed(detail, translation, imageMode = 't
   }
 
   const edits = (!ignoreEdits && detail?.raw_data?.publishImages) || null;
-  const storedRemoved = new Map((ignoreEdits || !Array.isArray(detail?.raw_data?.imageDedupe?.removed)
-    ? [] : detail.raw_data.imageDedupe.removed)
+  // Stored dedupe removals are pipeline state, not manual edits: they always
+  // apply to the base set. (ignoreEdits only skips the manual publishImages
+  // overrides, so the diff basis in the editor matches what the publisher
+  // would send without them — that is what makes "add back" registrable.)
+  const storedRemoved = new Map((Array.isArray(detail?.raw_data?.imageDedupe?.removed)
+    ? detail.raw_data.imageDedupe.removed : [])
     .map((entry) => [String(entry?.imageId ?? ''), String(entry?.reason ?? 'dedupe')]));
   const excludedIds = new Set((edits?.excluded ?? []).map(String));
   const addedIds = new Set((edits?.added ?? []).map(String));
