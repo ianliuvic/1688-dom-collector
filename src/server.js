@@ -3488,7 +3488,16 @@ function startFinalizeSplitJob(ids) {
                     postId: created.postId, publicationDate, config,
                   }).catch(() => {});
                 }
-                publishedCreates.push({ ...created, status: 'publish' });
+                // Refresh the permalink after publishing: the creation-time URL
+                // is the draft `?p=` form, the pretty link only exists now.
+                let publishedUrl = created.url;
+                try {
+                  const mapping = await wordpressClient(config)(
+                    `/wp-json/hx/v1/products/resolve?post_id=${Number(created.postId)}`,
+                    { timeoutMs: 20000 });
+                  if (mapping?.permalink) publishedUrl = mapping.permalink;
+                } catch { /* keep the creation-time URL */ }
+                publishedCreates.push({ ...created, url: publishedUrl, status: 'publish' });
                 job.published += 1;
               } catch (error) {
                 publishedCreates.push(created);

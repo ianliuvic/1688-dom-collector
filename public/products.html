@@ -1281,7 +1281,7 @@ async function firstPublishBundle(button){
         await reloadSplitPanel(id);
         const el = document.getElementById('split-status-' + id);
         if (el) {
-          el.textContent = '首次发布完成：已发布 ' + Number(job.published || 0) + ' 个拆分产品'
+          el.textContent = '首次发布完成：已发布 ' + (Number(job.published || 0) + Number(job.bundles || 0)) + ' 个产品（含主页面）'
             + (job.status === 'completed_with_errors'
               ? '（有错误：' + String(((job.errors || [])[0] || {}).message || '').slice(0, 80) + '）' : '');
         }
