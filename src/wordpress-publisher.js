@@ -395,7 +395,7 @@ function droppedVariantColours(detail) {
 const PLACEHOLDER_COLOUR_RE = /[\u4e00-\u9fff]|in stock|rest assured|buy with confidence|order with|picture color|image color|photo color|color as|as (picture|image)|shown in (the )?(picture|image)/i;
 
 function buildColorOptions(detail, translation, overrideIndex = null, normalizedColours = null,
-  normalizedColourBySource = null, normalizedEntries = null) {
+  normalizedColourBySource = null, normalizedEntries = null, droppedColours = null) {
   const dimension = findDimension(translation, ['color', '颜色']);
   const colors = unique(dimension?.values ?? []);
   const sourceOptions = Array.isArray(translation?.source_data?.skuOptions)
@@ -429,9 +429,18 @@ function buildColorOptions(detail, translation, overrideIndex = null, normalized
   );
 
   const used = new Set();
+  const isDropped = (value, normalized = null) => {
+    if (!droppedColours || !droppedColours.size) return false;
+    if (droppedColours.has(clean(value))) return true;
+    // The stored dimension/source label can differ from the true captured colour
+    // text (translators rename dimensions, e.g. "Custom"), so the normalization
+    // entry's own source is checked as well.
+    return Boolean(normalized && droppedColours.has(clean(normalized.source)));
+  };
   const list = colors.map((sourceLabel, index) => {
     const normalized = resolveNormalized(sourceLabel);
     if (normalized) used.add(normalized);
+    if (isDropped(sourceLabel, normalized)) return null;
     // The swatch image is keyed by the captured text, so resolve it before the
     // display label is replaced by an override.
     const imageUrl = optionImages.get(sourceLabel) || optionImagesBySource.get(sourceLabel) || '';
@@ -451,14 +460,14 @@ function buildColorOptions(detail, translation, overrideIndex = null, normalized
       source_image_url: imageUrl,
       image_source_id: manualImageId || (matched?.id ? String(matched.id) : (clean(normalized?.imageId) || '')),
     };
-  });
+  }).filter(Boolean);
 
   // Source data sometimes keeps the real colours only inside the normalization
   // (e.g. the captured colour option was a chatter line like "现货，放心拍~").
   // Those normalization entries have no translated counterpart: drop the
   // unmatched chatter option and append the authoritative normalized colours.
   const unmatched = (Array.isArray(normalizedEntries) ? normalizedEntries : [])
-    .filter((entry) => entry && !used.has(entry) && clean(entry?.text));
+    .filter((entry) => entry && !used.has(entry) && clean(entry?.text) && !isDropped(entry?.source, null));
   if (unmatched.length) {
     for (let i = list.length - 1; i >= 0; i -= 1) {
       const item = list[i];
@@ -545,7 +554,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   }
   const droppedColours = droppedVariantColours(detail);
   const colorOptions = buildColorOptions(detail, translation, overrideIndex, normalizedColours,
-    normalizedColourBySource, options.normalizedVariants?.colours ?? null)
+    normalizedColourBySource, options.normalizedVariants?.colours ?? null, droppedColours)
     .filter((color) => !droppedColours.size || !droppedColours.has(clean(color.source_label ?? color.label)));
   const swatchImageIds = new Set(colorOptions.map((color) => color.image_source_id).filter(Boolean));
   const swatchImages = options.imageMode === 'main_only' ? []
