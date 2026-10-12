@@ -2152,6 +2152,58 @@ app.post('/api/product-details/:id/split-product-status', { preHandler: requireD
   }
 });
 
+// Change the category of one split product (sibling) and re-sync the bundle
+// deterministically: the sync applies the new category to the post and
+// renumbers the style when the category scheme changes (e.g. Bikini Set ->
+// One Piece). Keepers use the classification editor instead.
+app.post('/api/product-details/:id/split-product-category', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const productId = String(request.body?.productId ?? '');
+  const primaryCategoryId = Number(request.body?.primaryCategoryId);
+  if (!productId || !Number.isInteger(primaryCategoryId) || primaryCategoryId <= 0) {
+    return reply.code(400).send({ error: 'product_and_primary_category_required' });
+  }
+  const taxonomies = await getWordPressTaxonomiesCached();
+  if (!taxonomies) return reply.code(503).send({ error: 'wordpress_taxonomies_unavailable' });
+  const known = new Map((taxonomies.categories ?? [])
+    .filter((category) => category?.id && category?.name)
+    .map((category) => [Number(category.id), String(category.name)]));
+  if (!known.has(primaryCategoryId)) return reply.code(400).send({ error: 'unknown_category' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (detail.bundle_status !== 'bundle') {
+    return reply.code(409).send({ error: 'not_a_bundle', message: '仅捆绑产品的拆分款使用该接口。' });
+  }
+  const record = await db.getSplitContents(id);
+  const product = (record?.result?.products ?? []).find((item) => String(item?.id) === productId);
+  if (!product?.wp?.postId) return reply.code(404).send({ error: 'split_product_not_found' });
+  if (product.wp.role === 'keeper') {
+    return reply.code(409).send({ error: 'keeper_uses_classification_editor',
+      message: 'keeper 请使用分类编辑（wordpress/classification）。' });
+  }
+  const publication = await db.getWordPressPublication(id);
+  if (!publication?.payload) {
+    return reply.code(409).send({ error: 'wordpress_publication_required',
+      message: '捆绑尚未发布，请先走拆分发布。' });
+  }
+  const before = { categoryId: product.wp.categoryId ?? null, styleNo: product.wp.styleNo ?? null };
+  const products = record.result.products.map((item) => (String(item?.id) === productId
+    ? { ...item, wp: { ...item.wp, categoryId: primaryCategoryId } }
+    : item));
+  const contents = { ...record.result, products };
+  await db.saveSplitContents(id, contents, record.model ?? null);
+  const job = await queueSplitSyncJob({
+    productDetailId: id, productId, detail, publication,
+    contents, trigger: 'split_category_update',
+  });
+  return {
+    status: 'updated', productDetailId: id, productId,
+    before, categoryId: primaryCategoryId, categoryName: known.get(primaryCategoryId),
+    sync: { jobId: job.id },
+  };
+});
+
 app.get('/api/split-order-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   return splitOrderJobs.get(request.params.id) ?? reply.code(404).send({ error: 'not_found' });
 });
