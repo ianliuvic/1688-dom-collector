@@ -110,7 +110,8 @@ export function buildRagProduct({ detail, translation = null, publication = null
 /** RAG document for one SPLIT product (keeper or sibling) of a bundle: the
  * family is represented per WordPress product, not as one whole-bundle doc. */
 export function buildSplitRagProduct({
-  detail, content, wp, translation = null, publication = null, categoryName = '', images = [], active = null,
+  detail, content, wp, translation = null, publication = null, categoryName = '', images = [],
+  wpImageUrl: wpImageUrlOverride = '', wpImageId: wpImageIdOverride = null, active = null,
 }) {
   if (!detail?.offer_id) throw new Error('A saved product detail with offer_id is required for RAG sync.');
   if (!content) throw new Error('A split product content is required for RAG sync.');
@@ -147,16 +148,20 @@ export function buildSplitRagProduct({
   const prices = (content.skus ?? [])
     .map((sku) => Number(sku.price)).filter((value) => Number.isFinite(value) && value > 0);
   const mainImage = imageEntities[0]?.imageUrl || '';
+  // Display image: the WordPress-hosted featured image (the search UI cannot
+  // display the hotlink-protected 1688 CDN urls); fall back to the first
+  // publish-set image when the post has no featured image.
+  const wpImage = clean(wpImageUrlOverride) || mainImage;
   return {
     canonicalProductId,
     sourcePlatform: '1688', sourceProductId: resolvedSourceId,
     productDetailId: Number(detail.id), wpPostId: Number(wp?.postId) || null,
-    wpImageId: null,
+    wpImageId: wpImageIdOverride != null ? Number(wpImageIdOverride) || null : null,
     styleNo: clean(wp?.styleNo) || null,
     title, description,
     category: clean(categoryName) || clean(publication?.payload?.meta?.primary_category) || '',
     wpUrl: clean(wp?.url),
-    wpImageUrl: mainImage || null,
+    wpImageUrl: wpImage || null,
     mainImageUrl: mainImage, active: isActive, attributes, tags,
     skuText,
     galleryImages: imageEntities,
@@ -169,8 +174,8 @@ export function buildSplitRagProduct({
       priceMax: prices.length ? Math.max(...prices) : detail.price_max,
       moq: detail.moq, stockTotal, attributes, tags,
       wordpressStatus: wpStatus || null,
-      wpMainImageUrl: mainImage || null,
-      wpMainImageId: null,
+      wpMainImageUrl: wpImage || null,
+      wpMainImageId: wpImageIdOverride != null ? Number(wpImageIdOverride) || null : null,
       imageAudit: null, skuAudit: null,
       lastCrawledAt: detail.last_crawled_at,
       splitProduct: {

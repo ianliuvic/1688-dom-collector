@@ -550,10 +550,22 @@ async function syncSplitProductsToRag(productDetailId, { trigger = 'split_sync' 
     for (const url of product.imageRefs?.imageUrls ?? []) {
       imageEntries.push({ id: null, url: String(url) });
     }
+    // The search UI displays the WordPress-hosted image; the 1688 CDN urls are
+    // hotlink-protected and render as broken placeholders.
+    let featuredImageUrl = '';
+    let featuredImageId = null;
+    try {
+      const mapping = await wordpressClient(config)(
+        `/wp-json/hx/v1/products/resolve?post_id=${Number(wp.postId)}`, { timeoutMs: 20000 });
+      featuredImageUrl = cleanText(mapping?.featured_image_url);
+      featuredImageId = mapping?.featured_media ?? null;
+    } catch { /* fall back to the publish-set image */ }
     const doc = buildSplitRagProduct({
       detail, content: product, wp, translation, publication,
       categoryName: categoryNames.get(Number(wp.categoryId)) ?? '',
       images: imageEntries,
+      wpImageUrl: featuredImageUrl,
+      wpImageId: featuredImageId,
     });
     const response = await ragClient.upsert(doc);
     const result = response?.results?.[0];
