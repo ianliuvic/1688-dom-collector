@@ -4,6 +4,7 @@ import path from 'node:path';
 import { analyzeProductMerchandising } from './product-merchandiser.js';
 import { applyReasoning } from './model-request.js';
 import { dedupeImagesByHash, normalizedSourceImageKey } from './image-dedupe.js';
+import { naturalSizeRank } from './variant-normalizer.js';
 import { applyOptionMapOverrides, buildOptionOverrideIndex,
   resolveOptionDisplayLabel } from './option-overrides.js';
 
@@ -564,6 +565,14 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
     const override = clean(normalizedSizeBySource?.get(clean(sourceValue))?.text);
     sizeEntries.push({ value: sourceValue, label: override || defaultSizeLabel(sourceValue) });
   }
+  // Sizes are always sorted smallest-to-largest on the published product: the
+  // translation/merge order can be arbitrary (e.g. S, L, M) and 1688 listings
+  // frequently arrange sizes by stock rather than by size.
+  sizeEntries.sort((left, right) => {
+    const [kindLeft, rankLeft] = naturalSizeRank(clean(left.label) || clean(left.value));
+    const [kindRight, rankRight] = naturalSizeRank(clean(right.label) || clean(right.value));
+    return kindLeft - kindRight || rankLeft - rankRight;
+  });
   const droppedColours = droppedVariantColours(detail);
   const colorOptions = buildColorOptions(detail, translation, overrideIndex, normalizedColours,
     normalizedColourBySource, options.normalizedVariants?.colours ?? null, droppedColours)

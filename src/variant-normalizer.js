@@ -134,10 +134,13 @@ function sanitizeCode(value) {
   return code || null;
 }
 
-function naturalSizeRank(label) {
+export function naturalSizeRank(label) {
   const upper = label.toUpperCase();
   const index = SIZE_ORDER.indexOf(upper);
   if (index >= 0) return [0, index];
+  // Plus-size run (0XL..6XL) sorts ascending right after the letter sizes.
+  const plus = upper.match(/^(\d)XL$/);
+  if (plus) return [0, 8 + Number(plus[1])];
   const numeric = Number(label.match(/\d+(?:\.\d+)?/)?.[0]);
   if (Number.isFinite(numeric) && /^\d/.test(label)) return [1, numeric];
   if (/(均码|one\s*size|free)/i.test(label)) return [2, 0];
