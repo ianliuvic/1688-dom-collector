@@ -135,16 +135,19 @@ function sanitizeCode(value) {
 }
 
 export function naturalSizeRank(label) {
-  const upper = label.toUpperCase();
+  // Rank the BASE size: annotations like "XL (14-16Y)" or "One Size (1)" must
+  // sort by their leading size text, not fall into the unknown bucket.
+  const base = String(label ?? '').replace(/[（(][^）)]*[）)]\s*$/g, '').trim() || String(label ?? '').trim();
+  const upper = base.toUpperCase();
   // Plus-size run (0XL..6XL) first: it must stay monotonic and must not collide
   // with the letter sizes (2XL is a plus label, not "XXL+1").
   const plus = upper.match(/^(\d)XL$/);
   if (plus) return [0, 8 + Number(plus[1])];
   const index = SIZE_ORDER.indexOf(upper);
   if (index >= 0) return [0, index];
-  const numeric = Number(label.match(/\d+(?:\.\d+)?/)?.[0]);
-  if (Number.isFinite(numeric) && /^\d/.test(label)) return [1, numeric];
-  if (/(均码|one\s*size|free)/i.test(label)) return [2, 0];
+  const numeric = Number(base.match(/\d+(?:\.\d+)?/)?.[0]);
+  if (Number.isFinite(numeric) && /^\d/.test(base)) return [1, numeric];
+  if (/(均码|one\s*size|free)/i.test(base)) return [2, 0];
   return [3, 0];
 }
 
