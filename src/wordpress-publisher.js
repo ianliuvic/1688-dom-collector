@@ -1619,7 +1619,8 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     };
   }
 
-  // 2) Create the remaining split products as drafts.
+  // 2) Create the remaining split products (new ones as drafts for the review
+  //    flow; already-published siblings must stay live across re-syncs).
   for (const [index, content] of siblings.entries()) {
     try {
       const previousWp = storedWp.get(String(content.id)) ?? null;
@@ -1627,6 +1628,16 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       const externalId = clean(previousWp?.externalId)
         || (storedPostId ? postToExternalId.get(storedPostId) : null)
         || `${template.external_id}S${index + 2}`;
+      // The sync endpoint applies the payload status, so a re-sync must never
+      // take a live sibling page down. Keep 'publish' whenever the sibling is
+      // already published (stored status first, then the live WP post) and only
+      // create genuinely new siblings as drafts.
+      let siblingStatus = String(previousWp?.status ?? '') === 'publish' ? 'publish' : 'draft';
+      if (siblingStatus === 'draft' && externalId) {
+        const live = await wp(`/wp-json/hx/v1/products/by-external-id/${encodeURIComponent(externalId)}`, { timeoutMs: 30000 })
+          .catch(() => null);
+        if (clean(live?.status).toLowerCase() === 'publish') siblingStatus = 'publish';
+      }
       const review = skipReview ? null : await reviewSplitProduct({
         content,
         options: optionsFor(content),
@@ -1691,7 +1702,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         style_no: styleNo,
         title,
         description,
-        status: 'draft',
+        status: siblingStatus,
         category_ids: categoryId ? [categoryId] : (template.category_ids ?? []),
         images,
         colors: colours.length ? { default: colours[0].value, colors: colours } : null,
