@@ -5159,6 +5159,32 @@ app.get('/api/shops/:id/products', { preHandler: requireApiKey }, async (request
   return db.listShopProducts(request.params.id, request.query?.limit);
 });
 
+// Captured product-detail ids belonging to a shop (for purge-before-removal).
+app.get('/api/shops/:id/captured', { preHandler: requireApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_shop_id' });
+  const ids = await db.shopCapturedProductIds(id);
+  return { shopId: id, captured: ids.length, ids };
+});
+
+// Remove a shop from the collector entirely: its collected listings and scan
+// history are deleted with it. Refuses while captures from the shop still
+// exist (purge them first) unless force=true.
+app.delete('/api/shops/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_shop_id' });
+  const ids = await db.shopCapturedProductIds(id);
+  if (ids.length && request.body?.force !== true) {
+    return reply.code(409).send({
+      error: 'captured_products_exist', captured: ids.length,
+      message: '该店铺仍有已采集的产品，请先 purge 后再移除店铺（或传 force=true）。',
+    });
+  }
+  const removed = await db.deleteShopProfile(id);
+  if (!removed) return reply.code(404).send({ error: 'shop_not_found' });
+  return { ok: true, shopId: id, removed: true, capturedAtRemoval: ids.length };
+});
+
 app.post('/api/product-details', { preHandler: [requireApiKey, requireCollectorMode] }, async (request, reply) => {
   const suppliedUrl = request.body?.url;
   const offerId = request.body?.offerId;

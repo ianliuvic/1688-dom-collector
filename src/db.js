@@ -778,6 +778,23 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  /** Captured product-detail ids that belong to a shop (matched by offer id). */
+  async function shopCapturedProductIds(shopId) {
+    const result = await pool.query(`SELECT DISTINCT details.id
+      FROM product_details details
+      JOIN shop_products products ON products.offer_id = details.offer_id
+      WHERE products.shop_id = $1
+      ORDER BY details.id`, [Number(shopId)]);
+    return result.rows.map((row) => Number(row.id));
+  }
+
+  /** Remove a shop profile; its listings and scan history cascade (FK). */
+  async function deleteShopProfile(shopId) {
+    const result = await pool.query(
+      'DELETE FROM shop_profiles WHERE id=$1 RETURNING id', [Number(shopId)]);
+    return result.rows[0] ?? null;
+  }
+
   async function saveShopScan(jobId, data, { completeInventory = false } = {}) {
     if (!data || data.pageType !== 'shop-offer-collection' || !data.shop) return null;
     const shop = await upsertShopProfile(data.shop);
@@ -3471,6 +3488,7 @@ export function createDatabase(databaseUrl) {
 
   return { pool, migrate, createJob, getJob, claimNextJob, completeJob, upsertShopProfile,
     saveShopScan, listShopProfiles, listShopProducts, listShopProductSources,
+    shopCapturedProductIds, deleteShopProfile,
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     updateProductLinkFoxData, deleteProductDetail,
