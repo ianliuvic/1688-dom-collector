@@ -5841,7 +5841,8 @@ app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboar
 }));
 
 // Recompute the sample-availability meta for published pages whose payload stock
-// changed after the last sync (split/renumber runs). Deterministic, no model.
+// no longer matches the page flag (either direction; safety margin 5). Used to
+// re-apply the availability standard across existing products. Deterministic, no model.
 const stockRepairJobs = new Map();
 
 app.post('/api/wordpress/publications/stock-audit/repair', { preHandler: requireApiKey }, async (_request, reply) => {
@@ -5856,7 +5857,15 @@ app.post('/api/wordpress/publications/stock-audit/repair', { preHandler: require
   trimTerminalJobs(stockRepairJobs);
   (async () => {
     try {
-      const rows = await db.listSampleAvailabilityMismatches(500);
+      const mismatches = await db.listSampleAvailabilityMismatches(500);
+      const staleUnavailable = await db.listNotAvailableButInStock(500);
+      const seenDetails = new Set();
+      const rows = [...mismatches, ...staleUnavailable].filter((row) => {
+        const key = String(row.product_detail_id);
+        if (seenDetails.has(key)) { return false; }
+        seenDetails.add(key);
+        return true;
+      });
       job.total = rows.length;
       for (const row of rows) {
         try {
@@ -5864,10 +5873,11 @@ app.post('/api/wordpress/publications/stock-audit/repair', { preHandler: require
           const payload = publication?.payload;
           if (!publication || !payload) { job.failed += 1; continue; }
           const skuRows = Array.isArray(payload.sku_matrix?.rows) ? payload.sku_matrix.rows : [];
-          // 口径：全零才按无库存；任一有货即按有库存。
+          // 口径（2026-10-12）：采集库存 - 5 > 0 才算有货；全部 ≤ 5 才按按需（made to order）。
           const anyInStock = skuRows.some((sku) => {
             const value = sku?.source_stock;
-            return value !== null && value !== undefined && value !== '' && Number(value) > 0;
+            return value !== null && value !== undefined && value !== ''
+              && Number.isFinite(Number(value)) && Number(value) - 5 > 0;
           });
           payload.meta = {
             ...(payload.meta ?? {}),

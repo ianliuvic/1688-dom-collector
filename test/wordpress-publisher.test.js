@@ -53,7 +53,7 @@ test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
   assert.equal(result.payload.sku_matrix.rows[1].available, false);
   assert.deepEqual(result.payload.bulk_pricing.tiers.map((tier) => tier.price), [6.69, 5.92, 5.15]);
   assert.equal(result.payload.meta.sample_price, '50.00');
-  assert.equal(result.payload.meta.sample_available, false);
+  assert.equal(result.payload.meta.sample_available, true);
   assert.equal(result.payload.meta.bulk_lead_time, '~28 days');
   assert.equal(result.payload.meta.material, 'Polyester');
   assert.equal(result.payload.meta.fabric_weight, '200gsm');
@@ -123,14 +123,23 @@ test('blocks full-image publishing when Gallery completeness was not verified', 
   }), /complete, verified 1688 product Gallery/);
 });
 
-test('uses the highest source SKU price and marks retail stock only when every SKU is in stock', () => {
-  const inStock = { ...detail, price_max: '20', skus: detail.skus.map((sku, index) => ({ ...sku, price: index ? '25' : '23.5', stock: '2' })) };
+test('marks sample availability only when a SKU keeps stock above the 5-piece safety margin', () => {
+  const inStock = { ...detail, price_max: '20', skus: detail.skus.map((sku, index) => ({ ...sku, price: index ? '25' : '23.5', stock: '6' })) };
   const result = buildWordPressProductDraft({ detail: inStock, translation,
     options: { styleNo: 'SWBK143', categoryIds: [35], primaryCategoryId: 35 },
     taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] } });
   assert.equal(buildWearHongxiuPricing(inStock).source_max_price, 25);
   assert.equal(result.payload.meta.sample_available, true);
+  assert.equal(result.payload.sku_matrix.rows[0].available, true);
   assert.equal(result.payload.bulk_pricing.tiers[0].price, 6.92);
+
+  const margin = { ...detail, skus: detail.skus.map((sku) => ({ ...sku, stock: '5' })) };
+  const marginResult = buildWordPressProductDraft({ detail: margin, translation,
+    options: { styleNo: 'SWBK144', categoryIds: [35], primaryCategoryId: 35 },
+    taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] } });
+  assert.equal(marginResult.payload.meta.sample_available, false);
+  assert.equal(marginResult.payload.meta.sample_lead_time, '7 to 14 working days');
+  assert.equal(marginResult.payload.sku_matrix.rows[0].available, false);
 });
 
 test('does not trust an unverified global page price over exact saved SKU prices', () => {

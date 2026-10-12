@@ -70,15 +70,28 @@ export function buildWearHongxiuPricing(detail, { sourceMaxOverride = null } = {
     exchange_rate_cny_per_usd: exchangeRate, formula: '(source maximum CNY price + tier markup) / 6.5', tiers };
 }
 
-function allSkuRowsInStock(rows) {
-  return rows.length > 0 && rows.every((row) => row.source_stock !== null && row.source_stock > 0);
+// 安全余量（2026-10-12 用户确认）：采集库存 - 5 > 0 才算"有货"；
+// 库存 0..5（含）与未知一律视为无货（made to order）。
+const STOCK_SAFETY_MARGIN = 5;
+
+function stockLooksInStock(value) {
+  return value !== null && value !== undefined && value !== ''
+    && Number.isFinite(Number(value)) && Number(value) - STOCK_SAFETY_MARGIN > 0;
 }
 
-// 口径（2026-10-11 用户确认）：整款"无库存/按需"仅当所有尺码库存全为 0；
-// 只要任一尺码有货就按"有库存"发布（影响前台的打样费/起订量展示）。
+function skuRowInStock(row) {
+  return stockLooksInStock(row?.source_stock);
+}
+
+function allSkuRowsInStock(rows) {
+  return rows.length > 0 && rows.every((row) => skuRowInStock(row));
+}
+
+// 口径（2026-10-12 用户确认）：整款"按需（made to order）"仅当所有尺码的
+// 采集库存 - 5 ≤ 0；只要任一尺码 库存 - 5 > 0 就按"Available from stock"发布
+// （影响前台的打样费/起订量/打样徽标展示）。
 function anySkuRowInStock(rows) {
-  return rows.some((row) => row.source_stock !== null && row.source_stock !== undefined
-    && row.source_stock !== '' && Number(row.source_stock) > 0);
+  return rows.some((row) => skuRowInStock(row));
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +367,7 @@ function buildSkuMatrix(detail, translation, overrideIndex = null, normalizedCol
       source_currency: clean(detail.currency) || 'CNY',
       source_stock: numberOrNull(sku.stock),
       image_source_url: clean(sku.image_source_url),
-      available: numberOrNull(sku.stock) === null ? null : Number(sku.stock) > 0,
+      available: numberOrNull(sku.stock) === null ? null : stockLooksInStock(sku.stock),
       supplier_sku: clean(sku.variant_sku) || null,
     };
   });
@@ -1492,7 +1505,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         source_currency: clean(template.source?.currency) || 'CNY',
         source_stock: sku.stock ?? null,
         supplier_sku: supplierSku,
-        available: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock) > 0,
+        available: sku.stock === null || sku.stock === undefined ? null : stockLooksInStock(sku.stock),
       };
     });
   };
