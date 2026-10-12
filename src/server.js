@@ -6575,11 +6575,24 @@ app.post('/api/product-details/:id/wordpress/classification', { preHandler: requ
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
-  if (detail.bundle_status === 'bundle') {
-    return reply.code(409).send({ error: 'bundle_split_flow',
-      message: '捆绑产品请使用拆分/发布流程调整类目。' });
-  }
+  const isBundle = detail.bundle_status === 'bundle';
   const publication = await db.getWordPressPublication(id);
+  // Bundle keepers are real WordPress posts owned by the bundle's publication
+  // row; editing one here applies to that post and keeps the split contents in
+  // sync. Sibling products have no publication and still go through the split
+  // flow (their stored category is set by the split review).
+  let bundleRecord = null;
+  let bundleKeeper = null;
+  if (isBundle) {
+    bundleRecord = await db.getSplitContents(id);
+    bundleKeeper = (bundleRecord?.result?.products ?? [])
+      .find((product) => product?.wp?.role === 'keeper' && product?.wp?.postId) ?? null;
+    if (!bundleKeeper || !publication?.wp_post_id
+      || Number(publication.wp_post_id) !== Number(bundleKeeper.wp.postId)) {
+      return reply.code(409).send({ error: 'bundle_split_flow',
+        message: '捆绑产品请使用拆分/发布流程调整类目。' });
+    }
+  }
   if (!publication?.wp_post_id || !publication.payload) {
     return reply.code(409).send({ error: 'wordpress_publication_required',
       message: '尚未发布到 WordPress，请走正常发布流程。' });
@@ -6637,21 +6650,52 @@ app.post('/api/product-details/:id/wordpress/classification', { preHandler: requ
 
   try {
     if (styleNo) {
-      // Style change: recompose the local variant SKUs first (the refresh
-      // rebuilds the payload's SKU matrix from them), then one refresh sync
-      // applies both the new style number and the new categories.
-      const normalization = await db.getVariantNormalization(id);
-      if (normalization) {
-        await saveComposedSkus(detail, normalization, styleNo).catch(() => null);
-      }
-      const result = await refreshPublishedProduct(id, {
-        statusOverride: publication.wp_status,
-        styleOverride: styleNo,
-        categoryOverride: { categoryIds: finalCategoryIds, primaryCategoryId },
-      });
-      if (result.skipped) {
-        return reply.code(409).send({ error: 'nothing_to_sync',
-          message: '缺少翻译或发布记录，无法同步。' });
+      if (isBundle) {
+        // Bundle keeper: replay the keeper payload with the corrected categories
+        // and SKU prefixes (a regular refresh would rebuild the payload from the
+        // bundle instead of the keeper).
+        const payload = structuredClone(publication.payload);
+        const oldStyle = String(publication.style_no ?? '');
+        payload.category_ids = finalCategoryIds;
+        payload.meta = { ...(payload.meta ?? {}),
+          primary_category_id: String(primaryCategoryId), primary_category: primaryCategory };
+        if (oldStyle && oldStyle !== styleNo) {
+          for (const row of payload.sku_matrix?.rows ?? []) {
+            if (typeof row?.supplier_sku === 'string' && row.supplier_sku.startsWith(oldStyle)) {
+              row.supplier_sku = styleNo + row.supplier_sku.slice(oldStyle.length);
+            }
+          }
+        }
+        const synced = await updateWordPressProductStyleNumber({
+          publication: { ...publication, payload }, styleNo, config,
+          optionOverrides: await db.listProductOptionOverrides(id),
+        });
+        const wp = synced.wordpress;
+        const bundleHash = crypto.createHash('sha256').update(JSON.stringify(synced.payload)).digest('hex');
+        await db.saveWordPressPublication(id, {
+          translationId: publication.translation_id, externalId: publication.external_id,
+          styleNo, wpPostId: wp.post_id ?? publication.wp_post_id,
+          wpUrl: wp.permalink ?? publication.wp_url, wpEditUrl: wp.edit_link ?? publication.wp_edit_url,
+          wpStatus: wp.status ?? publication.wp_status, syncHash: bundleHash, payload: synced.payload,
+          result: { ...(publication.result ?? {}), ...wp }, lastError: null,
+        });
+      } else {
+        // Style change: recompose the local variant SKUs first (the refresh
+        // rebuilds the payload's SKU matrix from them), then one refresh sync
+        // applies both the new style number and the new categories.
+        const normalization = await db.getVariantNormalization(id);
+        if (normalization) {
+          await saveComposedSkus(detail, normalization, styleNo).catch(() => null);
+        }
+        const result = await refreshPublishedProduct(id, {
+          statusOverride: publication.wp_status,
+          styleOverride: styleNo,
+          categoryOverride: { categoryIds: finalCategoryIds, primaryCategoryId },
+        });
+        if (result.skipped) {
+          return reply.code(409).send({ error: 'nothing_to_sync',
+            message: '缺少翻译或发布记录，无法同步。' });
+        }
       }
     } else {
       // Categories only: direct classification on the post + local payload fix.
@@ -6676,6 +6720,26 @@ app.post('/api/product-details/:id/wordpress/classification', { preHandler: requ
     request.log.error({ err: error, productDetailId: id }, 'classification update failed');
     return reply.code(502).send({ error: 'classification_update_failed',
       message: String(error?.message ?? error).slice(0, 300) });
+  }
+
+  // Bundle keeper: mirror the change into the split contents (style/category
+  // and the composed SKU prefixes) so the panel and later re-syncs stay aligned.
+  if (isBundle && bundleKeeper && bundleRecord?.result?.products) {
+    const oldStyle = String(publication.style_no ?? '');
+    const nextWp = { ...bundleKeeper.wp, categoryId: primaryCategoryId };
+    if (styleNo) nextWp.styleNo = styleNo;
+    const products = bundleRecord.result.products.map((product) => {
+      if (String(product?.id) !== String(bundleKeeper.id)) return product;
+      const next = { ...product, wp: nextWp };
+      if (styleNo && oldStyle && oldStyle !== styleNo && Array.isArray(product.skus)) {
+        next.skus = product.skus.map((sku) => (sku && typeof sku.sku === 'string'
+          ? { ...sku, sku: sku.sku.split(oldStyle).join(styleNo) }
+          : sku));
+      }
+      return next;
+    });
+    await db.saveSplitContents(id, { ...bundleRecord.result, products }, bundleRecord.model ?? null)
+      .catch(() => null);
   }
 
   const rag = await scheduleProductRagSync(id, { trigger: 'wordpress_classification_update' })
