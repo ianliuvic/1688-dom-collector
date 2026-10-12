@@ -643,6 +643,7 @@ app.post('/api/wordpress/rag/split-rebuild', { preHandler: requireApiKey }, asyn
   const ids = Array.isArray(request.body?.ids)
     ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 500)
     : null;
+  const recordsOnly = request.body?.recordsOnly === true;
   const job = {
     id: crypto.randomUUID(), status: 'running', total: 0, processed: 0, bundles: 0,
     syncedProducts: 0, skipped: 0, clearedLegacy: 0, failed: 0,
@@ -665,7 +666,24 @@ app.post('/api/wordpress/rag/split-rebuild', { preHandler: requireApiKey }, asyn
           const productDetailId = Number(rows[index].product_detail_id);
           job.processed += 1;
           try {
-            const summary = await syncSplitProductsToRag(productDetailId, { trigger: 'rag_split_rebuild' });
+            let summary;
+            if (recordsOnly) {
+              // Badge backfill: derive the per-product summary from the stored
+              // contents without touching the RAG service.
+              const contents = await db.getSplitContents(productDetailId);
+              const items = (contents?.result?.products ?? []).map((product) => ({
+                productId: product?.id ?? null, styleNo: product?.wp?.styleNo ?? null,
+                role: product?.wp?.role === 'keeper' ? 'keeper' : 'split',
+                active: product?.wp?.status === 'publish',
+                skipped: product?.wp?.postId ? undefined : 'no_wp_post',
+              }));
+              summary = {
+                products: items.length, synced: items.filter((entry) => !entry.skipped).length,
+                legacyCleared: false, results: items,
+              };
+            } else {
+              summary = await syncSplitProductsToRag(productDetailId, { trigger: 'rag_split_rebuild' });
+            }
             job.bundles += 1;
             job.syncedProducts += summary.synced;
             job.skipped += summary.results.filter((entry) => entry.skipped).length;
@@ -680,6 +698,24 @@ app.post('/api/wordpress/rag/split-rebuild', { preHandler: requireApiKey }, asyn
                 })),
               });
             }
+            // Badge record for the products page (best effort, no RAG calls).
+            try {
+              const detail = await db.getProductDetail(productDetailId);
+              const keeper = (summary.results ?? [])
+                .find((entry) => entry.role === 'keeper' && !entry.skipped);
+              const record = await db.createProductRagSync(productDetailId, {
+                trigger: 'rag_split_rebuild', canonicalProductId: detail?.offer_id ? `1688:${detail.offer_id}` : null,
+                requestSummary: { sourceProductId: detail?.offer_id ? String(detail.offer_id) : null, split: true, rebuild: true },
+              });
+              await db.completeProductRagSync(record.id, {
+                active: Boolean(keeper?.active ?? (summary.results ?? []).some((entry) => entry.active)),
+                responseSummary: {
+                  split: true, synced: summary.synced,
+                  skipped: summary.results.filter((entry) => entry.skipped).length,
+                  rebuild: true,
+                },
+              });
+            } catch { /* badge record is best effort */ }
           } catch (error) {
             job.failed += 1;
             if (job.errors.length < 200) {
