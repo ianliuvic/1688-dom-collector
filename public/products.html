@@ -1281,6 +1281,13 @@ let swatchPick = null; // { id, productId, colourSource, strip, statusEl }
 function publishStripFor(el){
   const card = el.closest('.sp-product');
   if (!card) return null;
+  // 发布图行可能为空（0 张）：先按行标记定位容器，不能要求已存在发布图，
+  // 否则「添加图片」/「更换 Swatch」在无发布图时点击无效。
+  const pubRow = card.querySelector('.sp-row[data-pub-row]');
+  if (pubRow) {
+    const strip = pubRow.querySelector('.sp-imgs');
+    if (strip) return strip;
+  }
   for (const row of card.querySelectorAll('.sp-row')) {
     const strip = row.querySelector('.sp-imgs');
     if (strip && strip.querySelector('.sp-pub-img')) return strip;
@@ -2542,16 +2549,17 @@ document.addEventListener('click', (e) => {
     endSwatchPick();
     if (!wasActive) {
       const strip = publishStripFor(pubAdd);
+      // 已分配图可能为空：此时仍可点「全部图片」加图，assignedStrip 仅用于高亮。
       const assignedStrip = assignedStripFor(pubAdd);
       const row = pubAdd.closest('.sp-row');
       const statusEl = row ? row.querySelector('.sp-pub-status') : null;
-      if (strip && assignedStrip) {
+      if (strip) {
         addPick = {
           id: String(pubAdd.dataset.pubAdd),
           productId: String(pubAdd.dataset.pubProduct),
           strip, assignedStrip, statusEl, button: pubAdd,
         };
-        assignedStrip.classList.add('adding-publish');
+        if (assignedStrip) assignedStrip.classList.add('adding-publish');
         pubAdd.textContent = '结束添加';
         updatePoolHighlight(String(pubAdd.dataset.pubAdd));
         if (statusEl) statusEl.textContent = '点选「已分配图」或「全部图片」中的图片加入发布图（Esc 结束）';
@@ -2574,17 +2582,18 @@ document.addEventListener('click', (e) => {
     const statusEl = row ? row.querySelector('.sp-swatch-status') : null;
     endSwatchPick();
     endAddPick();
-    if (strip) {
-      swatchPick = {
-        id: String(swatchBtn.dataset.swatchReplace),
-        productId: String(swatchBtn.dataset.swatchProduct),
-        colourSource: String(swatchBtn.dataset.swatchColour),
-        strip, statusEl,
-      };
-      strip.classList.add('picking-swatch');
-      updatePoolHighlight(String(swatchBtn.dataset.swatchReplace));
-      if (statusEl) statusEl.textContent = '请从「发布图」或「全部图片」中点选一张作为 Swatch（Esc 取消）';
-    }
+    // 发布图可能为空：仍允许从「全部图片」点选（strip 为 null 时跳过发布图高亮）。
+    swatchPick = {
+      id: String(swatchBtn.dataset.swatchReplace),
+      productId: String(swatchBtn.dataset.swatchProduct),
+      colourSource: String(swatchBtn.dataset.swatchColour),
+      strip, statusEl,
+    };
+    if (strip) strip.classList.add('picking-swatch');
+    updatePoolHighlight(String(swatchBtn.dataset.swatchReplace));
+    if (statusEl) statusEl.textContent = strip
+      ? '请从「发布图」或「全部图片」中点选一张作为 Swatch（Esc 取消）'
+      : '暂无发布图；请从「全部图片」中点选一张作为 Swatch（Esc 取消）';
     return;
   }
   const swatchReset = e.target.closest('button[data-swatch-reset]');
