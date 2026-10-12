@@ -140,6 +140,13 @@ function sizeMatches(a, b) {
   return false;
 }
 
+// Leading letter/number run of a size text ("S (90-105 jin)…" -> "s"), used to
+// align annotated translation sizes with their captured source sizes.
+function sizeLeadingToken(value) {
+  const match = clean(value).toLowerCase().match(/^[a-z]+|^\d+(?:\.\d+)?/);
+  return match ? match[0] : '';
+}
+
 function defaultSizeLabel(value) {
   const text = clean(value);
   if (!text) return '';
@@ -557,26 +564,54 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
     detail, translation, options.imageMode, options.allowUnverifiedGallery === true,
   );
   const sizeDimension = findDimension(translation, ['size', '尺码']);
-  const sizes = unique(sizeDimension?.values ?? []);
+  const translationSizes = unique(sizeDimension?.values ?? []);
   const normalizedColours = buildNormalizedTranslatedMap(translation, options.normalizedVariants?.colours, ['color', '颜色']);
-  const normalizedSizes = buildNormalizedTranslatedMap(translation, options.normalizedVariants?.sizes, ['size', '尺码']);
   const normalizedColourBySource = new Map((options.normalizedVariants?.colours ?? [])
     .map((colour) => [clean(colour?.source), colour]));
   const normalizedSizeBySource = new Map((options.normalizedVariants?.sizes ?? [])
     .map((size) => [clean(size?.source), size]));
-  const sizeLabel = (value) => clean(normalizedSizes?.get(clean(value))?.text) || value;
-  // Size completeness guard: merge the translation's size list with the captured
-  // source sizes so no size is ever lost at publish (stale translations can be
-  // truncated). Labels keep the translation/normalization wording when possible.
-  const sizeEntries = [];
-  for (const value of unique(sizeDimension?.values ?? [])) {
-    sizeEntries.push({ value, label: sizeLabel(value) });
+  // Size labels always come from the VARIANT NORMALIZATION result (the
+  // translation wording is only a fallback): sellers pack weight hints and
+  // fitting notes into the size text ("S（90-105斤）卡码拍小") while the
+  // normalized entry is the clean storefront label ("S"). The translated size
+  // list and the captured source list run in the same order, so align them
+  // positionally (falling back to size matching when the counts differ).
+  const sourceSizes = sourceSizeValues(detail);
+  const alignedSource = new Map();
+  if (translationSizes.length && translationSizes.length === sourceSizes.length) {
+    translationSizes.forEach((value, index) => alignedSource.set(value, sourceSizes[index]));
+  } else if (translationSizes.length) {
+    const usedSources = new Set();
+    for (const value of translationSizes) {
+      const match = sourceSizes.find((candidate) => !usedSources.has(candidate) && sizeMatches(value, candidate))
+        ?? sourceSizes.find((candidate) => !usedSources.has(candidate)
+          && sizeLeadingToken(value) !== '' && sizeLeadingToken(value) === sizeLeadingToken(candidate));
+      if (match) {
+        alignedSource.set(value, match);
+        usedSources.add(match);
+      }
+    }
   }
-  for (const sourceValue of sourceSizeValues(detail)) {
+  const normalizedFor = (value) => {
+    const source = alignedSource.get(value) ?? value;
+    return normalizedSizeBySource.get(clean(source)) ?? normalizedSizeBySource.get(clean(value)) ?? null;
+  };
+  const sizeEntries = translationSizes.map((value) => {
+    const normalized = normalizedFor(value);
+    const label = clean(normalized?.text) || value;
+    return { value: label, label };
+  });
+  // Size completeness guard: merge the captured source sizes so no size is ever
+  // lost at publish (stale translations can be truncated). Sources already
+  // represented by an entry (positional alignment or size matching) are skipped.
+  const alignedSources = new Set(alignedSource.values());
+  for (const sourceValue of sourceSizes) {
+    if (alignedSources.has(sourceValue)) continue;
     if (sizeEntries.some((entry) => sizeMatches(entry.value, sourceValue)
       || sizeMatches(entry.label, sourceValue))) continue;
     const override = clean(normalizedSizeBySource?.get(clean(sourceValue))?.text);
-    sizeEntries.push({ value: sourceValue, label: override || defaultSizeLabel(sourceValue) });
+    const label = override || defaultSizeLabel(sourceValue);
+    sizeEntries.push({ value: label, label });
   }
   // Sizes are always sorted smallest-to-largest on the published product: the
   // translation/merge order can be arbitrary (e.g. S, L, M) and 1688 listings

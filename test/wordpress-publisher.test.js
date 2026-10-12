@@ -142,6 +142,38 @@ test('marks sample availability only when a SKU keeps stock above the 5-piece sa
   assert.equal(marginResult.payload.sku_matrix.rows[0].available, false);
 });
 
+test('publishes size labels from the variant normalization instead of the translation wording', () => {
+  const annotated = {
+    ...detail,
+    raw_data: { ...detail.raw_data, skuDimensions: [
+      { name: 'Color', values: ['图片色'] },
+      { name: '尺码', values: ['S（90-105斤）卡码拍小', 'M（105-120斤）卡码拍小'] },
+    ] },
+  };
+  const annotatedTranslation = {
+    ...translation,
+    sku_dimensions: [
+      { name: 'Color', values: ['As Picture'] },
+      { name: 'Size', values: [
+        'S (90-105 jin) size down if between sizes',
+        'M (105-120 jin) size down if between sizes',
+      ] },
+    ],
+  };
+  const normalized = {
+    sizes: [
+      { source: 'S（90-105斤）卡码拍小', text: 'S' },
+      { source: 'M（105-120斤）卡码拍小', text: 'M' },
+    ],
+  };
+  const result = buildWordPressProductDraft({ detail: annotated, translation: annotatedTranslation,
+    options: { styleNo: 'SWOP502', categoryIds: [35], primaryCategoryId: 35, normalizedVariants: normalized },
+    taxonomies: { categories: [{ id: 35, name: 'Bikini Set' }] } });
+  assert.deepEqual(result.payload.sizes.sizes.map((size) => [size.label, size.value]),
+    [['S', 'S'], ['M', 'M']]);
+  assert.equal(result.payload.sizes.default, 'S');
+});
+
 test('does not trust an unverified global page price over exact saved SKU prices', () => {
   const polluted = { ...detail, price_min: '23', price_max: '999',
     raw_data: { ...detail.raw_data, price: { min: 23, max: 999, verified: false } },
