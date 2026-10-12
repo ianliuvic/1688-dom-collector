@@ -1347,12 +1347,7 @@ function buildVariantsCard(data){
     let dropControl = '';
     if (sourceKey && !dropBtnShown.has(sourceKey)) {
       dropBtnShown.add(sourceKey);
-      dropControl = ' <button type="button" class="norm-edit-btn"'
-        + ' data-variant-drop-id="' + esc(String(data.productDetailId)) + '"'
-        + ' data-variant-drop="' + esc(sourceKey) + '"'
-        + ' data-dropped="' + (isDropped ? '1' : '0') + '"'
-        + ' title="' + (isDropped ? '恢复：重新纳入发布（颜色与 SKU 行）' : '删除：发布时从颜色列表与 SKU 行中剔除（可恢复）') + '">'
-        + (isDropped ? '恢复' : '删除') + '</button>' + (isDropped ? ' <span class="pp-chip warn">已删除</span>' : '');
+      dropControl = isDropped ? ' <span class="pp-chip warn">已删除</span>' : '';
     }
     const normColourCell = (normColourText
       ? esc(normColourText) + (normCode ? ' <span class="pp-muted" title="SKU 颜色缩写（用于组合 SKU 编码）">' + esc(normCode) + '</span>' : '')
@@ -1388,7 +1383,7 @@ function buildVariantsCard(data){
     + (extraRaw.length ? ' + ' + extraRaw.length + ' 行未规范化' : '') + '）</div>'
     + '<table class="pp-table">' + head + '<tbody>' + body.join('') + '</tbody></table>'
     + '<div class="pp-muted" style="margin-top:4px">蓝色列为规范化结果：组合 SKU = 款号-颜色缩写-尺码；「规范化颜色」显示 颜色名 + SKU 缩写（如 Red RED，缩写用于生成组合 SKU 与商品 SKU）。'
-    + '每个颜色旁的「删除」按钮会在发布时把该颜色从颜色列表与 SKU 行中一并剔除（可随时「恢复」）。'
+    + '颜色的删除/恢复在「变体规范化」面板操作；标有「已删除」的颜色发布时会被从颜色列表与 SKU 行中剔除。'
     + '灰色列为 1688 原始数据（「原始变体」悬停可见完整原始键）。未规范化的行发布时会被舍弃。</div></div>';
 }
 
@@ -1567,6 +1562,7 @@ function renderPublishPreview(id, data){
 
   const variantsCard = buildVariantsCard(data);
 
+  const droppedColours = new Set(((data.variants && data.variants.droppedColours) || []).map(String));
   const norm = data.normalization ? data.normalization.result : null;
   const normCard = norm
     ? '<div class="pp-card pp-wide"><div class="pp-card-title">变体规范化（LLM 建议'
@@ -1580,12 +1576,21 @@ function renderPublishPreview(id, data){
         + '<td>' + (colour.text ? esc(colour.text) : '<span class="pp-muted">待人工</span>')
         + (colour.manual ? ' <span class="pp-chip info">手动</span>' : '')
         + (colour.placeholder ? ' <span class="pp-chip warn">占位</span>' : '')
-        + (colour.needsReview ? ' <span class="pp-chip gray">待复核</span>' : '') + '</td>'
+        + (colour.needsReview ? ' <span class="pp-chip gray">待复核</span>' : '')
+        + (colour.source && droppedColours.has(String(colour.source)) ? ' <span class="pp-chip warn">已删除</span>' : '') + '</td>'
         + '<td>' + (colour.code ? '<code>' + esc(colour.code) + '</code>' : '—') + '</td>'
         + '<td class="pp-muted">' + esc(colour.source) + '</td>'
         + '<td>' + (colour.confidence === null || colour.confidence === undefined ? '—' : colour.confidence) + '</td>'
         + '<td><button type="button" class="norm-edit-btn" data-norm-edit-id="' + esc(String(data.productDetailId))
-        + '" data-norm-edit="' + esc(String(colour.source)) + '">编辑</button></td>'
+        + '" data-norm-edit="' + esc(String(colour.source)) + '">编辑</button> '
+        + (colour.source && droppedColours.has(String(colour.source))
+          ? '<button type="button" class="norm-edit-btn" data-variant-drop-id="' + esc(String(data.productDetailId))
+            + '" data-variant-drop="' + esc(String(colour.source)) + '" data-dropped="1"'
+            + ' title="恢复：重新纳入发布（颜色与 SKU 行）">恢复</button>'
+          : '<button type="button" class="norm-edit-btn" data-variant-drop-id="' + esc(String(data.productDetailId))
+            + '" data-variant-drop="' + esc(String(colour.source)) + '" data-dropped="0"'
+            + ' title="删除：发布时从颜色列表与 SKU 行中剔除（可恢复）">删除</button>')
+        + '</td>'
         + '</tr>').join('')
       + '</tbody></table>'
       + ((norm.sizes || []).length
