@@ -841,6 +841,13 @@ function renderSplitPanel(id, plan){
             + '<span class="sp-wp-status muted" style="font-size:11px;margin-left:6px"></span>'
             + '</div>'
           : '')
+        + (!content.wp
+          ? '<div class="pp-muted" style="margin-top:3px">WP：未发布'
+            + '<button type="button" class="sp-pub-save" style="margin-left:8px" data-split-first-publish="' + id + '"'
+            + ' title="首次发布：为该捆绑创建全部拆分产品的 WordPress 文章并发布（保留源发布时间；之后可对每个产品单独 发布/取消发布）">首次发布</button>'
+            + '<span class="sp-wp-status muted" style="font-size:11px;margin-left:6px"></span>'
+            + '</div>'
+          : '')
         + '</span></div>'
       : '';
     const publishReasonLabel = { exact: '完全重复', 'source-url': '同源URL重复', near: '近似重复', llm: '视觉去重' };
@@ -932,7 +939,7 @@ function renderSplitPanel(id, plan){
     + '<div class="sp-products">' + cards + '</div>'
     + '<div class="sp-row sp-ignored"><span class="sp-label">未采用</span><span class="sp-opts">' + ignored + '</span></div>'
     + '<div class="sp-row sp-pool-row"><span class="sp-label">全部图片</span><span class="sp-imgs">' + poolHtml + '</span></div>'
-    + '<div class="sp-status">选项用下拉在"未采用/产品N"间移动；尺码与价格在保存时按 SKU 矩阵重算；发布图为发布到 WP 的最终图片（实时按发布去重计算）；「全部图片」是分配前的图池，点「添加图片」或「更换 Swatch」后可直接从中点选（未下载的图使用时自动下载）；SKU 行尾的「删除」可从拆分发布中移除该变体（已发布则立即同步到 WP，可随时「恢复」）；内容块 WP 行的「发布/取消发布」可单独控制该拆分产品（keeper 或兄弟）的 WordPress 状态。</div>';
+    + '<div class="sp-status">选项用下拉在"未采用/产品N"间移动；尺码与价格在保存时按 SKU 矩阵重算；发布图为发布到 WP 的最终图片（实时按发布去重计算）；「全部图片」是分配前的图池，点「添加图片」或「更换 Swatch」后可直接从中点选（未下载的图使用时自动下载）；SKU 行尾的「删除」可从拆分发布中移除该变体（已发布则立即同步到 WP，可随时「恢复」）；内容块 WP 行的「发布/取消发布」可单独控制该拆分产品（keeper 或兄弟）的 WordPress 状态；未发布的捆绑点「首次发布」即可创建并发布全部拆分产品。</div>';
 }
 
 async function runSplitAnalysis(id){
@@ -1242,6 +1249,57 @@ async function setSplitProductStatus(button){
   } catch (e) {
     button.disabled = false;
     if (statusEl) statusEl.textContent = '失败：' + String((e && e.message) || e).slice(0, 120);
+  }
+}
+
+/** First publish for a split bundle: create + publish the whole family on WP. */
+async function firstPublishBundle(button){
+  const id = String(button.dataset.splitFirstPublish || '');
+  if (!id) return;
+  if (!window.confirm('首次发布将为该捆绑创建全部拆分产品的 WordPress 文章并发布（可随时对单个产品取消发布）。继续？')) return;
+  const row = button.closest('.pp-muted');
+  const statusEl = row ? row.querySelector('.sp-wp-status') : null;
+  button.disabled = true;
+  if (statusEl) statusEl.textContent = '整包发布中…';
+  const headStatus = document.getElementById('split-status-' + id);
+  if (headStatus) headStatus.textContent = '首次发布中：创建并发布拆分产品…（约 1–3 分钟）';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-first-publish', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    const jobId = body && body.id;
+    if (!jobId) throw new Error('未返回任务 ID');
+    for (let attempt = 0; attempt < 240; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const poll = await fetch('/api/wordpress-finalize-jobs/' + jobId, { headers: { accept: 'application/json' } }).catch(() => null);
+      if (!poll || !poll.ok) continue;
+      const job = await poll.json().catch(() => null);
+      if (!job) continue;
+      if (job.status === 'completed' || job.status === 'completed_with_errors') {
+        await reloadSplitPanel(id);
+        const el = document.getElementById('split-status-' + id);
+        if (el) {
+          el.textContent = '首次发布完成：已发布 ' + Number(job.published || 0) + ' 个拆分产品'
+            + (job.status === 'completed_with_errors'
+              ? '（有错误：' + String(((job.errors || [])[0] || {}).message || '').slice(0, 80) + '）' : '');
+        }
+        return;
+      }
+      if (job.status === 'failed') {
+        const el = document.getElementById('split-status-' + id);
+        if (el) el.textContent = '首次发布失败：' + String(job.error || '').slice(0, 120);
+        button.disabled = false;
+        return;
+      }
+      const st = document.getElementById('split-status-' + id);
+      if (st) st.textContent = '首次发布中…（' + Number(job.processed || 0) + '/' + Number(job.total || 1) + '）';
+    }
+    throw new Error('超时（请稍后刷新面板查看结果）');
+  } catch (e) {
+    button.disabled = false;
+    if (statusEl) statusEl.textContent = '失败：' + String((e && e.message) || e).slice(0, 140);
   }
 }
 
@@ -2668,6 +2726,8 @@ document.addEventListener('click', (e) => {
   if (skuRestore) { void restoreSplitVariant(skuRestore); return; }
   const wpToggle = e.target.closest('button[data-split-wp-toggle]');
   if (wpToggle) { void setSplitProductStatus(wpToggle); return; }
+  const firstPublish = e.target.closest('button[data-split-first-publish]');
+  if (firstPublish) { void firstPublishBundle(firstPublish); return; }
   if (addPick) {
     const thumb = e.target.closest('.sp-img[data-assign-ref]');
     if (thumb && thumb.parentElement === addPick.assignedStrip) {

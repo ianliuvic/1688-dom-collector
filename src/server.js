@@ -3355,13 +3355,53 @@ app.get('/api/wordpress-split-publish-jobs/:id', { preHandler: requireApiKey }, 
 // drafts (keeping their source publication date). Five-way concurrency.
 const finalizeSplitJobs = new Map();
 
-app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async (request, reply) => {
-  if ([...finalizeSplitJobs.values()].some((job) => job.status === 'running')) {
-    return reply.code(409).send({ error: 'finalize_already_running' });
+/** Effective publication for a split bundle: the stored one, or a synthesized
+ * draft template (translation + normalization based) for bundles that were
+ * never published, so the whole split family can be created from scratch. */
+async function effectiveSplitPublication(productDetailId, detail, publication) {
+  if (publication?.payload) return publication;
+  const translation = await db.getLatestProductTranslation(productDetailId, 'en');
+  if (!translation) {
+    throw Object.assign(new Error('english_translation_required'),
+      { code: 'english_translation_required', message: '尚未生成英文文案：请先生成文案后再发布。' });
   }
-  const ids = Array.isArray(request.body?.ids)
-    ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 200)
-    : null;
+  const sourceListings = await db.listShopProductSources(detail.offer_id);
+  const policy = evaluateShopProductPolicy(sourceListings);
+  if (!policy.allowed) {
+    throw Object.assign(new Error('shop_product_policy_rejected'),
+      { code: 'shop_product_policy_rejected', policy, message: '来源店铺策略限制：' + String(policy.reason || '') });
+  }
+  const normalizationRecord = await db.getVariantNormalization(productDetailId);
+  const draft = await prepareWordPressProductDraft({
+    detail, translation, config,
+    optionOverrides: await db.listProductOptionOverrides(productDetailId),
+    options: {
+      status: 'draft', categoryMode: 'auto', tagMode: 'auto', imageMode: 'full',
+      normalizedVariants: normalizationRecord?.result ?? null,
+      allowUnverifiedGallery: detail.raw_data?.gallery?.source === 'linkfox'
+        || detail.raw_data?.gallery?.complete === false,
+    },
+  });
+  const payload = draft.payload;
+  return {
+    product_detail_id: productDetailId,
+    translation_id: translation.id,
+    external_id: payload.external_id,
+    style_no: payload.style_no,
+    wp_post_id: null,
+    wp_url: null,
+    wp_edit_url: null,
+    wp_status: null,
+    payload,
+    result: null,
+    synthesized: true,
+  };
+}
+
+function startFinalizeSplitJob(ids) {
+  if ([...finalizeSplitJobs.values()].some((job) => job.status === 'running')) {
+    return { error: 'finalize_already_running' };
+  }
   const id = crypto.randomUUID();
   const job = {
     id, status: 'running', total: 0, processed: 0, bundles: 0, imagesDownloaded: 0, imagesUploaded: 0,
@@ -3384,13 +3424,23 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
           job.processed += 1;
           try {
             let detail = await db.getProductDetail(productDetailId);
-            const publication = await db.getWordPressPublication(productDetailId);
             const contents = await db.getSplitContents(productDetailId);
             let plan = null;
             try { plan = (await db.getProductSplitPlan(productDetailId))?.plan ?? null; } catch { plan = null; }
-            if (!detail || !publication?.payload || !contents?.result?.products?.length) {
+            if (!detail || !contents?.result?.products?.length) {
               job.failed += 1;
-              job.errors.push({ productDetailId, message: 'missing plan/contents/publication' });
+              job.errors.push({ productDetailId, message: 'missing plan/contents' });
+              continue;
+            }
+            // Never-published bundles synthesize a draft template so the split
+            // family can be created from scratch.
+            let publication = null;
+            try {
+              publication = await effectiveSplitPublication(productDetailId,
+                detail, await db.getWordPressPublication(productDetailId));
+            } catch (error) {
+              job.failed += 1;
+              job.errors.push({ productDetailId, message: `template: ${String(error?.message || error).slice(0, 160)}` });
               continue;
             }
             const assignedDetailUrls = [];
@@ -3410,12 +3460,12 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
               const keeperPayload = result.keeper.payload;
               const syncHash = crypto.createHash('sha256').update(JSON.stringify(keeperPayload)).digest('hex');
               await db.saveWordPressPublication(productDetailId, {
-                translationId: publication.translation_id,
-                externalId: publication.external_id,
-                styleNo: result.keeper.styleNo ?? publication.style_no,
+                translationId: publication.translation_id ?? null,
+                externalId: result.keeper.externalId ?? publication.external_id ?? null,
+                styleNo: result.keeper.styleNo ?? publication.style_no ?? null,
                 wpPostId: result.keeper.postId,
                 wpUrl: result.keeper.url,
-                wpEditUrl: publication.wp_edit_url,
+                wpEditUrl: publication.wp_edit_url ?? null,
                 wpStatus: 'publish',
                 syncHash, payload: keeperPayload,
                 result: { ...(publication.result ?? {}), split_publish: true },
@@ -3487,10 +3537,43 @@ app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async 
       job.completedAt = new Date().toISOString();
     }
   })();
-  return reply.code(202).send(job);
+  return { job };
+}
+
+app.post('/api/wordpress/finalize-splits', { preHandler: requireApiKey }, async (request, reply) => {
+  const ids = Array.isArray(request.body?.ids)
+    ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 200)
+    : null;
+  const started = startFinalizeSplitJob(ids);
+  if (started.error) return reply.code(409).send({ error: started.error });
+  return reply.code(202).send(started.job);
 });
 
-app.get('/api/wordpress-finalize-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+// Dashboard entry for the「首次发布」button: run the finalize flow for one bundle
+// (create + publish the whole split family; a never-published bundle gets a
+// synthesized template so it can be created from scratch).
+app.post('/api/product-details/:id/split-first-publish', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (detail.bundle_status !== 'bundle') {
+    return reply.code(409).send({ error: 'not_a_bundle', message: '仅捆绑产品使用首次发布。' });
+  }
+  const contents = await db.getSplitContents(id);
+  if (!contents?.result?.products?.length) {
+    return reply.code(409).send({ error: 'split_content_required', message: '请先生成拆分内容（LLM）。' });
+  }
+  const translation = await db.getLatestProductTranslation(id, 'en');
+  if (!translation) {
+    return reply.code(409).send({ error: 'english_translation_required', message: '尚未生成英文文案：请先生成文案后再发布。' });
+  }
+  const started = startFinalizeSplitJob([id]);
+  if (started.error) return reply.code(409).send({ error: started.error });
+  return reply.code(202).send(started.job);
+});
+
+app.get('/api/wordpress-finalize-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const job = finalizeSplitJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
