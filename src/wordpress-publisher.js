@@ -1603,6 +1603,16 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
     });
     const keeperStyleNo = keeperStyle.styleNo || publication.style_no;
     usedStyles.add(clean(keeperStyleNo).toUpperCase());
+    // Respect a manually drafted keeper: re-syncs must never resurrect an
+    // unpublished page (only a freshly created anchor goes live).
+    let keeperStatus = 'publish';
+    if (Number(publication.wp_post_id)) {
+      const liveKeeper = await wp(`/wp-json/hx/v1/products/resolve?post_id=${Number(publication.wp_post_id)}`,
+        { timeoutMs: 30000 }).catch(() => null);
+      if (['draft', 'pending', 'private', 'trash'].includes(clean(liveKeeper?.status).toLowerCase())) {
+        keeperStatus = 'draft';
+      }
+    }
     const { images, skipped, deduped } = await buildImages(keeper, {
       externalId: template.external_id, styleNo: keeperStyleNo, altText: keeperTitle,
     });
@@ -1616,7 +1626,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       style_no: keeperStyleNo,
       title: keeperTitle,
       description: keeperDescription,
-      status: 'publish',
+      status: keeperStatus,
       category_ids: keeperCategories.length ? keeperCategories : (template.category_ids ?? []),
       images,
       colors: colours.length ? { default: colours[0].value, colors: colours } : null,
@@ -1664,14 +1674,16 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         || (storedPostId ? postToExternalId.get(storedPostId) : null)
         || `${template.external_id}S${index + 2}`;
       // The sync endpoint applies the payload status, so a re-sync must never
-      // take a live sibling page down. Keep 'publish' whenever the sibling is
-      // already published (stored status first, then the live WP post) and only
-      // create genuinely new siblings as drafts.
+      // flip a sibling's live state: whenever the post already exists the LIVE
+      // WordPress status wins (stored status is only the fallback). Only
+      // genuinely new siblings are created as drafts for the finalize flow.
       let siblingStatus = String(previousWp?.status ?? '') === 'publish' ? 'publish' : 'draft';
-      if (siblingStatus === 'draft' && externalId) {
-        const live = await wp(`/wp-json/hx/v1/products/by-external-id/${encodeURIComponent(externalId)}`, { timeoutMs: 30000 })
+      if (storedPostId) {
+        const live = await wp(`/wp-json/hx/v1/products/resolve?post_id=${Number(storedPostId)}`, { timeoutMs: 30000 })
           .catch(() => null);
-        if (clean(live?.status).toLowerCase() === 'publish') siblingStatus = 'publish';
+        const liveStatus = clean(live?.status).toLowerCase();
+        if (liveStatus === 'publish') siblingStatus = 'publish';
+        else if (['draft', 'pending', 'private', 'trash'].includes(liveStatus)) siblingStatus = 'draft';
       }
       const review = skipReview ? null : await reviewSplitProduct({
         content,
@@ -1767,7 +1779,9 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
       });
       results.created.push({
         productId: content.id, title, description, styleNo, externalId, categoryId, categoryName,
-        postId: synced.post_id ?? null, url: synced.permalink ?? null, status: synced.status ?? 'draft',
+        postId: synced.post_id ?? null, url: synced.permalink ?? null, status: synced.status ?? siblingStatus,
+        newlyCreated: !previousWp?.postId,
+        manuallyUnpublished: Boolean(previousWp?.manualUnpublishedAt),
         imageCount: images.length, skippedImages: skipped.length, dedupedImages: deduped,
       });
     } catch (error) {

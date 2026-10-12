@@ -2121,9 +2121,12 @@ app.post('/api/product-details/:id/split-product-status', { preHandler: requireD
       await setWordPressProductPublicationDate({ postId, publicationDate: detail.publication_date, config })
         .catch(() => null);
     }
+    const wpNext = { ...wpInfo, status };
+    if (status === 'draft') wpNext.manualUnpublishedAt = new Date().toISOString();
+    else delete wpNext.manualUnpublishedAt;
     const merged = await db.mergeSplitContentWpResults(id, [{
       productId: product.id,
-      wp: { ...wpInfo, status },
+      wp: wpNext,
     }]).catch(() => null);
     // The keeper is the bundle's tracked post: mirror the status onto the
     // bundle publication row so the products list and audits stay accurate.
@@ -3574,7 +3577,7 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
                 wpPostId: result.keeper.postId,
                 wpUrl: result.keeper.url,
                 wpEditUrl: publication.wp_edit_url,
-                wpStatus: 'publish',
+                wpStatus: result.keeper.status ?? 'publish',
                 syncHash, payload: keeperPayload,
                 result: { ...(publication.result ?? {}), split_publish: true },
                 lastError: null,
@@ -3586,7 +3589,7 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
             const wpEntries = [
               ...(result.keeper ? [{
                 productId: result.keeper.productId,
-                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper', externalId: result.keeper.externalId },
+                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: result.keeper.status ?? 'publish', role: 'keeper', externalId: result.keeper.externalId },
                 fields: { title: result.keeper.title, description: result.keeper.description },
               }] : []),
               ...result.created.map((item) => ({
@@ -3751,7 +3754,7 @@ function startFinalizeSplitJob(ids) {
                 wpPostId: result.keeper.postId,
                 wpUrl: result.keeper.url,
                 wpEditUrl: publication.wp_edit_url ?? null,
-                wpStatus: 'publish',
+                wpStatus: result.keeper.status ?? 'publish',
                 syncHash, payload: keeperPayload,
                 result: { ...(publication.result ?? {}), split_publish: true },
                 lastError: null,
@@ -3765,6 +3768,9 @@ function startFinalizeSplitJob(ids) {
             const publishedCreates = [];
             for (const created of result.created) {
               if (!created.postId) continue;
+              // Manually unpublished pages must never be resurrected by a batch
+              // finalize; everything else keeps the previous behaviour.
+              if (created.manuallyUnpublished) { publishedCreates.push(created); continue; }
               try {
                 await setWordPressProductStatus({ postId: created.postId, status: 'publish', config });
                 if (publicationDate) {
@@ -3791,7 +3797,7 @@ function startFinalizeSplitJob(ids) {
             const wpEntries = [
               ...(result.keeper ? [{
                 productId: result.keeper.productId,
-                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper', externalId: result.keeper.externalId },
+                wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: result.keeper.status ?? 'publish', role: 'keeper', externalId: result.keeper.externalId },
                 fields: { title: result.keeper.title, description: result.keeper.description },
               }] : []),
               ...publishedCreates.map((item) => ({
@@ -4041,7 +4047,7 @@ async function syncSplitBundle({ productDetailId, detail, publication, contents,
       wpPostId: result.keeper.postId,
       wpUrl: result.keeper.url,
       wpEditUrl: publication.wp_edit_url,
-      wpStatus: 'publish',
+      wpStatus: result.keeper.status ?? 'publish',
       syncHash, payload: keeperPayload,
       result: { ...(publication.result ?? {}), split_sync: true },
       lastError: null,
@@ -4051,6 +4057,12 @@ async function syncSplitBundle({ productDetailId, detail, publication, contents,
   const publishedCreates = [];
   for (const created of result.created ?? []) {
     if (!created.postId) continue;
+    // Only siblings created by this run are auto-published; manually drafted
+    // (or already existing) pages keep their live state.
+    if (!created.newlyCreated || created.manuallyUnpublished) {
+      publishedCreates.push(created);
+      continue;
+    }
     await setWordPressProductStatus({ postId: created.postId, status: 'publish', config }).catch(() => {});
     if (publicationDate) {
       await setWordPressProductPublicationDate({ postId: created.postId, publicationDate, config }).catch(() => {});
@@ -4060,7 +4072,7 @@ async function syncSplitBundle({ productDetailId, detail, publication, contents,
   const wpEntries = [
     ...(result.keeper ? [{
       productId: result.keeper.productId,
-      wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper', externalId: result.keeper.externalId },
+      wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: result.keeper.status ?? 'publish', role: 'keeper', externalId: result.keeper.externalId },
       fields: { title: result.keeper.title, description: result.keeper.description },
     }] : []),
     ...publishedCreates.map((item) => ({
@@ -4191,7 +4203,7 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
       wpPostId: result.keeper.postId,
       wpUrl: result.keeper.url,
       wpEditUrl: publication?.wp_edit_url ?? null,
-      wpStatus: 'publish',
+      wpStatus: result.keeper.status ?? 'publish',
       syncHash, payload: keeperPayload,
       result: { ...(publication?.result ?? {}), split_publish: true },
       lastError: null,
@@ -4203,6 +4215,8 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
   const publishedCreates = [];
   for (const created of result.created ?? []) {
     if (!created.postId) continue;
+    // Manually unpublished pages must never be resurrected by the pipeline.
+    if (created.manuallyUnpublished) { publishedCreates.push(created); continue; }
     try {
       await setWordPressProductStatus({ postId: created.postId, status: 'publish', config });
       if (publicationDate) {
@@ -4217,7 +4231,7 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
   const wpEntries = [
     ...(result.keeper ? [{
       productId: result.keeper.productId,
-      wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: 'publish', role: 'keeper', externalId: result.keeper.externalId },
+      wp: { postId: result.keeper.postId, url: result.keeper.url, styleNo: result.keeper.styleNo, status: result.keeper.status ?? 'publish', role: 'keeper', externalId: result.keeper.externalId },
       fields: { title: result.keeper.title, description: result.keeper.description },
     }] : []),
     ...publishedCreates.map((item) => ({
@@ -6987,7 +7001,10 @@ async function unpublishSplitSiblingPosts(productDetailId, targetStatus) {
     for (const member of family) {
       try {
         await setWordPressProductStatus({ postId: member.wp.postId, status: targetStatus, config });
-        updates.push({ productId: member.id, wp: { ...member.wp, status: targetStatus } });
+        const wpNext = { ...member.wp, status: targetStatus };
+        if (targetStatus === 'draft') wpNext.manualUnpublishedAt = new Date().toISOString();
+        else delete wpNext.manualUnpublishedAt;
+        updates.push({ productId: member.id, wp: wpNext });
         results.push({ postId: member.wp.postId, styleNo: member.wp.styleNo ?? null,
           role: member.wp.role, status: targetStatus });
       } catch (error) {
