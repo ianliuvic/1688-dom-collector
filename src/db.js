@@ -2963,6 +2963,18 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  /** Every stored split content with its bundle identity (split-sibling audits). */
+  async function listSplitContentsAll() {
+    const result = await pool.query(`SELECT contents.product_detail_id, contents.result, contents.updated_at,
+        details.title, publications.style_no, publications.wp_status
+      FROM product_split_contents contents
+      JOIN product_details details ON details.id = contents.product_detail_id
+      LEFT JOIN product_wordpress_publications publications
+        ON publications.product_detail_id = contents.product_detail_id
+      ORDER BY contents.product_detail_id`);
+    return result.rows;
+  }
+
   async function saveSplitContents(productDetailId, result, model) {
     const saved = await pool.query(`INSERT INTO product_split_contents
       (product_detail_id, result, model, updated_at) VALUES ($1,$2,$3,now())
@@ -3494,7 +3506,7 @@ export function createDatabase(databaseUrl) {
     getProductSplitPlan, saveProductSplitPlan,
     getPipelineRun, upsertPipelineRun, listPipelineRuns,
     getVariantNormalization, saveVariantNormalization, addProductImage, updateSkuVariantSkus,
-    getSplitContents, saveSplitContents, updateProductRawData,
+    getSplitContents, saveSplitContents, listSplitContentsAll, updateProductRawData,
     listRefreshablePublications, listSplitPublishableBundles, mergeSplitContentWpResults,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,

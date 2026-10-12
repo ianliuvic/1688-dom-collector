@@ -5978,6 +5978,52 @@ app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboar
   samples: await db.samplePublicationStocks(request.query?.limit),
 }));
 
+// Split siblings carry their own sample_available flag on their own WP posts and
+// do not have publication rows, so the audit above never sees them. This audit
+// recomputes the expected flag for every published split product from its stored
+// SKUs (stock - 5 > 0 = available) and reports the bundles whose pages can still
+// disagree with the safety-margin rule and need a split re-sync:
+//   flipsToUnavailable: some stock > 0 but all stock <= 5 (page may still say
+//   available from the pre-margin rule); flipsToAvailable: a stock - 5 > 0 SKU
+//   while the page was last synced when nothing was above the margin.
+app.get('/api/wordpress/split-stock-audit', { preHandler: requireDashboardOrApiKey }, async (request) => {
+  const rows = await db.listSplitContentsAll();
+  const items = [];
+  const bundles = new Set();
+  let publishedProducts = 0;
+  for (const row of rows) {
+    for (const product of (row.result?.products ?? [])) {
+      const wp = product?.wp ?? {};
+      if (!wp.postId) continue;
+      publishedProducts += 1;
+      const stocks = (product.skus ?? [])
+        .map((sku) => sku?.stock)
+        .filter((value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)))
+        .map(Number);
+      const expected = stocks.some((value) => value - 5 > 0);
+      const oldRule = stocks.some((value) => value > 0);
+      const flipsToUnavailable = oldRule && !expected;
+      const flipsToAvailable = !oldRule && expected;
+      if (!flipsToUnavailable && !flipsToAvailable) continue;
+      items.push({
+        productDetailId: row.product_detail_id, styleNo: row.style_no ?? null,
+        productId: product.id ?? null, productName: product.name ?? null,
+        wpStyleNo: wp.styleNo ?? null, wpPostId: wp.postId, wpUrl: wp.url ?? null,
+        stocks, expected, flipsToUnavailable, flipsToAvailable,
+      });
+      bundles.add(Number(row.product_detail_id));
+    }
+  }
+  return {
+    bundlesScanned: rows.length,
+    publishedSplitProducts: publishedProducts,
+    mismatches: items.length,
+    affectedCount: bundles.size,
+    affectedBundles: [...bundles],
+    items: items.slice(0, Math.min(Math.max(Number(request.query?.limit) || 500, 1), 2000)),
+  };
+});
+
 // Recompute the sample-availability meta for published pages whose payload stock
 // no longer matches the page flag (either direction; safety margin 5). Used to
 // re-apply the availability standard across existing products. Deterministic, no model.
