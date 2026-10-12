@@ -1251,6 +1251,12 @@ app.put('/api/product-details/:id/split-plan', { preHandler: requireDashboardOrA
   const plan = recomputePlan(request.body?.plan ?? {}, detail);
   if (!plan.products.length) return reply.code(400).send({ error: 'empty_plan' });
   const saved = await db.saveProductSplitPlan(id, plan);
+  // Manual split-plan adjustments (option moves / renaming in the split panel)
+  // count as a manual edit so the products list can flag the capture.
+  await appendManualEditLog(id, {
+    at: new Date().toISOString(), action: 'split_plan_edit',
+    products: plan.products.length,
+  });
   return { productDetailId: id, plan: saved.plan, updatedAt: saved.updated_at };
 });
 
@@ -7003,7 +7009,7 @@ function catalogManualEditTimes(row) {
   let lastContentEdit = null;
   for (const entry of log) {
     const action = String(entry?.action ?? '');
-    if (!contentActions.has(action) && action !== 'classification_edit') continue;
+    if (!contentActions.has(action) && action !== 'classification_edit' && action !== 'split_plan_edit') continue;
     const timestamp = entry?.at ? Date.parse(entry.at) : NaN;
     if (!Number.isFinite(timestamp)) continue;
     if (lastEdit === null || timestamp > lastEdit) lastEdit = timestamp;

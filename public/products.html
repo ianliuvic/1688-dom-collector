@@ -499,7 +499,7 @@ function renderFilters(){
   parts.push('<span class="sep"></span><span class="label">编辑：</span>');
   parts.push('<button type="button" data-edited=""' + (editedFilter === '' ? ' class="on"' : '') + '>全部</button>');
   parts.push('<button type="button" data-edited="1"' + (editedFilter === '1' ? ' class="on"' : '')
-    + ' title="只显示有过手动调整（规范化/发布图编辑）的产品">最近编辑过</button>');
+    + ' title="只显示有过手动调整（规范化/发布图/翻译/拆分调整等）的产品">最近编辑过</button>');
   el.innerHTML = parts.join('');
 }
 function renderPager(){
