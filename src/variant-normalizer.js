@@ -145,10 +145,28 @@ export function naturalSizeRank(label) {
   if (plus) return [0, 8 + Number(plus[1])];
   const index = SIZE_ORDER.indexOf(upper);
   if (index >= 0) return [0, index];
+  // Kids' age sizes rank by MONTHS so months always precede years
+  // ("9-12M" < "18-24M" < "2-3Y"). Covers ranges ("12-18M", "2-3Y"), singles
+  // ("12M", "2Y", "2T") and newborn labels; a range sorts by its start, then
+  // its end.
+  if (/^(NB|NEW\s?BORN|NEWBORN)$/.test(upper)) return [1, 0];
+  const unitMonths = (value, unit) => (/^(M|MO|MOS|MTHS?|MONTHS?|月)$/.test(unit) ? value : value * 12);
+  const unit = '(M|MO|MOS|MTHS?|MONTHS?|月|Y|YRS?|YEARS?|岁|T)';
+  const range = upper.match(new RegExp(`^(\\d+(?:\\.\\d+)?)\\s*[-\\u2013\\u2014~]\\s*(\\d+(?:\\.\\d+)?)\\s*${unit}$`));
+  if (range) {
+    const start = unitMonths(Number(range[1]), range[3]);
+    const end = unitMonths(Number(range[2]), range[3]);
+    return [1, start * 1000 + Math.max(end, start)];
+  }
+  const single = upper.match(new RegExp(`^(\\d+(?:\\.\\d+)?)\\s*${unit}$`));
+  if (single) {
+    const months = unitMonths(Number(single[1]), single[2]);
+    return [1, months * 1000];
+  }
   const numeric = Number(base.match(/\d+(?:\.\d+)?/)?.[0]);
-  if (Number.isFinite(numeric) && /^\d/.test(base)) return [1, numeric];
-  if (/(均码|one\s*size|free)/i.test(base)) return [2, 0];
-  return [3, 0];
+  if (Number.isFinite(numeric) && /^\d/.test(base)) return [2, numeric];
+  if (/(均码|one\s*size|free)/i.test(base)) return [3, 0];
+  return [4, 0];
 }
 
 /** Validate the model proposal and merge it with the source options. */
