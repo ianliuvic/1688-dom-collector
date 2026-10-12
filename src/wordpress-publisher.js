@@ -1782,6 +1782,7 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         postId: synced.post_id ?? null, url: synced.permalink ?? null, status: synced.status ?? siblingStatus,
         newlyCreated: !previousWp?.postId,
         manuallyUnpublished: Boolean(previousWp?.manualUnpublishedAt),
+        manualUnpublishedAt: previousWp?.manualUnpublishedAt ?? null,
         imageCount: images.length, skippedImages: skipped.length, dedupedImages: deduped,
       });
     } catch (error) {

@@ -92,19 +92,6 @@ if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
 if (!config.adminApiKey) throw new Error('ADMIN_API_KEY is required');
 
 const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 1024 * 1024 });
-// Tolerate POST/PUT requests that announce JSON but send no body (the split
-// panel's action buttons do this): an empty body parses as {}, while malformed
-// JSON still fails loudly.
-app.addContentTypeParser('application/json', { parseAs: 'string' }, (request, body, done) => {
-  const text = String(body ?? '').trim();
-  if (!text) { done(null, {}); return; }
-  try {
-    done(null, JSON.parse(text));
-  } catch (error) {
-    error.statusCode = 400;
-    done(error);
-  }
-});
 const db = createDatabase(config.databaseUrl);
 const collector = createCollector(config);
 const loginManager = createLoginManager(config);
@@ -3607,7 +3594,7 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
               }] : []),
               ...result.created.map((item) => ({
                 productId: item.productId,
-                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status, categoryId: item.categoryId, role: 'split', externalId: item.externalId },
+                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status, categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manuallyUnpublishedAt ?? null },
                 fields: { title: item.title, description: item.description },
               })),
             ];
@@ -3815,7 +3802,7 @@ function startFinalizeSplitJob(ids) {
               }] : []),
               ...publishedCreates.map((item) => ({
                 productId: item.productId,
-                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId },
+                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manuallyUnpublishedAt ?? null },
                 fields: { title: item.title, description: item.description },
               })),
             ];
@@ -4090,7 +4077,7 @@ async function syncSplitBundle({ productDetailId, detail, publication, contents,
     }] : []),
     ...publishedCreates.map((item) => ({
       productId: item.productId,
-      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId },
+      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manuallyUnpublishedAt ?? null },
       fields: { title: item.title, description: item.description },
     })),
   ];
@@ -4249,7 +4236,7 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
     }] : []),
     ...publishedCreates.map((item) => ({
       productId: item.productId,
-      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId },
+      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manuallyUnpublishedAt ?? null },
       fields: { title: item.title, description: item.description },
     })),
   ];
