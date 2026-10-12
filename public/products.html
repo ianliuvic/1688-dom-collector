@@ -1334,15 +1334,30 @@ function buildVariantsCard(data){
   for (const colour of ((data.normalization.result && data.normalization.result.colours) || [])) {
     if (colour && colour.source) colourInfo.set(String(colour.source), colour);
   }
+  const droppedColours = new Set(((data.variants && data.variants.droppedColours) || []).map(String));
+  const dropBtnShown = new Set();
   for (const row of normSkus.slice(0, 40)) {
     const raw = rawVariantParts(row);
     const rawText = [raw.colour, raw.size].filter(Boolean).join(' / ');
     const info = colourInfo.get(String(row.colour ?? '')) || null;
     const normColourText = (info && info.text) ? String(info.text) : '';
     const normCode = (info && info.code) ? String(info.code) : (row.code ? String(row.code) : '');
-    const normColourCell = normColourText
+    const sourceKey = String(row.colour ?? '');
+    const isDropped = sourceKey ? droppedColours.has(sourceKey) : false;
+    let dropControl = '';
+    if (sourceKey && !dropBtnShown.has(sourceKey)) {
+      dropBtnShown.add(sourceKey);
+      dropControl = ' <button type="button" class="norm-edit-btn"'
+        + ' data-variant-drop-id="' + esc(String(data.productDetailId)) + '"'
+        + ' data-variant-drop="' + esc(sourceKey) + '"'
+        + ' data-dropped="' + (isDropped ? '1' : '0') + '"'
+        + ' title="' + (isDropped ? '恢复：重新纳入发布（颜色与 SKU 行）' : '删除：发布时从颜色列表与 SKU 行中剔除（可恢复）') + '">'
+        + (isDropped ? '恢复' : '删除') + '</button>' + (isDropped ? ' <span class="pp-chip warn">已删除</span>' : '');
+    }
+    const normColourCell = (normColourText
       ? esc(normColourText) + (normCode ? ' <span class="pp-muted" title="SKU 颜色缩写（用于组合 SKU 编码）">' + esc(normCode) + '</span>' : '')
-      : (normCode ? '<span class="pp-muted" title="SKU 颜色缩写（用于组合 SKU 编码）">' + esc(normCode) + '</span>' : '<span class="pp-muted">—</span>');
+      : (normCode ? '<span class="pp-muted" title="SKU 颜色缩写（用于组合 SKU 编码）">' + esc(normCode) + '</span>' : '<span class="pp-muted">—</span>'))
+      + dropControl;
     body.push('<tr>'
       + '<td class="col-norm"><code>' + esc(row.sku) + '</code>' + (row.pendingStyleNumber ? ' <span class="pp-chip gray">待款号</span>' : '') + '</td>'
       + '<td class="col-norm">' + normColourCell + '</td>'
@@ -1373,6 +1388,7 @@ function buildVariantsCard(data){
     + (extraRaw.length ? ' + ' + extraRaw.length + ' 行未规范化' : '') + '）</div>'
     + '<table class="pp-table">' + head + '<tbody>' + body.join('') + '</tbody></table>'
     + '<div class="pp-muted" style="margin-top:4px">蓝色列为规范化结果：组合 SKU = 款号-颜色缩写-尺码；「规范化颜色」显示 颜色名 + SKU 缩写（如 Red RED，缩写用于生成组合 SKU 与商品 SKU）。'
+    + '每个颜色旁的「删除」按钮会在发布时把该颜色从颜色列表与 SKU 行中一并剔除（可随时「恢复」）。'
     + '灰色列为 1688 原始数据（「原始变体」悬停可见完整原始键）。未规范化的行发布时会被舍弃。</div></div>';
 }
 
@@ -2075,6 +2091,26 @@ async function confirmFirstPublish(id){
 
 // Publish the manual edits to the existing WordPress product (current status
 // preserved) and surface the Portal staging follow-up notice.
+async function toggleVariantDrop(id, source, dropped, button){
+  if (!dropped && !confirm('删除颜色变体「' + source + '」？\n发布后将从颜色列表与 SKU 行中一并剔除（WP 前台同步生效），随时可恢复。')) return;
+  const original = button ? button.textContent : '';
+  if (button) { button.disabled = true; button.textContent = '处理中…'; }
+  try {
+    const res = await fetch('/api/product-details/' + id + '/variant-drops', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ source, drop: !dropped }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.message || body.error || ('HTTP ' + res.status));
+    const reload = document.querySelector('button[data-pp-reload="' + id + '"]');
+    if (reload) reload.click();
+  } catch (e) {
+    alert((dropped ? '恢复' : '删除') + '失败：' + String((e && e.message) || e));
+    if (button) { button.disabled = false; button.textContent = original; }
+  }
+}
+
 async function runPublishChanges(id, button){
   if (button) { button.disabled = true; button.textContent = '发布中…约 30–90 秒'; }
   try {
@@ -2321,6 +2357,12 @@ document.addEventListener('click', (e) => {
   if (bundleBtn) {
     const stateEl = document.querySelector('[data-bstate="' + bundleBtn.dataset.bundleId + '"]');
     void setBundleStatus(bundleBtn.dataset.bundleId, bundleBtn.dataset.bundleValue, stateEl);
+    return;
+  }
+  const vDrop = e.target.closest('button[data-variant-drop]');
+  if (vDrop) {
+    void toggleVariantDrop(String(vDrop.dataset.variantDropId), String(vDrop.dataset.variantDrop),
+      vDrop.dataset.dropped === '1', vDrop);
     return;
   }
   const ppNorm = e.target.closest('button[data-pp-normalize]');

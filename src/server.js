@@ -2387,6 +2387,14 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
         skuId: row.sku_id ?? null,
       })),
       total: skuRows.length,
+      // 已删除（禁用）的颜色变体：源颜色文本列表；发布时颜色与 SKU 行都会被剔除。
+      droppedColours: (() => {
+        const list = raw?.variantDrops?.colours;
+        return (Array.isArray(list) ? list : [])
+          .map((entry) => (typeof entry === 'string' ? entry : entry?.source))
+          .map((value) => String(value ?? '').trim())
+          .filter(Boolean);
+      })(),
     },
     normalization: normalization
       ? {
@@ -2630,6 +2638,37 @@ app.patch('/api/product-details/:id/variant-normalization', { preHandler: requir
     text: colour.text ?? null, imageId: colour.imageId ?? null,
   });
   return { productDetailId: id, colour };
+});
+
+// 删除/恢复一个颜色变体（写入 raw_data.variantDrops.colours）：
+// 发布时该颜色会从颜色列表与 SKU 矩阵中一并剔除（发布到 WP 后前台同步生效），
+// 随时可恢复；仅适用于非捆绑产品（捆绑走拆分流程）。
+app.post('/api/product-details/:id/variant-drops', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  if (detail.bundle_status === 'bundle') {
+    return reply.code(409).send({ error: 'bundle_split_flow',
+      message: '捆绑产品请使用拆分/发布流程调整变体。' });
+  }
+  const source = String(request.body?.source ?? '').trim();
+  if (!source) return reply.code(400).send({ error: 'source_required' });
+  const drop = request.body?.drop !== false;
+  const cleanSource = (entry) => String(typeof entry === 'string' ? entry : entry?.source ?? '').trim();
+  const existing = Array.isArray(detail.raw_data?.variantDrops?.colours)
+    ? detail.raw_data.variantDrops.colours : [];
+  const next = existing.filter((entry) => cleanSource(entry) !== source);
+  if (drop) next.push({ source, policy: 'manual', droppedAt: new Date().toISOString() });
+  const variantDrops = { ...(detail.raw_data?.variantDrops ?? {}), colours: next };
+  await db.updateProductRawData(id, { variantDrops });
+  await appendManualEditLog(id, {
+    at: new Date().toISOString(), action: drop ? 'variant_drop' : 'variant_restore', source,
+  });
+  return {
+    productDetailId: id, dropped: drop,
+    droppedColours: next.map(cleanSource).filter(Boolean),
+  };
 });
 
 // Save the manually ordered publish image set: the endpoint diffs the desired
