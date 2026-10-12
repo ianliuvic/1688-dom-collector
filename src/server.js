@@ -3594,7 +3594,7 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
               }] : []),
               ...result.created.map((item) => ({
                 productId: item.productId,
-                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status, categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manuallyUnpublishedAt ?? null },
+                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status, categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manualUnpublishedAt ?? null },
                 fields: { title: item.title, description: item.description },
               })),
             ];
@@ -3802,7 +3802,7 @@ function startFinalizeSplitJob(ids) {
               }] : []),
               ...publishedCreates.map((item) => ({
                 productId: item.productId,
-                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manuallyUnpublishedAt ?? null },
+                wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manualUnpublishedAt ?? null },
                 fields: { title: item.title, description: item.description },
               })),
             ];
@@ -4077,7 +4077,7 @@ async function syncSplitBundle({ productDetailId, detail, publication, contents,
     }] : []),
     ...publishedCreates.map((item) => ({
       productId: item.productId,
-      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manuallyUnpublishedAt ?? null },
+      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manualUnpublishedAt ?? null },
       fields: { title: item.title, description: item.description },
     })),
   ];
@@ -4236,7 +4236,7 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
     }] : []),
     ...publishedCreates.map((item) => ({
       productId: item.productId,
-      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manuallyUnpublishedAt ?? null },
+      wp: { postId: item.postId, url: item.url, styleNo: item.styleNo, status: item.status ?? 'publish', categoryId: item.categoryId, role: 'split', externalId: item.externalId, manualUnpublishedAt: item.manualUnpublishedAt ?? null },
       fields: { title: item.title, description: item.description },
     })),
   ];
