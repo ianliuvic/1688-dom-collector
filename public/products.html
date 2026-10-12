@@ -835,6 +835,10 @@ function renderSplitPanel(id, plan){
             + (content.wp.role === 'keeper' ? '（原页更新）' : content.wp.role === 'split' ? '（新建）' : '')
             + ' · ' + esc(content.wp.styleNo || '')
             + (content.wp.url ? ' · <a href="' + esc(content.wp.url) + '" target="_blank" rel="noopener">打开页面</a>' : '')
+            + '<button type="button" class="sp-pub-save" style="margin-left:8px" data-split-wp-toggle="' + id + '" data-split-wp-product="' + esc(String(product.id ?? '')) + '" data-split-wp-next="' + (content.wp.status === 'publish' ? 'draft' : 'publish') + '"'
+            + ' title="' + (content.wp.status === 'publish' ? '取消发布：转为草稿，前台页面不可访问（可随时再发布）' : '发布到 WordPress：前台立即可访问') + '">'
+            + (content.wp.status === 'publish' ? '取消发布' : '发布') + '</button>'
+            + '<span class="sp-wp-status muted" style="font-size:11px;margin-left:6px"></span>'
             + '</div>'
           : '')
         + '</span></div>'
@@ -928,7 +932,7 @@ function renderSplitPanel(id, plan){
     + '<div class="sp-products">' + cards + '</div>'
     + '<div class="sp-row sp-ignored"><span class="sp-label">未采用</span><span class="sp-opts">' + ignored + '</span></div>'
     + '<div class="sp-row sp-pool-row"><span class="sp-label">全部图片</span><span class="sp-imgs">' + poolHtml + '</span></div>'
-    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算；发布图为发布到 WP 的最终图片（实时按发布去重计算）；「全部图片」是分配前的图池，点「添加图片」或「更换 Swatch」后可直接从中点选（未下载的图使用时自动下载）；SKU 行尾的「删除」可从拆分发布中移除该变体（已发布则立即同步到 WP，可随时「恢复」）。</div>';
+    + '<div class="sp-status">选项用下拉在"未采用/产品N"间移动；尺码与价格在保存时按 SKU 矩阵重算；发布图为发布到 WP 的最终图片（实时按发布去重计算）；「全部图片」是分配前的图池，点「添加图片」或「更换 Swatch」后可直接从中点选（未下载的图使用时自动下载）；SKU 行尾的「删除」可从拆分发布中移除该变体（已发布则立即同步到 WP，可随时「恢复」）；内容块 WP 行的「发布/取消发布」可单独控制该拆分产品（keeper 或兄弟）的 WordPress 状态。</div>';
 }
 
 async function runSplitAnalysis(id){
@@ -1207,6 +1211,38 @@ function applySplitProductPatch(id, productId, product){
   if (Array.isArray(product.skus)) target.skus = product.skus;
   if (Array.isArray(product.sizes)) target.sizes = product.sizes;
   if (Array.isArray(product.removedSkus)) target.removedSkus = product.removedSkus;
+}
+
+/** Publish or unpublish one split product (keeper or sibling) on WordPress. */
+async function setSplitProductStatus(button){
+  const id = String(button.dataset.splitWpToggle || '');
+  const productId = String(button.dataset.splitWpProduct || '');
+  const nextStatus = String(button.dataset.splitWpNext || '');
+  if (!id || !productId || !['publish', 'draft'].includes(nextStatus)) return;
+  if (nextStatus === 'draft' && !window.confirm('取消发布后该产品的前台页面将不可访问（转为草稿），确认取消发布？')) return;
+  const row = button.closest('.pp-muted');
+  const statusEl = row ? row.querySelector('.sp-wp-status') : null;
+  button.disabled = true;
+  if (statusEl) statusEl.textContent = '处理中…';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-product-status', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ productId, status: nextStatus }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    const content = SPLIT_CONTENTS.get(String(id));
+    const target = (content?.products ?? []).find((item) => String(item.id) === String(productId));
+    if (target && body && body.wp) target.wp = body.wp;
+    renderSplitPanel(id);
+    const el = document.getElementById('split-status-' + id);
+    if (el) el.textContent = nextStatus === 'publish'
+      ? '已发布到 WordPress（前台可访问）'
+      : '已取消发布（转为草稿，可随时再发布）';
+  } catch (e) {
+    button.disabled = false;
+    if (statusEl) statusEl.textContent = '失败：' + String((e && e.message) || e).slice(0, 120);
+  }
 }
 
 async function pollSplitVariantSync(id, jobId){
@@ -2630,6 +2666,8 @@ document.addEventListener('click', (e) => {
   if (skuDrop) { void dropSplitVariant(skuDrop); return; }
   const skuRestore = e.target.closest('button[data-split-sku-restore]');
   if (skuRestore) { void restoreSplitVariant(skuRestore); return; }
+  const wpToggle = e.target.closest('button[data-split-wp-toggle]');
+  if (wpToggle) { void setSplitProductStatus(wpToggle); return; }
   if (addPick) {
     const thumb = e.target.closest('.sp-img[data-assign-ref]');
     if (thumb && thumb.parentElement === addPick.assignedStrip) {

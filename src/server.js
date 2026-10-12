@@ -1858,6 +1858,78 @@ app.put('/api/product-details/:id/split-variant-drop', { preHandler: requireDash
   return { ...payload, sync: { jobId: job.id } };
 });
 
+// Publish or unpublish ONE split product (keeper or sibling) on WordPress. The
+// member's post lives in the stored split contents, so the chosen status is
+// mirrored there (later bundle re-syncs keep it via the keep-publish check);
+// the keeper also updates the bundle's publication row.
+app.post('/api/product-details/:id/split-product-status', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const productId = String(request.body?.productId ?? '');
+  const status = String(request.body?.status ?? '');
+  if (!['publish', 'draft'].includes(status)) return reply.code(400).send({ error: 'invalid_status' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const record = await db.getSplitContents(id);
+  const product = (record?.result?.products ?? []).find((item) => String(item?.id) === productId);
+  if (!product) return reply.code(404).send({ error: 'split_product_not_found' });
+  const wpInfo = product.wp ?? {};
+  const postId = Number(wpInfo.postId);
+  if (!postId) {
+    return reply.code(409).send({
+      error: 'split_product_not_published',
+      message: '该拆分产品还没有 WordPress 文章；请先走拆分发布流程。',
+    });
+  }
+  try {
+    await setWordPressProductStatus({ postId, status, config });
+    // A manually published sibling keeps its source publication date, matching
+    // the finalize-splits flow (best effort).
+    if (status === 'publish' && detail.publication_date) {
+      await setWordPressProductPublicationDate({ postId, publicationDate: detail.publication_date, config })
+        .catch(() => null);
+    }
+    const merged = await db.mergeSplitContentWpResults(id, [{
+      productId: product.id,
+      wp: { ...wpInfo, status },
+    }]).catch(() => null);
+    // The keeper is the bundle's tracked post: mirror the status onto the
+    // bundle publication row so the products list and audits stay accurate.
+    if (wpInfo.role === 'keeper') {
+      const publication = await db.getWordPressPublication(id);
+      if (publication?.wp_post_id && Number(publication.wp_post_id) === postId) {
+        const payload = { ...(publication.payload ?? {}), status };
+        const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+        await db.saveWordPressPublication(id, {
+          translationId: publication.translation_id,
+          externalId: publication.external_id,
+          styleNo: publication.style_no,
+          wpPostId: publication.wp_post_id,
+          wpUrl: publication.wp_url,
+          wpEditUrl: publication.wp_edit_url,
+          wpStatus: status,
+          syncHash,
+          payload,
+          result: { ...(publication.result ?? {}), status },
+          lastError: null,
+        });
+      }
+    }
+    const updated = (merged?.result?.products ?? record.result.products)
+      .find((item) => String(item?.id) === productId) ?? null;
+    return {
+      ok: true, productDetailId: id, productId, postId, status,
+      styleNo: wpInfo.styleNo ?? null, role: wpInfo.role ?? null,
+      wp: updated?.wp ?? { ...wpInfo, status },
+    };
+  } catch (error) {
+    return reply.code(502).send({
+      error: 'wordpress_status_failed',
+      message: String(error?.message || error).slice(0, 200),
+    });
+  }
+});
+
 app.get('/api/split-order-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   return splitOrderJobs.get(request.params.id) ?? reply.code(404).send({ error: 'not_found' });
 });
