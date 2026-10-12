@@ -19,7 +19,7 @@ const FALLBACK_BASE_URL = 'https://api.deepseek.com';
 const MAX_IMAGES = 600;
 const SIZE_RE = /(尺码|尺寸|码数|size)/i;
 const COLOR_RE = /(颜色|color|colour)/i;
-const SIZE_ORDER = ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '2XL', '3XL', '4XL', '5XL'];
+const SIZE_ORDER = ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
 
 function cleanText(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
@@ -136,11 +136,12 @@ function sanitizeCode(value) {
 
 export function naturalSizeRank(label) {
   const upper = label.toUpperCase();
-  const index = SIZE_ORDER.indexOf(upper);
-  if (index >= 0) return [0, index];
-  // Plus-size run (0XL..6XL) sorts ascending right after the letter sizes.
+  // Plus-size run (0XL..6XL) first: it must stay monotonic and must not collide
+  // with the letter sizes (2XL is a plus label, not "XXL+1").
   const plus = upper.match(/^(\d)XL$/);
   if (plus) return [0, 8 + Number(plus[1])];
+  const index = SIZE_ORDER.indexOf(upper);
+  if (index >= 0) return [0, index];
   const numeric = Number(label.match(/\d+(?:\.\d+)?/)?.[0]);
   if (Number.isFinite(numeric) && /^\d/.test(label)) return [1, numeric];
   if (/(均码|one\s*size|free)/i.test(label)) return [2, 0];
