@@ -1172,7 +1172,7 @@ export function createDatabase(databaseUrl) {
     const editedClause = editedOnly
       ? `AND jsonb_typeof(details.raw_data->'manualEditLog') = 'array' AND EXISTS (
           SELECT 1 FROM jsonb_array_elements(details.raw_data->'manualEditLog') AS entry
-          WHERE entry->>'action' IN ('variant_normalization_edit','variant_normalization_regen','publish_images_edit','publish_images_reset','classification_edit','translation_regenerated','image_dedupe_regen','split_plan_edit','variant_drop','variant_restore'))`
+          WHERE entry->>'action' IN ('variant_normalization_edit','variant_normalization_regen','publish_images_edit','publish_images_reset','classification_edit','translation_regenerated','image_dedupe_regen','split_plan_edit','split_variant_drop','split_variant_restore','variant_drop','variant_restore'))`
       : '';
     const base = `WITH base AS (
       SELECT details.id, details.offer_id, details.title,

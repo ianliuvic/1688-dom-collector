@@ -822,6 +822,36 @@ export function splitSkusForProduct(raw, product, codes, sizeTexts, prefix) {
 }
 
 
+/** Drop manually removed SKU rows (and any size left without SKUs) from a split
+ * product's content. Removal entries match by skuId first, then colour+size,
+ * then the composed sku string, so deletions survive content regenerations that
+ * rebuild sku strings (e.g. after a style number change). */
+export function applyRemovedSkus(product, removed = []) {
+  const list = (Array.isArray(removed) ? removed : []).filter(Boolean);
+  if (!product || !Array.isArray(product.skus) || !list.length) return product;
+  const matches = (sku, entry) => {
+    if (entry?.skuId != null && sku?.skuId != null) {
+      return String(entry.skuId) === String(sku.skuId);
+    }
+    const entryColour = cleanText(entry?.colour);
+    const entrySize = cleanText(entry?.size);
+    if (entryColour && entrySize && entryColour === cleanText(sku?.colour) && entrySize === cleanText(sku?.size)) {
+      return true;
+    }
+    return entry?.sku != null && sku?.sku != null && String(entry.sku) === String(sku.sku);
+  };
+  const kept = product.skus.filter((sku) => !list.some((entry) => matches(sku, entry)));
+  product.skus = kept;
+  if (Array.isArray(product.sizes)) {
+    // Sizes exist only to describe the surviving SKUs (generation already drops
+    // sizes without rows), so a removed last-of-size variant removes the size.
+    const used = new Set(kept.map((sku) => cleanText(sku?.size)).filter(Boolean));
+    product.sizes = product.sizes.filter((size) => used.has(cleanText(size?.source)));
+  }
+  return product;
+}
+
+
 /** Refresh variant naming/sizes/SKUs of stored split contents via the
  * normalization pipeline, keeping the already generated titles/descriptions. */
 export async function normalizeSplitContents({ detail, plan, contents, styleNo = null, config = {}, baseUrl }) {
@@ -870,6 +900,11 @@ export async function normalizeSplitContents({ detail, plan, contents, styleNo =
     const codeMap = new Map(colours.filter((colour) => colour.code).map((colour) => [colour.source, colour.code]));
     const prefix = styleNo ? `${styleNo}S${index + 1}` : `S${index + 1}`;
     const skus = splitSkusForProduct(raw, product, codeMap, sizeTexts, prefix);
+    // Manual variant deletions (split review UI) survive normalization refreshes.
+    const rebuilt = applyRemovedSkus(
+      { skus, sizes },
+      Array.isArray(prior.removedSkus) ? prior.removedSkus : [],
+    );
     // Keep the already-deduped publish refs: this job only refreshes variant
     // naming/sizes/SKUs. Resetting them to the plan's raw image assignment
     // would undo the generation-time dedupe and desync the stored statistics.
@@ -881,8 +916,8 @@ export async function normalizeSplitContents({ detail, plan, contents, styleNo =
       id: product.id ?? `p${index + 1}`,
       name: cleanText(product.name) || prior.name || null,
       colours,
-      sizes,
-      skus,
+      sizes: rebuilt.sizes,
+      skus: rebuilt.skus,
       imageRefs: priorRefs,
       normalizedAt: new Date().toISOString(),
       needsReview: colours.some((colour) => !colour.text || !colour.code || colour.needsReview === true),

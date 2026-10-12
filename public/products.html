@@ -758,12 +758,16 @@ function renderSplitPanel(id, plan){
     return galleryImage?.thumb ?? null;
   };
   const cards = products.map((product, index) => {
-    const sizes = (product.sizes || []).map((size) => '<span class="chip">' + esc(size) + '</span>').join('');
+    const content = (SPLIT_CONTENTS.get(String(id))?.products ?? []).find((item) => item.id === product.id);
+    // 尺码 chips 在内容生成后反映即将发布的尺码（内容尺码），这样删除变体后
+    // 其尺码会同步消失；未生成内容时退回计划尺码。
+    const sizeList = (content?.sizes ?? []).map((size) => size.text || size.source).filter(Boolean);
+    const sizes = (sizeList.length ? sizeList : (product.sizes || []))
+      .map((size) => '<span class="chip">' + esc(size) + '</span>').join('');
     const price = product.priceMax != null ? '¥' + product.priceMax : '—';
     const optionChips = (product.options || []).length
       ? product.options.map((text) => chip(text, index)).join('')
       : '<span class="muted">（无选项，可在下方未采用里分配）</span>';
-    const content = (SPLIT_CONTENTS.get(String(id))?.products ?? []).find((item) => item.id === product.id);
     const assignedImages = [
       ...(product.imageIds || []).map((imageId) => ({ kind: 'id', ref: String(imageId), thumb: splitThumb(imageId) })),
       ...(product.imageUrls || []).map((url) => ({ kind: 'url', ref: String(url), thumb: String(url) })),
@@ -785,10 +789,23 @@ function renderSplitPanel(id, plan){
             + '<span>' + esc(colour.text || colour.source) + ' <span class="pp-muted">' + esc(colour.code || '') + '</span></span></span>').join('') + '</div>'
           : '')
         + ((content.skus || []).length
-          ? '<table class="pp-table" style="margin-top:4px"><thead><tr><th>SKU</th><th>尺码</th><th>源价</th><th>库存</th></tr></thead><tbody>'
+          ? '<table class="pp-table" style="margin-top:4px"><thead><tr><th>SKU</th><th>尺码</th><th>源价</th><th>库存</th><th></th></tr></thead><tbody>'
             + content.skus.slice(0, 30).map((sku) => '<tr><td><code>' + esc(sku.sku) + '</code></td><td>' + esc(sku.sizeText || sku.size || '') + '</td>'
-              + '<td>' + (sku.price === null || sku.price === undefined ? '—' : '¥' + sku.price) + '</td><td>' + (sku.stock === null ? '—' : sku.stock) + '</td></tr>').join('')
+              + '<td>' + (sku.price === null || sku.price === undefined ? '—' : '¥' + sku.price) + '</td><td>' + (sku.stock === null ? '—' : sku.stock) + '</td>'
+              + '<td><button type="button" class="sp-pub-save sp-sku-drop" title="删除该变体：从拆分发布中移除并同步到 WP，可随时恢复" data-split-sku-drop="' + id + '" data-sku-product="' + esc(String(product.id ?? '')) + '" data-sku="' + esc(sku.sku) + '"'
+              + (sku.skuId != null ? ' data-sku-id="' + esc(String(sku.skuId)) + '"' : '') + '>删除</button></td></tr>').join('')
             + '</tbody></table>'
+          : '')
+        + ((content.removedSkus || []).length
+          ? '<div class="pp-muted" style="margin-top:4px">已删除变体：'
+            + content.removedSkus.map((entry) => '<span style="margin-right:10px"><code>' + esc(entry.sku || '') + '</code>'
+              + (entry.size ? ' · ' + esc(entry.size) : '')
+              + ' <button type="button" class="sp-pub-save" title="恢复该变体" data-split-sku-restore="' + id + '" data-sku-product="' + esc(String(product.id ?? '')) + '" data-sku="' + esc(entry.sku || '') + '"'
+              + (entry.skuId != null ? ' data-sku-id="' + esc(String(entry.skuId)) + '"' : '')
+              + (entry.colour ? ' data-sku-colour="' + esc(String(entry.colour)) + '"' : '')
+              + (entry.size ? ' data-sku-size="' + esc(String(entry.size)) + '"' : '')
+              + '>恢复</button></span>').join('')
+            + '</div>'
           : '')
         + (content.wp
           ? '<div class="pp-muted" style="margin-top:3px">WP：' + esc(content.wp.status || '')
@@ -888,7 +905,7 @@ function renderSplitPanel(id, plan){
     + '<div class="sp-products">' + cards + '</div>'
     + '<div class="sp-row sp-ignored"><span class="sp-label">未采用</span><span class="sp-opts">' + ignored + '</span></div>'
     + '<div class="sp-row sp-pool-row"><span class="sp-label">全部图片</span><span class="sp-imgs">' + poolHtml + '</span></div>'
-    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算；发布图为发布到 WP 的最终图片（实时按发布去重计算）；「全部图片」是分配前的图池，点「添加图片」或「更换 Swatch」后可直接从中点选（未下载的图使用时自动下载）。</div>';
+    + '<div class="sp-status">选项用下拉在“未采用/产品N”间移动；尺码与价格在保存时按 SKU 矩阵重算；发布图为发布到 WP 的最终图片（实时按发布去重计算）；「全部图片」是分配前的图池，点「添加图片」或「更换 Swatch」后可直接从中点选（未下载的图使用时自动下载）；SKU 行尾的「删除」可从拆分发布中移除该变体（已发布则立即同步到 WP，可随时「恢复」）。</div>';
 }
 
 async function runSplitAnalysis(id){
@@ -1091,6 +1108,95 @@ async function savePublishSet(id, productId, button){
     if (status) status.textContent = '保存失败：' + String((e && e.message) || e).slice(0, 80);
   } finally {
     button.disabled = false;
+  }
+}
+
+/** Remove one SKU variant from a split product (durable snapshot; re-syncs WP when published). */
+async function dropSplitVariant(button){
+  const id = String(button.dataset.splitSkuDrop || '');
+  const productId = String(button.dataset.skuProduct || '');
+  const sku = String(button.dataset.sku || '');
+  const skuId = button.dataset.skuId ? String(button.dataset.skuId) : null;
+  if (!id || !productId || (!sku && !skuId)) return;
+  const status = document.getElementById('split-status-' + id);
+  button.disabled = true;
+  if (status) status.textContent = '正在删除变体 ' + (sku || skuId) + ' …';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-variant-drop', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ productId, sku, skuId }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    applySplitProductPatch(id, productId, body && body.product);
+    renderSplitPanel(id);
+    const el = document.getElementById('split-status-' + id);
+    if (body && body.sync && body.sync.jobId) {
+      if (el) el.textContent = '变体已删除，正在同步到 WordPress…';
+      void pollSplitVariantSync(id, body.sync.jobId);
+    } else if (el) {
+      el.textContent = '变体已删除（该产品尚未发布；拆分发布时生效）';
+    }
+  } catch (e) {
+    button.disabled = false;
+    if (status) status.textContent = '删除失败：' + String((e && e.message) || e).slice(0, 120);
+  }
+}
+
+/** Restore a previously removed split-product variant from its stored snapshot. */
+async function restoreSplitVariant(button){
+  const id = String(button.dataset.splitSkuRestore || '');
+  const productId = String(button.dataset.skuProduct || '');
+  const sku = String(button.dataset.sku || '');
+  const skuId = button.dataset.skuId ? String(button.dataset.skuId) : null;
+  if (!id || !productId || (!sku && !skuId)) return;
+  const status = document.getElementById('split-status-' + id);
+  button.disabled = true;
+  if (status) status.textContent = '正在恢复变体…';
+  try {
+    const res = await fetch('/api/product-details/' + id + '/split-variant-drop', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ productId, sku, skuId, restore: true }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
+    applySplitProductPatch(id, productId, body && body.product);
+    renderSplitPanel(id);
+    const el = document.getElementById('split-status-' + id);
+    if (body && body.sync && body.sync.jobId) {
+      if (el) el.textContent = '变体已恢复，正在同步到 WordPress…';
+      void pollSplitVariantSync(id, body.sync.jobId);
+    } else if (el) {
+      el.textContent = '变体已恢复（该产品尚未发布；拆分发布时生效）';
+    }
+  } catch (e) {
+    button.disabled = false;
+    if (status) status.textContent = '恢复失败：' + String((e && e.message) || e).slice(0, 120);
+  }
+}
+
+/** Apply the drop/restore response's product patch to the cached split content. */
+function applySplitProductPatch(id, productId, product){
+  if (!product) return;
+  const content = SPLIT_CONTENTS.get(String(id));
+  const target = (content?.products ?? []).find((item) => String(item.id) === String(productId));
+  if (!target) return;
+  if (Array.isArray(product.skus)) target.skus = product.skus;
+  if (Array.isArray(product.sizes)) target.sizes = product.sizes;
+  if (Array.isArray(product.removedSkus)) target.removedSkus = product.removedSkus;
+}
+
+async function pollSplitVariantSync(id, jobId){
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    try {
+      const res = await fetch('/api/split-order-jobs/' + jobId, { headers: { accept: 'application/json' } });
+      if (!res.ok) continue;
+      const job = await res.json();
+      const el = document.getElementById('split-status-' + id);
+      if (job.status === 'completed') { if (el) el.textContent = '已完成并同步到 WordPress'; return 'completed'; }
+      if (job.status === 'failed') { if (el) el.textContent = '同步失败：' + String(job.error || '').slice(0, 80); return 'failed'; }
+    } catch { /* keep polling */ }
   }
 }
 
@@ -2488,6 +2594,10 @@ document.addEventListener('click', (e) => {
       String(swatchReset.dataset.swatchColour), null, row ? row.querySelector('.sp-swatch-status') : null);
     return;
   }
+  const skuDrop = e.target.closest('button[data-split-sku-drop]');
+  if (skuDrop) { void dropSplitVariant(skuDrop); return; }
+  const skuRestore = e.target.closest('button[data-split-sku-restore]');
+  if (skuRestore) { void restoreSplitVariant(skuRestore); return; }
   if (addPick) {
     const thumb = e.target.closest('.sp-img[data-assign-ref]');
     if (thumb && thumb.parentElement === addPick.assignedStrip) {

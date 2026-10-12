@@ -30,7 +30,7 @@ import { evaluateShopProductPolicy } from './shop-publication-policy.js';
 import { selectBestSellers } from './best-seller-selector.js';
 import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
-import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy, classifyNonProductImages, regenerateSplitCopy } from './bundle-splitter.js';
+import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy, applyRemovedSkus, classifyNonProductImages, regenerateSplitCopy } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
 import { dedupeImagesByHash, dedupeImagesWithLlm, normalizedSourceImageKey } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
@@ -1472,6 +1472,17 @@ app.post('/api/product-details/:id/split-content', { preHandler: requireDashboar
         if (overrides?.added?.length) product.publishAdded = overrides.added;
         if (overrides?.excluded?.length) product.publishExcluded = overrides.excluded;
       }
+      // Manually removed variants survive content regenerations: the deletion
+      // list is carried over and re-applied to the freshly rebuilt SKU rows.
+      const priorRemoved = new Map((prior?.result?.products ?? [])
+        .map((product) => [String(product.id), Array.isArray(product.removedSkus) ? product.removedSkus : []]));
+      for (const product of contents.products) {
+        const removed = priorRemoved.get(String(product.id));
+        if (removed?.length) {
+          product.removedSkus = removed;
+          applyRemovedSkus(product, removed);
+        }
+      }
       const saved = await db.saveSplitContents(id, contents, config.complexModel ?? null);
       job.productCount = contents.products.length;
       job.result = { productCount: contents.products.length, styleNo: contents.styleNo };
@@ -1718,6 +1729,133 @@ app.put('/api/product-details/:id/split-swatch', { preHandler: requireDashboardO
     contents: record.result, trigger: 'wordpress_swatch',
   });
   return { saved: true, sync: { jobId: job.id }, resolved: swatchResolved };
+});
+
+// Remove one SKU variant from a split product's content (bundle split review
+// UI). The deletion is durable across content regenerations (stored as
+// removedSkus and re-applied), drops any size left without SKUs, logs a manual
+// edit for the products-list badge, and re-syncs WordPress when the bundle is
+// already published. The same endpoint restores a removed variant from its
+// stored snapshot (restore: true).
+app.put('/api/product-details/:id/split-variant-drop', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const productId = String(request.body?.productId ?? '');
+  const skuKey = String(request.body?.sku ?? '');
+  const skuId = request.body?.skuId === null || request.body?.skuId === undefined
+    ? '' : String(request.body.skuId);
+  const restore = request.body?.restore === true;
+  if (!productId || (!skuKey && !skuId)) return reply.code(400).send({ error: 'product_and_sku_required' });
+  const record = await db.getSplitContents(id);
+  const product = (record?.result?.products ?? []).find((item) => String(item?.id) === productId);
+  if (!product) return reply.code(404).send({ error: 'split_product_not_found' });
+  const matches = (entry, row) => {
+    if (!entry || !row) return false;
+    if (entry.skuId != null && row.skuId != null) return String(entry.skuId) === String(row.skuId);
+    if (entry.colour && entry.size) {
+      return String(entry.colour) === String(row.colour ?? '') && String(entry.size) === String(row.size ?? '');
+    }
+    return entry.sku != null && row.sku != null && String(entry.sku) === String(row.sku);
+  };
+  const key = { sku: skuKey || null, skuId: skuId || null };
+  const now = new Date().toISOString();
+
+  if (restore) {
+    const list = Array.isArray(product.removedSkus) ? product.removedSkus : [];
+    const entryIndex = list.findIndex((entry) => matches(key, entry));
+    if (entryIndex < 0) return reply.code(404).send({ error: 'variant_removal_not_found' });
+    const [entry] = list.splice(entryIndex, 1);
+    product.removedSkus = list;
+    if (entry?.row) {
+      const rows = Array.isArray(product.skus) ? product.skus : [];
+      const target = Math.min(Math.max(Number(entry.index) || 0, 0), rows.length);
+      rows.splice(target, 0, entry.row);
+      product.skus = rows;
+      if (entry.size) {
+        const sizes = Array.isArray(product.sizes) ? product.sizes : [];
+        const has = sizes.some((size) => String(size?.source ?? '') === String(entry.size));
+        if (!has) {
+          const sizeEntry = { source: entry.size, text: entry.sizeText || entry.size, placeholder: false };
+          const sizeIndex = Math.min(Math.max(Number(entry.sizeIndex) || 0, 0), sizes.length);
+          sizes.splice(sizeIndex, 0, sizeEntry);
+          product.sizes = sizes;
+        }
+      }
+    }
+    await db.saveSplitContents(id, record.result, record.model ?? null);
+    await appendManualEditLog(id, {
+      at: now, action: 'split_variant_restore', productId,
+      sku: entry?.sku ?? null, size: entry?.size ?? null,
+    });
+    const payload = {
+      saved: true, restored: entry ?? null, restore: true,
+      product: {
+        id: product.id,
+        sizes: product.sizes ?? [],
+        skus: product.skus ?? [],
+        removedSkus: product.removedSkus,
+      },
+    };
+    const publication = await db.getWordPressPublication(id);
+    const isPublished = (record.result.products ?? []).some((item) => item?.wp?.postId);
+    if (!publication?.payload || !isPublished) {
+      return { ...payload, sync: null, reason: 'not_published' };
+    }
+    const detail = await db.getProductDetail(id);
+    const job = await queueSplitSyncJob({
+      productDetailId: id, productId, detail, publication,
+      contents: record.result, trigger: 'wordpress_split_variant_restore',
+    });
+    return { ...payload, sync: { jobId: job.id } };
+  }
+
+  const rows = Array.isArray(product.skus) ? product.skus : [];
+  const index = rows.findIndex((row) => (skuId && row?.skuId != null && String(row.skuId) === skuId)
+    || (skuKey && String(row?.sku ?? '') === skuKey));
+  if (index < 0) return reply.code(404).send({ error: 'variant_not_found' });
+  const sizesBefore = Array.isArray(product.sizes) ? product.sizes : [];
+  const [removed] = rows.splice(index, 1);
+  const entry = {
+    sku: removed?.sku ?? null, skuId: removed?.skuId ?? null,
+    colour: removed?.colour ?? null, size: removed?.size ?? null,
+    sizeText: removed?.sizeText ?? null,
+    index,
+    sizeIndex: sizesBefore.findIndex((size) => String(size?.source ?? '') === String(removed?.size ?? '')),
+    at: now,
+    // Full snapshot so the review UI can restore the variant without rescanning
+    // the 1688 matrix.
+    row: removed ?? null,
+  };
+  product.removedSkus = [...(Array.isArray(product.removedSkus) ? product.removedSkus : []), entry].slice(-200);
+  // The row is already spliced; this call also drops the size if it lost its
+  // last SKU and keeps regenerations consistent.
+  applyRemovedSkus(product, [entry]);
+  await db.saveSplitContents(id, record.result, record.model ?? null);
+  await appendManualEditLog(id, {
+    at: now, action: 'split_variant_drop', productId,
+    sku: entry.sku, size: entry.size,
+  });
+
+  const payload = {
+    saved: true, removed: entry,
+    product: {
+      id: product.id,
+      sizes: product.sizes ?? [],
+      skus: product.skus ?? [],
+      removedSkus: product.removedSkus,
+    },
+  };
+  const publication = await db.getWordPressPublication(id);
+  const isPublished = (record.result.products ?? []).some((item) => item?.wp?.postId);
+  if (!publication?.payload || !isPublished) {
+    return { ...payload, sync: null, reason: 'not_published' };
+  }
+  const detail = await db.getProductDetail(id);
+  const job = await queueSplitSyncJob({
+    productDetailId: id, productId, detail, publication,
+    contents: record.result, trigger: 'wordpress_split_variant_drop',
+  });
+  return { ...payload, sync: { jobId: job.id } };
 });
 
 app.get('/api/split-order-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
@@ -7019,7 +7157,8 @@ function catalogManualEditTimes(row) {
   let lastContentEdit = null;
   for (const entry of log) {
     const action = String(entry?.action ?? '');
-    if (!contentActions.has(action) && action !== 'classification_edit' && action !== 'split_plan_edit') continue;
+    if (!contentActions.has(action) && action !== 'classification_edit' && action !== 'split_plan_edit'
+      && action !== 'split_variant_drop') continue;
     const timestamp = entry?.at ? Date.parse(entry.at) : NaN;
     if (!Number.isFinite(timestamp)) continue;
     if (lastEdit === null || timestamp > lastEdit) lastEdit = timestamp;
