@@ -115,9 +115,16 @@ export function buildSplitRagProduct({
   if (!detail?.offer_id) throw new Error('A saved product detail with offer_id is required for RAG sync.');
   if (!content) throw new Error('A split product content is required for RAG sync.');
   const keeper = wp?.role === 'keeper';
-  const canonicalProductId = clean(wp?.externalId)
-    || (keeper ? `1688:${detail.offer_id}`
-      : `1688:${detail.offer_id}:${clean(content.id) || clean(wp?.styleNo) || 'split'}`);
+  // The RAG service keys embeddings by (platform, sourceProductId): each split
+  // product must carry its OWN source id or family members collide. The stored
+  // external id (1688:{offer} for the keeper, 1688:{offer}S2… for siblings) is
+  // exactly that per-product identity.
+  const externalId = clean(wp?.externalId);
+  const sourceId = externalId.startsWith('1688:') ? externalId.slice(5) : externalId;
+  const resolvedSourceId = sourceId
+    || (keeper ? String(detail.offer_id)
+      : `${detail.offer_id}P${clean(content.id) || clean(wp?.styleNo) || 'split'}`);
+  const canonicalProductId = externalId || `1688:${resolvedSourceId}`;
   const title = clean(content.title) || clean(detail.title);
   const description = clean(content.description) || clean(detail.description);
   const attributes = Array.isArray(translation?.attributes) && translation.attributes.length
@@ -142,7 +149,7 @@ export function buildSplitRagProduct({
   const mainImage = imageEntities[0]?.imageUrl || '';
   return {
     canonicalProductId,
-    sourcePlatform: '1688', sourceProductId: String(detail.offer_id),
+    sourcePlatform: '1688', sourceProductId: resolvedSourceId,
     productDetailId: Number(detail.id), wpPostId: Number(wp?.postId) || null,
     wpImageId: null,
     styleNo: clean(wp?.styleNo) || null,
