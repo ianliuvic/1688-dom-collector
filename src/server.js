@@ -92,6 +92,19 @@ if (!config.databaseUrl) throw new Error('DATABASE_URL is required');
 if (!config.adminApiKey) throw new Error('ADMIN_API_KEY is required');
 
 const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 1024 * 1024 });
+// Tolerate POST/PUT requests that announce JSON but send no body (the split
+// panel's action buttons do this): an empty body parses as {}, while malformed
+// JSON still fails loudly.
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (request, body, done) => {
+  const text = String(body ?? '').trim();
+  if (!text) { done(null, {}); return; }
+  try {
+    done(null, JSON.parse(text));
+  } catch (error) {
+    error.statusCode = 400;
+    done(error);
+  }
+});
 const db = createDatabase(config.databaseUrl);
 const collector = createCollector(config);
 const loginManager = createLoginManager(config);

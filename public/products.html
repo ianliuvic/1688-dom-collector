@@ -946,7 +946,7 @@ async function runSplitAnalysis(id){
   const status = document.getElementById('split-status-' + id);
   if (status) status.textContent = '模型分析中（查看图片并分组）…约 20–60 秒';
   try {
-    const res = await fetch('/api/product-details/' + id + '/split-analysis', { method: 'POST', headers: { 'content-type': 'application/json' } });
+    const res = await fetch('/api/product-details/' + id + '/split-analysis', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     if (!res.ok) {
       const text = await res.text();
       if (status) status.textContent = '分析失败 HTTP ' + res.status + '：' + text.slice(0, 160);
