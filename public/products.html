@@ -252,11 +252,13 @@ let totalAll = 0;
 let colorCounts = {};
 let wpCounts = {};
 let bundleCounts = {};
+let availabilityCounts = {};
 let shopCounts = [];
 let manualBundleCount = 0;
 let colors = 0;
 let wpFilter = '';
 let bundleFilter = '';
+let availabilityFilter = '';
 let shopFilter = '';
 let editedFilter = '';
 let keyword = '';
@@ -488,6 +490,16 @@ function renderFilters(){
     + '>捆绑 (' + Number(bundleCounts.bundle || 0) + ')</button>');
   parts.push('<button type="button" data-bundle="clear"' + (bundleFilter === 'clear' ? ' class="on"' : '')
     + '>正常 (' + Number(bundleCounts.clear || 0) + ')</button>');
+  const availActive = Number(availabilityCounts.active || 0);
+  const availDelisted = Number(availabilityCounts.delisted || 0);
+  const availNone = Number(availabilityCounts.none || 0);
+  parts.push('<span class="sep"></span><span class="label">1688 状态：</span>');
+  parts.push('<button type="button" data-availability=""' + (availabilityFilter === '' ? ' class="on"' : '')
+    + ' title="按 1688 侧在售/下架状态筛选（来自店铺扫描）">全部 (' + (availActive + availDelisted + availNone) + ')</button>');
+  parts.push('<button type="button" data-availability="active"' + (availabilityFilter === 'active' ? ' class="on"' : '')
+    + ' title="1688 店铺扫描中仍在售的商品">在售 (' + availActive + ')</button>');
+  parts.push('<button type="button" data-availability="delisted"' + (availabilityFilter === 'delisted' ? ' class="on"' : '')
+    + ' title="1688 店铺扫描中已下架的商品">已下架 (' + availDelisted + ')</button>');
   const shopTotal = shopCounts.reduce((sum, s) => sum + Number(s.products || 0), 0);
   const shopOptions = ['<option value="">全部店铺 (' + shopTotal + ')</option>'];
   for (const shop of shopCounts) {
@@ -548,6 +560,7 @@ async function loadPage(){
     if (colors) params.set('colors', String(colors));
     if (wpFilter) params.set('wp', wpFilter);
     if (bundleFilter) params.set('bundle', bundleFilter);
+    if (availabilityFilter) params.set('availability', availabilityFilter);
     if (shopFilter) params.set('shop', shopFilter);
     if (editedFilter) params.set('edited', '1');
     const res = await fetch('/api/product-catalog?' + params.toString(), { headers: { accept: 'application/json' } });
@@ -559,6 +572,7 @@ async function loadPage(){
     colorCounts = body.colorCounts || {};
     wpCounts = body.wpCounts || {};
     bundleCounts = body.bundleCounts || {};
+    availabilityCounts = body.availabilityCounts || {};
     shopCounts = Array.isArray(body.shopCounts) ? body.shopCounts : [];
     manualBundleCount = Number(body.manualBundleCount) || 0;
     render();
@@ -625,6 +639,15 @@ function wireFilters(){
       const next = String(bundleBtn.dataset.bundle || '');
       if (next === bundleFilter) return;
       bundleFilter = next;
+      offset = 0;
+      void loadPage();
+      return;
+    }
+    const availBtn = e.target.closest('button[data-availability]');
+    if (availBtn) {
+      const next = String(availBtn.dataset.availability || '');
+      if (next === availabilityFilter) return;
+      availabilityFilter = next;
       offset = 0;
       void loadPage();
       return;

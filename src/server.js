@@ -7205,6 +7205,8 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
     ? String(request.query.wp).trim() : '';
   const bundle = ['bundle', 'clear'].includes(String(request.query?.bundle ?? '').trim())
     ? String(request.query.bundle).trim() : '';
+  const availability = ['active', 'delisted'].includes(String(request.query?.availability ?? '').trim())
+    ? String(request.query.availability).trim() : '';
   const shop = String(request.query?.shop ?? '').trim().slice(0, 24);
   const edited = request.query?.edited === '1' || request.query?.edited === 'true';
   const [result, staging] = await Promise.all([
@@ -7215,6 +7217,7 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
       colors,
       wp,
       bundle,
+      availability,
       shop,
       edited,
     }),
@@ -7278,6 +7281,7 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
     colorCounts: result.colorCounts,
     wpCounts: result.wpCounts,
     bundleCounts: result.bundleCounts,
+    availabilityCounts: result.availabilityCounts,
     shopCounts: result.shopCounts,
     manualBundleCount: result.manualBundleCount,
     limit: result.limit, offset: result.offset,
