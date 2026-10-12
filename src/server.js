@@ -2258,10 +2258,11 @@ app.get('/api/product-details/:id/publish-preview', { preHandler: requireDashboa
     }
   } catch { /* URL-only additions are best effort */ }
   // Pending unpublished edits: any review action newer than the last WP sync
-  // (normalization, dedupe, publish-image edits, or a regenerated translation).
+  // (normalization, dedupe, publish-image edits, colour drops, or a regenerated
+  // translation).
   const editTimes = [
     normalization?.updated_at, raw.imageDedupe?.updatedAt, raw.publishImages?.updatedAt,
-    translation?.updated_at,
+    raw.variantDrops?.updatedAt, translation?.updated_at,
   ].map((value) => (value ? Date.parse(value) : NaN)).filter(Number.isFinite);
   const lastEditAt = editTimes.length ? new Date(Math.max(...editTimes)).toISOString() : null;
   const publicationUpdatedAt = publication?.updated_at ? new Date(publication.updated_at).toISOString() : null;
@@ -2659,11 +2660,12 @@ app.post('/api/product-details/:id/variant-drops', { preHandler: requireDashboar
   const existing = Array.isArray(detail.raw_data?.variantDrops?.colours)
     ? detail.raw_data.variantDrops.colours : [];
   const next = existing.filter((entry) => cleanSource(entry) !== source);
-  if (drop) next.push({ source, policy: 'manual', droppedAt: new Date().toISOString() });
-  const variantDrops = { ...(detail.raw_data?.variantDrops ?? {}), colours: next };
+  const now = new Date().toISOString();
+  if (drop) next.push({ source, policy: 'manual', droppedAt: now });
+  const variantDrops = { ...(detail.raw_data?.variantDrops ?? {}), colours: next, updatedAt: now };
   await db.updateProductRawData(id, { variantDrops });
   await appendManualEditLog(id, {
-    at: new Date().toISOString(), action: drop ? 'variant_drop' : 'variant_restore', source,
+    at: now, action: drop ? 'variant_drop' : 'variant_restore', source,
   });
   return {
     productDetailId: id, dropped: drop,
@@ -6995,7 +6997,8 @@ function extractDescriptionImageUrls(html) {
 function catalogManualEditTimes(row) {
   const log = Array.isArray(row.manual_edit_log) ? row.manual_edit_log : [];
   const contentActions = new Set(['variant_normalization_edit', 'variant_normalization_regen',
-    'publish_images_edit', 'publish_images_reset', 'translation_regenerated', 'image_dedupe_regen']);
+    'publish_images_edit', 'publish_images_reset', 'translation_regenerated', 'image_dedupe_regen',
+    'variant_drop', 'variant_restore']);
   let lastEdit = null;
   let lastContentEdit = null;
   for (const entry of log) {
