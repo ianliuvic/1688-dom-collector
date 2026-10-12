@@ -6022,9 +6022,9 @@ app.get('/api/wordpress/split-stock-audit', { preHandler: requireDashboardOrApiK
     const max = Math.min(items.length, Math.min(Math.max(Number(request.query?.verifyLimit) || 80, 1), 200));
     for (let index = 0; index < max; index += 1) {
       const item = items[index];
-      if (!item.externalId) continue;
+      if (!item.wpPostId) continue;
       try {
-        const mapping = await wp(`/wp-json/hx/v1/products/by-external-id/${encodeURIComponent(item.externalId)}`,
+        const mapping = await wp(`/wp-json/hx/v1/products/resolve?post_id=${Number(item.wpPostId)}`,
           { timeoutMs: 20000 });
         const raw = mapping?.meta?.sample_available;
         const pageFlag = !(raw === '' || raw === null || raw === undefined || raw === false
