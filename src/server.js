@@ -23,7 +23,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
-import { buildRagProduct, createRagClient } from './rag-client.js';
+import { buildRagProduct, buildSplitRagProduct, createRagClient } from './rag-client.js';
 import { analyzeProductDuplicates } from './duplicate-analyzer.js';
 import { computeImageHashes } from './image-hash.js';
 import { evaluateShopProductPolicy } from './shop-publication-policy.js';
@@ -509,10 +509,121 @@ async function executeProductRagSync(record) {
   }
 }
 
+// --- Split bundles in RAG: one document PER split product (keeper + siblings)
+
+const cleanText = (value) => String(value ?? '').trim();
+
+/** Upsert one RAG document per known split product (published → active, draft
+ * → inactive) and clear the legacy whole-bundle document. */
+async function syncSplitProductsToRag(productDetailId, { trigger = 'split_sync' } = {}) {
+  const detail = await db.getProductDetail(productDetailId);
+  if (!detail) throw new Error('Saved product detail no longer exists.');
+  const contents = await db.getSplitContents(productDetailId);
+  const products = contents?.result?.products ?? [];
+  if (!products.length) throw new Error('Split contents are required for a split RAG sync.');
+  const [translation, publication] = await Promise.all([
+    db.getLatestProductTranslation(detail.id, 'en'),
+    db.getWordPressPublication(detail.id),
+  ]);
+  let categoryNames = new Map();
+  try {
+    const taxonomies = await wordpressClient(config)('/wp-json/hx/v1/products/taxonomies', { timeoutMs: 30000 });
+    for (const category of taxonomies?.categories ?? []) {
+      categoryNames.set(Number(category.id), cleanText(category.name));
+    }
+  } catch { /* fall back to the payload category */ }
+  const results = [];
+  let keeperSeen = false;
+  for (const product of products) {
+    const wp = product.wp ?? {};
+    if (!wp.postId) {
+      results.push({ productId: product.id ?? null, styleNo: wp.styleNo ?? null,
+        role: wp.role === 'keeper' ? 'keeper' : 'split', skipped: 'no_wp_post' });
+      continue;
+    }
+    if (wp.role === 'keeper') keeperSeen = true;
+    const outcome = await computePublishImageRows(detail, product).catch(() => null);
+    const imageEntries = (outcome?.rows ?? []).map((image) => ({
+      id: String(image.id), url: cleanText(image.source_url),
+    }));
+    // URL-only refs that were never stored locally still belong to the set.
+    for (const url of product.imageRefs?.imageUrls ?? []) {
+      imageEntries.push({ id: null, url: String(url) });
+    }
+    const doc = buildSplitRagProduct({
+      detail, content: product, wp, translation, publication,
+      categoryName: categoryNames.get(Number(wp.categoryId)) ?? '',
+      images: imageEntries,
+    });
+    const response = await ragClient.upsert(doc);
+    const result = response?.results?.[0];
+    if (!response?.ok || result?.ok === false) {
+      throw new Error(result?.error || `Products RAG API rejected split product ${product.id ?? ''}.`);
+    }
+    results.push({
+      productId: product.id ?? null, styleNo: doc.styleNo,
+      role: wp.role === 'keeper' ? 'keeper' : 'split',
+      canonicalProductId: doc.canonicalProductId, active: doc.active,
+      images: imageEntries.length,
+    });
+  }
+  // The keeper reuses the bundle canonical id; without a keeper post the legacy
+  // whole-bundle document must be deactivated or it keeps serving stale content.
+  let legacyCleared = false;
+  if (!keeperSeen) {
+    try {
+      await ragClient.deactivate({
+        canonicalProductId: `1688:${detail.offer_id}`, sourceProductId: String(detail.offer_id),
+      });
+      legacyCleared = true;
+    } catch { /* reported via the job error list */ }
+  }
+  return {
+    trigger, products: results.length,
+    synced: results.filter((entry) => !entry.skipped).length,
+    legacyCleared, results,
+  };
+}
+
+async function executeSplitRagSync(record) {
+  await db.startProductRagSync(record.id);
+  try {
+    const summary = await syncSplitProductsToRag(record.product_detail_id, {
+      trigger: record.trigger_type ?? 'split_sync',
+    });
+    const keeper = (summary.results ?? []).find((entry) => entry.role === 'keeper' && !entry.skipped);
+    await db.completeProductRagSync(record.id, {
+      active: Boolean(keeper?.active ?? (summary.results ?? []).some((entry) => entry.active)),
+      responseSummary: { split: true, ...summary },
+    });
+    return summary;
+  } catch (error) {
+    await db.failProductRagSync(record.id, error).catch(() => {});
+    throw error;
+  }
+}
+
 async function scheduleProductRagSync(productDetailId, { trigger = 'manual' } = {}) {
   if (!ragClient.enabled) return { scheduled: false, reason: 'not_configured' };
   const detail = await db.getProductDetail(productDetailId);
   if (!detail) throw new Error('Saved product detail no longer exists.');
+  // Split bundles are represented in RAG per split product — never as a single
+  // whole-bundle document.
+  if (detail.bundle_status === 'bundle') {
+    const contents = await db.getSplitContents(productDetailId).catch(() => null);
+    if (contents?.result?.products?.length) {
+      const record = await db.createProductRagSync(productDetailId, {
+        trigger, canonicalProductId: `1688:${detail.offer_id}`,
+        requestSummary: {
+          sourceProductId: String(detail.offer_id), trigger, split: true,
+          products: contents.result.products.map((product) => String(product?.id ?? '')),
+        },
+      });
+      ragSyncQueue.enqueue(() => executeSplitRagSync(record));
+      return { scheduled: true, recordId: record.id, split: true };
+    }
+  }
+  // Non-split products keep the whole-product document (existing behaviour).
   const record = await db.createProductRagSync(productDetailId, {
     trigger, canonicalProductId: `1688:${detail.offer_id}`,
     requestSummary: { sourceProductId: String(detail.offer_id), trigger },
@@ -520,6 +631,79 @@ async function scheduleProductRagSync(productDetailId, { trigger = 'manual' } = 
   ragSyncQueue.enqueue(() => executeProductRagSync(record));
   return { scheduled: true, recordId: record.id };
 }
+
+// One-off fleet rebuild: replace the legacy whole-bundle RAG documents with
+// per-split-product documents (keeper + siblings). Admin job API.
+const splitRagRebuildJobs = new Map();
+
+app.post('/api/wordpress/rag/split-rebuild', { preHandler: requireApiKey }, async (request, reply) => {
+  if ([...splitRagRebuildJobs.values()].some((job) => job.status === 'running')) {
+    return reply.code(409).send({ error: 'split_rag_rebuild_already_running' });
+  }
+  const ids = Array.isArray(request.body?.ids)
+    ? request.body.ids.map(Number).filter((value) => Number.isInteger(value) && value > 0).slice(0, 500)
+    : null;
+  const job = {
+    id: crypto.randomUUID(), status: 'running', total: 0, processed: 0, bundles: 0,
+    syncedProducts: 0, skipped: 0, clearedLegacy: 0, failed: 0,
+    createdAt: new Date().toISOString(), startedAt: new Date().toISOString(),
+    completedAt: null, results: [], errors: [],
+  };
+  splitRagRebuildJobs.set(job.id, job);
+  trimTerminalJobs(splitRagRebuildJobs);
+  (async () => {
+    try {
+      const rows = ids
+        ? ids.map((value) => ({ product_detail_id: value }))
+        : await db.listSplitContentsAll();
+      job.total = rows.length;
+      let next = 0;
+      const workers = Array.from({ length: Math.min(3, rows.length) }, async () => {
+        while (true) {
+          const index = next++;
+          if (index >= rows.length) return;
+          const productDetailId = Number(rows[index].product_detail_id);
+          job.processed += 1;
+          try {
+            const summary = await syncSplitProductsToRag(productDetailId, { trigger: 'rag_split_rebuild' });
+            job.bundles += 1;
+            job.syncedProducts += summary.synced;
+            job.skipped += summary.results.filter((entry) => entry.skipped).length;
+            if (summary.legacyCleared) job.clearedLegacy += 1;
+            if (job.results.length < 300) {
+              job.results.push({
+                productDetailId, products: summary.products, synced: summary.synced,
+                legacyCleared: summary.legacyCleared,
+                items: summary.results.map((entry) => ({
+                  productId: entry.productId, styleNo: entry.styleNo, role: entry.role,
+                  canonicalProductId: entry.canonicalProductId, active: entry.active, skipped: entry.skipped,
+                })),
+              });
+            }
+          } catch (error) {
+            job.failed += 1;
+            if (job.errors.length < 200) {
+              job.errors.push({ productDetailId, message: String(error?.message || error).slice(0, 200) });
+            }
+          }
+        }
+      });
+      await Promise.all(workers);
+      job.status = (job.failed || job.errors.length) ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress/rag/split-rebuild-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  const job = splitRagRebuildJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
 
 app.register(fastifyHttpProxy, {
   upstream: 'http://127.0.0.1:6080',
@@ -1915,6 +2099,8 @@ app.post('/api/product-details/:id/split-product-status', { preHandler: requireD
         });
       }
     }
+    // Keep the RAG documents in step with the per-product publish state.
+    await scheduleProductRagSync(id, { trigger: 'split_product_status' }).catch(() => {});
     const updated = (merged?.result?.products ?? record.result.products)
       .find((item) => String(item?.id) === productId) ?? null;
     return {
@@ -3294,9 +3480,8 @@ app.post('/api/wordpress/publish-splits', { preHandler: requireApiKey }, async (
                 lastError: null,
               });
               job.keeperUpdated += 1;
-              if (result.keeper.renumbered) {
-                try { await scheduleProductRagSync(productDetailId, { trigger: 'wordpress_split_renumber' }); } catch { /* keep publishing */ }
-              }
+              // Split publishes always refresh the per-split-product RAG docs.
+              try { await scheduleProductRagSync(productDetailId, { trigger: 'wordpress_split_publish' }); } catch { /* keep publishing */ }
             }
             const wpEntries = [
               ...(result.keeper ? [{
@@ -3471,9 +3656,8 @@ function startFinalizeSplitJob(ids) {
                 result: { ...(publication.result ?? {}), split_publish: true },
                 lastError: null,
               });
-              if (result.keeper.renumbered) {
-                try { await scheduleProductRagSync(productDetailId, { trigger: 'wordpress_split_renumber' }); } catch { /* keep publishing */ }
-              }
+              // Split publishes always refresh the per-split-product RAG docs.
+              try { await scheduleProductRagSync(productDetailId, { trigger: 'wordpress_split_publish' }); } catch { /* keep publishing */ }
             }
             // Publish the draft split products and keep the source date.
             const publicationDate = detail.publication_date
@@ -3912,9 +4096,8 @@ async function runBundlePipelineStep({ detail, status, publish, refreshSplit = f
       result: { ...(publication?.result ?? {}), split_publish: true },
       lastError: null,
     });
-    if (result.keeper.renumbered) {
-      try { await scheduleProductRagSync(detail.id, { trigger: 'wordpress_split_renumber' }); } catch { /* keep going */ }
-    }
+    // Split publishes always refresh the per-split-product RAG docs.
+    try { await scheduleProductRagSync(detail.id, { trigger: 'pipeline_bundle_publish' }); } catch { /* keep going */ }
   }
   const publicationDate = detail.publication_date ? new Date(detail.publication_date).toISOString() : null;
   const publishedCreates = [];

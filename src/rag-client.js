@@ -63,8 +63,7 @@ function publishedMainImage(publication) {
   return { url, id };
 }
 
-export function buildRagProduct({ detail, translation = null, publication = null, active = null }) {
-  if (!detail?.offer_id) throw new Error('A saved product detail with offer_id is required for RAG sync.');
+export function buildRagProduct({ detail, translation = null, publication = null, active = null }) {  if (!detail?.offer_id) throw new Error('A saved product detail with offer_id is required for RAG sync.');
   const payload = publication?.payload ?? {};
   const translatedData = translation?.translated_data ?? {};
   const title = clean(translation?.title || translatedData.title || detail.title);
@@ -104,6 +103,73 @@ export function buildRagProduct({ detail, translation = null, publication = null
       imageAudit: detail.latestImageAudit?.summary ?? null,
       skuAudit: detail.latestSkuAudit?.summary ?? null,
       lastCrawledAt: detail.last_crawled_at,
+    },
+  };
+}
+
+/** RAG document for one SPLIT product (keeper or sibling) of a bundle: the
+ * family is represented per WordPress product, not as one whole-bundle doc. */
+export function buildSplitRagProduct({
+  detail, content, wp, translation = null, publication = null, categoryName = '', images = [], active = null,
+}) {
+  if (!detail?.offer_id) throw new Error('A saved product detail with offer_id is required for RAG sync.');
+  if (!content) throw new Error('A split product content is required for RAG sync.');
+  const keeper = wp?.role === 'keeper';
+  const canonicalProductId = clean(wp?.externalId)
+    || (keeper ? `1688:${detail.offer_id}`
+      : `1688:${detail.offer_id}:${clean(content.id) || clean(wp?.styleNo) || 'split'}`);
+  const title = clean(content.title) || clean(detail.title);
+  const description = clean(content.description) || clean(detail.description);
+  const attributes = Array.isArray(translation?.attributes) && translation.attributes.length
+    ? translation.attributes
+    : (detail.attributes ?? []).map((item) => ({ name: item.name, value: item.value }));
+  const tags = Array.isArray(publication?.payload?.tags) ? publication.payload.tags : [];
+  const wpStatus = clean(wp?.status) || null;
+  const isActive = active == null ? wpStatus === 'publish' : Boolean(active);
+  const imageEntities = uniqueBy(images.map((image, index) => ({
+    sourceImageId: clean(image.id || image.sourceImageId || `image-${index}`),
+    imageUrl: normalizedUrl(image.url || image.imageUrl || image.source_url),
+    imageType: clean(image.imageType || image.image_type) || 'gallery',
+    sortOrder: index,
+    metadata: { collectorImageId: image.id ?? null, splitProductId: content.id ?? null },
+  })).filter((item) => item.imageUrl), (item) => item.imageUrl);
+  const skuText = uniqueBy((content.skus ?? [])
+    .map((sku) => clean(sku.sizeText || sku.size || sku.sku)).filter(Boolean), (value) => value);
+  const stockTotal = (content.skus ?? [])
+    .reduce((sum, sku) => sum + (Number(sku.stock) || 0), 0);
+  const prices = (content.skus ?? [])
+    .map((sku) => Number(sku.price)).filter((value) => Number.isFinite(value) && value > 0);
+  const mainImage = imageEntities[0]?.imageUrl || '';
+  return {
+    canonicalProductId,
+    sourcePlatform: '1688', sourceProductId: String(detail.offer_id),
+    productDetailId: Number(detail.id), wpPostId: Number(wp?.postId) || null,
+    wpImageId: null,
+    styleNo: clean(wp?.styleNo) || null,
+    title, description,
+    category: clean(categoryName) || clean(publication?.payload?.meta?.primary_category) || '',
+    wpUrl: clean(wp?.url),
+    wpImageUrl: mainImage || null,
+    mainImageUrl: mainImage, active: isActive, attributes, tags,
+    skuText,
+    galleryImages: imageEntities,
+    skuImages: [],
+    metadata: {
+      sourceUrl: clean(detail.canonical_url || detail.source_url), sellerName: clean(detail.seller_name),
+      sourceTitle: clean(detail.title), sourceDescription: clean(detail.description),
+      currency: clean(detail.currency),
+      priceMin: prices.length ? Math.min(...prices) : detail.price_min,
+      priceMax: prices.length ? Math.max(...prices) : detail.price_max,
+      moq: detail.moq, stockTotal, attributes, tags,
+      wordpressStatus: wpStatus || null,
+      wpMainImageUrl: mainImage || null,
+      wpMainImageId: null,
+      imageAudit: null, skuAudit: null,
+      lastCrawledAt: detail.last_crawled_at,
+      splitProduct: {
+        id: content.id ?? null, role: keeper ? 'keeper' : 'split',
+        name: clean(content.name) || null, parentOfferId: String(detail.offer_id),
+      },
     },
   };
 }
