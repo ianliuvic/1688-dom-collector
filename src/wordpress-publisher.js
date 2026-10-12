@@ -429,18 +429,30 @@ function buildColorOptions(detail, translation, overrideIndex = null, normalized
   );
 
   const used = new Set();
-  const isDropped = (value, normalized = null) => {
+  // Positional fallback: some translations carry colour dimension values without
+  // matching sku_options entries, so the colour cannot be resolved through the
+  // normalization maps. When the counts line up, each dimension value maps 1:1
+  // to the captured colour options (in order), which lets a drop still match.
+  const sourceColourValues = sourceOptions
+    .filter((option) => /颜色|color|colour/i.test(String(option?.dimensionName ?? '')))
+    .map((option) => clean(option?.text)).filter(Boolean);
+  const positionalSource = (index) => (
+    sourceColourValues.length === colors.length ? sourceColourValues[index] : null
+  );
+  const isDropped = (value, normalized = null, index = -1) => {
     if (!droppedColours || !droppedColours.size) return false;
     if (droppedColours.has(clean(value))) return true;
     // The stored dimension/source label can differ from the true captured colour
     // text (translators rename dimensions, e.g. "Custom"), so the normalization
     // entry's own source is checked as well.
-    return Boolean(normalized && droppedColours.has(clean(normalized.source)));
+    if (normalized && droppedColours.has(clean(normalized.source))) return true;
+    const positional = index >= 0 ? positionalSource(index) : null;
+    return Boolean(positional && droppedColours.has(positional));
   };
   const list = colors.map((sourceLabel, index) => {
     const normalized = resolveNormalized(sourceLabel);
     if (normalized) used.add(normalized);
-    if (isDropped(sourceLabel, normalized)) return null;
+    if (isDropped(sourceLabel, normalized, index)) return null;
     // The swatch image is keyed by the captured text, so resolve it before the
     // display label is replaced by an override.
     const imageUrl = optionImages.get(sourceLabel) || optionImagesBySource.get(sourceLabel) || '';
