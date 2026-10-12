@@ -19,7 +19,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   reserveWordPressStyleNumber, applyWordPressProductCategories, fetchWordPressProductCategoryIds,
   resolvePublishImagesDetailed,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
-  resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows } from './wordpress-publisher.js';
+  resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows, wordpressClient } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -5981,11 +5981,10 @@ app.get('/api/wordpress/publications/stock-audit', { preHandler: requireDashboar
 // Split siblings carry their own sample_available flag on their own WP posts and
 // do not have publication rows, so the audit above never sees them. This audit
 // recomputes the expected flag for every published split product from its stored
-// SKUs (stock - 5 > 0 = available) and reports the bundles whose pages can still
-// disagree with the safety-margin rule and need a split re-sync:
-//   flipsToUnavailable: some stock > 0 but all stock <= 5 (page may still say
-//   available from the pre-margin rule); flipsToAvailable: a stock - 5 > 0 SKU
-//   while the page was last synced when nothing was above the margin.
+// SKUs (stock - 5 > 0 = available), then verifies the live page flag over
+// WordPress and reports the pages that genuinely disagree (verify=0 skips the
+// WordPress reads). Rule-sensitive items (some stock in 1..5) are always listed
+// so a re-sync can be planned; `wrong` is the actionable set.
 app.get('/api/wordpress/split-stock-audit', { preHandler: requireDashboardOrApiKey }, async (request) => {
   const rows = await db.listSplitContentsAll();
   const items = [];
@@ -6009,15 +6008,43 @@ app.get('/api/wordpress/split-stock-audit', { preHandler: requireDashboardOrApiK
         productDetailId: row.product_detail_id, styleNo: row.style_no ?? null,
         productId: product.id ?? null, productName: product.name ?? null,
         wpStyleNo: wp.styleNo ?? null, wpPostId: wp.postId, wpUrl: wp.url ?? null,
+        externalId: wp.externalId ?? null,
         stocks, expected, flipsToUnavailable, flipsToAvailable,
       });
       bundles.add(Number(row.product_detail_id));
     }
   }
+  // Verify against the live page flags so the report only keeps genuinely wrong
+  // pages (bounded; pass verify=0 to skip the WordPress reads).
+  const verify = String(request.query?.verify ?? '') !== '0';
+  if (verify && items.length) {
+    const wp = wordpressClient(config);
+    const max = Math.min(items.length, Math.min(Math.max(Number(request.query?.verifyLimit) || 80, 1), 200));
+    for (let index = 0; index < max; index += 1) {
+      const item = items[index];
+      if (!item.externalId) continue;
+      try {
+        const mapping = await wp(`/wp-json/hx/v1/products/by-external-id/${encodeURIComponent(item.externalId)}`,
+          { timeoutMs: 20000 });
+        const raw = mapping?.meta?.sample_available;
+        const pageFlag = !(raw === '' || raw === null || raw === undefined || raw === false
+          || raw === '0' || raw === 0 || String(raw).toLowerCase() === 'false');
+        item.pageFlag = pageFlag;
+        item.consistent = pageFlag === item.expected;
+      } catch {
+        item.pageFlag = null;
+        item.consistent = null;
+      }
+    }
+  }
+  const wrong = items.filter((item) => item.consistent === false);
   return {
     bundlesScanned: rows.length,
     publishedSplitProducts: publishedProducts,
     mismatches: items.length,
+    wrongCount: wrong.length,
+    wrong: wrong.slice(0, 100),
+    verified: items.filter((item) => item.pageFlag !== null).length,
     affectedCount: bundles.size,
     affectedBundles: [...bundles],
     items: items.slice(0, Math.min(Math.max(Number(request.query?.limit) || 500, 1), 2000)),

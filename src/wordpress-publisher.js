@@ -915,7 +915,7 @@ async function uploadVerifiedWordPressImage({ wp, draft, detail, image, index, b
   throw new Error(`WordPress image availability verification failed (${lastVerification?.status || 'network'}).`);
 }
 
-function wordpressClient(config) {
+export function wordpressClient(config) {
   const baseUrl = clean(config.wordpressBaseUrl).replace(/\/+$/, '');
   const username = clean(config.wordpressUsername);
   const password = clean(config.wordpressApplicationPassword);
