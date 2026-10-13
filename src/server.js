@@ -7626,6 +7626,65 @@ app.get('/api/product-images/:folder/:fileName', async (request, reply) => {
   return reply.type(contentType).send(bytes);
 });
 
+// On-the-fly thumbnail proxy for externally hosted images (WordPress uploads,
+// 1688 CDN, ...). The selection page grids request small webp thumbs here and
+// keep the original URL for the lightbox and Portal staging, so expanding a
+// dropdown no longer downloads full-size images. Results are cached on disk;
+// hosts outside the allowlist fall back to the original image.
+const THUMB_PROXY_HOSTS = new Set([
+  'wearhongxiu.com', 'www.wearhongxiu.com',
+  'cbu01.alicdn.com', 'img.alicdn.com', 'sc01.alicdn.com', 'sc02.alicdn.com',
+  'gw.alicdn.com', 'img.1688.com', 'pic.1688.com',
+]);
+app.get('/api/image-thumb', async (request, reply) => {
+  const rawUrl = String(request.query?.url ?? '');
+  let target;
+  try {
+    target = new URL(rawUrl);
+  } catch {
+    return reply.code(400).send({ error: 'invalid_url' });
+  }
+  if (target.protocol !== 'https:' && target.protocol !== 'http:') {
+    return reply.code(400).send({ error: 'invalid_url' });
+  }
+  const requestedWidth = Number(request.query?.w);
+  const width = Math.min(Math.max(Math.round(Number.isFinite(requestedWidth) && requestedWidth > 0
+    ? requestedWidth : 160), 16), 480);
+  if (!THUMB_PROXY_HOSTS.has(target.hostname.toLowerCase())) {
+    // Unknown host: let the browser load the original instead of proxying it.
+    return reply.redirect(target.href);
+  }
+  const cacheDir = path.resolve(config.storagePath, 'image-thumbs');
+  const cacheKey = crypto.createHash('sha256').update(`${width}|${target.href}`).digest('hex');
+  const cachePath = path.join(cacheDir, `${cacheKey}.webp`);
+  let bytes;
+  try {
+    bytes = await fs.readFile(cachePath);
+  } catch {
+    try {
+      const response = await fetch(target.href, {
+        headers: {
+          referer: target.hostname.endsWith('alicdn.com') ? 'https://detail.1688.com/' : `${target.origin}/`,
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        },
+        signal: AbortSignal.timeout(45_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const source = Buffer.from(await response.arrayBuffer());
+      bytes = await sharp(source, { failOn: 'none' })
+        .resize({ width, withoutEnlargement: true })
+        .webp({ quality: 72 })
+        .toBuffer();
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.writeFile(cachePath, bytes);
+    } catch (error) {
+      return reply.code(502).send({ error: 'thumb_failed', message: String(error?.message || error).slice(0, 160) });
+    }
+  }
+  reply.header('cache-control', 'public, max-age=31536000, immutable');
+  return reply.type('image/webp').send(bytes);
+});
+
 app.get('/api/product-details/:id/sku-audits', { preHandler: requireApiKey }, async (request, reply) => {  const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   return db.listProductAudits('sku', detail.id, request.query?.limit);
