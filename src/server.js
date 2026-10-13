@@ -893,6 +893,34 @@ async function updatePortalCatalogMedia(portal, portalProductId, product, images
 }
 
 /**
+ * Re-assert the collector's style number on one portal catalog product.
+ * The portal protects manually edited content from WordPress re-imports, so a
+ * product whose source style changed keeps the stale style number there and
+ * drops out of style-number searches. The selection page is the single staging
+ * entry, so a staging publish corrects the identity explicitly.
+ */
+async function updatePortalCatalogIdentity(portal, portalProductId, fields = {}) {
+  const styleNumber = typeof fields.styleNumber === 'string' ? fields.styleNumber.trim() : '';
+  if (!portalProductId || !styleNumber) return null;
+  const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(portalProductId)}`, portal.url), {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${portal.secret}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ styleNumber }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = payload?.error?.message ?? (typeof payload?.error === 'string' ? payload.error : null)
+      ?? `Portal identity update returned HTTP ${response.status}`;
+    const error = new Error(String(message));
+    error.status = 502;
+    error.code = 'portal_identity_update_failed';
+    throw error;
+  }
+  return payload?.product ?? null;
+}
+
+/**
  * Assign per-variant images to a portal catalog product. `variantImages` is the
  * portal's admin PATCH format: [{ id, imageUrl }] and lands on the variant's
  * default image (the value that pre-fills the customer's variant image picker).
@@ -1085,6 +1113,25 @@ async function publishProductToPortal(productDetailId, options = {}) {
   const detailMediaUrls = [...new Set(mergedImages.filter((entry) => entry.kind === 'detail' && entry.visible).map((entry) => entry.url))];
   try {
     const product = await importWordPressProductToPortal(identifier, portal, { mediaUrls: detailMediaUrls });
+    // The portal keeps manually edited content across re-imports, so a product
+    // whose source style changed would keep the stale style number and stay
+    // invisible to style-number searches. The selection page is the single
+    // staging entry, so every staging publish re-asserts the collector style.
+    // Production is intentionally left untouched (it is synced from staging by
+    // hand).
+    let identity = null;
+    const expectedStyle = publication.style_no ? String(publication.style_no).trim() : '';
+    const currentStyle = String(product?.styleNumber ?? '').trim();
+    if (target === 'staging' && product?.id && expectedStyle
+      && currentStyle.toUpperCase() !== expectedStyle.toUpperCase()) {
+      try {
+        const patched = await updatePortalCatalogIdentity(portal, product.id, { styleNumber: expectedStyle });
+        product.styleNumber = patched?.styleNumber ?? expectedStyle;
+        identity = { fixed: true, from: currentStyle || null, to: expectedStyle };
+      } catch (error) {
+        identity = { fixed: false, from: currentStyle || null, to: expectedStyle, error: String(error?.message || error) };
+      }
+    }
     let media = null;
     if (mergedImages.length && product?.id) {
       media = await updatePortalCatalogMedia(portal, product.id, product, mergedImages);
@@ -1113,10 +1160,11 @@ async function publishProductToPortal(productDetailId, options = {}) {
           unmatchedColors: variantMatch.unmatchedColors,
         } : null,
         target,
-      } : { target },
+        identity: identity ?? null,
+      } : { target, identity: identity ?? null },
       lastError: null,
     });
-    return { product, publication: saved, media, target, images: mergedImages, variantImages: resolvedVariantImages, variantMatch };
+    return { product, publication: saved, media, target, images: mergedImages, variantImages: resolvedVariantImages, variantMatch, identity };
   } catch (error) {
     const message = String(error?.message || error);
     await db.failPortalPublication(productDetailId, message, {
@@ -6425,6 +6473,7 @@ app.post('/api/selection/products/:id/portal-publish', { preHandler: requireDash
         images: result.images ?? null,
         variantImages: result.variantImages ?? null,
         variantMatch: result.variantMatch ?? null,
+        identity: result.identity ?? null,
       },
       publication: result.publication,
     };

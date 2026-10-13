@@ -251,17 +251,11 @@ function productCard(item) {
   const link1688 = item.product_url || item.detail_source_url || item.canonical_url || '';
   const style = item.style_no ? `<span>款号 <b>${esc(item.style_no)}</b></span>` : '';
   const inPortal = Boolean(item.portal_product_id);
-  const canPublish = Boolean(item.wp_post_id);
   let actions = '';
-  if (item.product_detail_id) {
-    if (canPublish) {
-      actions = `<button class="mini-btn ${inPortal ? 'ok' : ''}" data-portal="${esc(item.product_detail_id)}">${inPortal ? '重新同步到 Portal' : '发布到 Portal'}</button>`;
-    } else {
-      actions = '<button class="mini-btn" disabled title="需先发布到 wearhongxiu 才能发布到 Portal">发布到 Portal</button>';
-    }
-    if (inPortal) {
-      actions += `<a class="portal-link" href="https://portal.wearhongxiu.com/admin/catalog" target="_blank" rel="noreferrer">已在 Portal ✓${item.portal_status ? `（${esc(item.portal_status)}）` : ''}</a>`;
-    }
+  if (item.product_detail_id && inPortal) {
+    // Portal staging content is managed from the selection page only; the shop
+    // list shows the sync state without offering a second publish entry.
+    actions = `<span class="portal-link">已在 Portal staging ✓${item.portal_status ? `（${esc(item.portal_status)}）` : ''}</span>`;
     if (item.portal_synced_at) actions += `<span class="off">同步于 ${date(item.portal_synced_at)}</span>`;
     actions = `<div class="pactions">${actions}</div>`;
   }
@@ -365,31 +359,6 @@ for (const id of ['sort', 'availability', 'eligible', 'gallery', 'stylePrefix'])
 $('shopSort').addEventListener('change', () => {
   state.shopSort = $('shopSort').value;
   renderShops();
-});
-
-$('productgrid').addEventListener('click', async (event) => {
-  const btn = event.target.closest('button[data-portal]');
-  if (!btn) return;
-  const label = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '发布中…';
-  showError('');
-  try {
-    const res = await fetch('/api/portal/publish', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ productDetailId: Number(btn.dataset.portal) }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
-    btn.textContent = '已同步 ✓';
-    await loadProducts();
-  } catch (e) {
-    btn.disabled = false;
-    btn.textContent = label;
-    showError(`发布到 Portal 失败：${e.message}`);
-  }
 });
 
 let searchTimer = null;
