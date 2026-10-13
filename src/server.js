@@ -5830,6 +5830,26 @@ app.post('/api/product-details/:id/purge', { preHandler: requireDashboardOrApiKe
 });
 
 // Checkbox-driven bulk purge: same per-product flow, bounded concurrency.
+// Create a shared style-request page on wearhongxiu from picked style numbers.
+app.post('/api/wordpress/style-request-page', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const styles = [...new Set((Array.isArray(request.body?.styles) ? request.body.styles : [])
+    .map((value) => String(value || '').trim().toUpperCase())
+    .filter((value) => /^[A-Z0-9-]{2,24}$/.test(value)))];
+  if (!styles.length) return reply.code(400).send({ error: 'styles_required' });
+  if (styles.length > 40) return reply.code(400).send({ error: 'too_many_styles', max: 40 });
+  try {
+    const wp = wordpressClient(config);
+    return await wp('/wp-json/hx/v1/products/style-request-page', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ styles }),
+      timeoutMs: 90000,
+    });
+  } catch (error) {
+    request.log.error({ err: error }, 'style request page creation failed');
+    return reply.code(502).send({ error: 'wordpress_request_failed', message: String(error?.message || error) });
+  }
+});
 app.post('/api/product-details/purge-batch', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const ids = [...new Set((Array.isArray(request.body?.ids) ? request.body.ids : [])
     .map(Number).filter((value) => Number.isInteger(value) && value > 0))];
