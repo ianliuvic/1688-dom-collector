@@ -238,7 +238,7 @@ a.pp-chip:hover{border-color:#98a2b3}
   <label class="muted" style="display:inline-flex;align-items:center;gap:5px"><input type="checkbox" id="pickAll"> 全选本页</label>
   <span class="muted" id="pickCount"></span>
   <button type="button" id="batchPurgeBtn" disabled style="border-color:#fecdca;color:#b42318">批量删除…</button>
-  <button type="button" id="styleReqBtn" disabled title="把选中的已发布款式生成一个 Style Request 页面" style="border-color:#f0c9cc;color:#a02025">建 Style Request 页面</button>
+<button type="button" id="styleReqBtn" disabled title="用选中的已发布款式生成共享 Style Request 页面的链接（不会新建页面）" style="border-color:#f0c9cc;color:#a02025">生成 Style Request 链接</button>
   <span class="muted" id="wpSyncNote">WP 状态来自采集器记录 + WordPress 实时回传（外部改动自动同步）</span>
 </div>
 <div id="modalRoot"></div>
@@ -2889,59 +2889,43 @@ async function confirmPurge(id){
     if (btn) { btn.disabled = false; btn.textContent = '确认清退'; }
   }
 }
-// 把选中的已发布款式生成一个共享的 Style Request 页面（页面由 WP 的 hx_style_request 组件渲染）。
+// 把选中的已发布款式拼成一个共享 Style Request 页面的链接（不新建页面）。
 async function openStyleRequest(){
   const picked = DATA.filter((x) => PICKS.has(String(x.id)));
   if (!picked.length) return;
   const eligible = picked.filter((x) => x.styleNo && x.wpStatus === 'publish');
   const skipped = picked.filter((x) => !(x.styleNo && x.wpStatus === 'publish'));
   if (!eligible.length) {
-    showModal('<div class="modal-card"><h3>建 Style Request 页面</h3><div class="row-line warn">所选产品里没有「已发布到 WordPress 且有款号」的款式。请先同步 WP 状态或发布后再试。</div><div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
+    showModal('<div class="modal-card"><h3>生成 Style Request 链接</h3><div class="row-line warn">所选产品里没有「已发布到 WordPress 且有款号」的款式。请先同步 WP 状态或发布后再试。</div><div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
     wireModalClose();
     return;
   }
   const styles = eligible.map((x) => x.styleNo);
+  const url = 'https://wearhongxiu.com/style-request/?styles=' + styles.join('%2C');
   const listHtml = eligible.map((x) => '<div class="row-line">' + esc(x.styleNo) + ' · ' + esc(x.title || '') + '</div>').join('');
   const skipHtml = skipped.length
     ? '<div class="row-line warn">将跳过 ' + skipped.length + ' 个未发布 / 无款号的产品：' + skipped.map((x) => esc(x.styleNo || ('#' + x.id))).join('、') + '</div>'
     : '';
-  showModal('<div class="modal-card"><h3>建 Style Request 页面（' + eligible.length + ' 款）</h3>'
-    + '<div class="row-line muted">会生成一个新页面，客户可挑选颜色尺码并提交询价。</div>'
+  showModal('<div class="modal-card"><h3>Style Request 链接（' + eligible.length + ' 款）</h3>'
+    + '<div class="row-line muted">打开共享的 Style Request 页面并带上这些款式；不会新建页面，链接可随意分享。</div>'
     + listHtml + skipHtml
-    + '<div class="modal-actions"><button class="ghost" data-modal-close>取消</button><button class="primary" id="styleReqConfirm">创建页面</button></div></div>');
+    + '<div class="row-line"><a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(url) + '</a></div>'
+    + '<div class="modal-actions"><button class="ghost" data-modal-close>关闭</button>'
+    + '<button class="primary" id="styleReqCopy">复制链接</button>'
+    + '<a class="primary" style="text-decoration:none" href="' + esc(url) + '" target="_blank" rel="noopener">打开页面</a></div></div>');
   wireModalClose();
-  const btn = document.getElementById('styleReqConfirm');
-  if (!btn) return;
-  btn.addEventListener('click', async () => {
-    btn.disabled = true;
-    btn.textContent = '创建中…';
+  const copyBtn = document.getElementById('styleReqCopy');
+  if (copyBtn) copyBtn.addEventListener('click', async () => {
     try {
-      const res = await fetch('/api/wordpress/style-request-page', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({ styles }),
-      });
-      const body = await res.json().catch(() => null);
-      if (!res.ok || !body || body.ok !== true) {
-        throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
-      }
-      const skippedHtml = (Array.isArray(body.skipped) && body.skipped.length)
-        ? '<div class="row-line warn">已跳过：' + esc(body.skipped.join('、')) + '</div>'
-        : '';
-      showModal('<div class="modal-card"><h3>页面已创建（' + (body.styles || []).length + ' 款）</h3>'
-        + '<div class="row-line"><a href="' + esc(body.url) + '" target="_blank" rel="noopener">' + esc(body.url) + '</a></div>'
-        + '<div class="row-line muted">' + esc(body.title || '') + '</div>'
-        + skippedHtml
-        + '<div class="modal-actions"><button class="ghost" data-modal-close>关闭</button>'
-        + '<a class="primary" style="text-decoration:none" href="' + esc(body.url) + '" target="_blank" rel="noopener">打开页面</a></div></div>');
-      wireModalClose();
-      try { window.open(body.url, '_blank', 'noopener'); } catch (error) { /* popup blocked */ }
+      await navigator.clipboard.writeText(url);
+      copyBtn.textContent = '已复制 ✓';
     } catch (error) {
-      showModal('<div class="modal-card"><h3>创建失败</h3><div class="row-line warn">' + esc(String((error && error.message) || error)) + '</div><div class="modal-actions"><button class="ghost" data-modal-close>关闭</button></div></div>');
-      wireModalClose();
+      window.prompt('复制此链接：', url);
     }
   });
 }
+
+
 async function openBatchPurge(){
   const ids = [...PICKS].map(Number).filter((v) => Number.isInteger(v) && v > 0);
   if (!ids.length) return;
