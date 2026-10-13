@@ -1516,6 +1516,17 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
 
   const buildSkuRows = (content, styleNo) => {
     const used = new Map();
+    // Store-side option labels follow the split content's normalized colour
+    // text (the same source the colour swatches use); the captured source text
+    // stays in source_options.
+    const colourTextBySource = new Map();
+    for (const colour of content.colours ?? []) {
+      const source = clean(colour?.source) || '';
+      const text = clean(colour?.text) || '';
+      if (source && text && !colourTextBySource.has(source.toLowerCase())) {
+        colourTextBySource.set(source.toLowerCase(), text);
+      }
+    }
     return (content.skus ?? []).map((sku, index) => {
       const segments = [sku.code, sku.sizeText ?? sku.size]
         .filter((value) => value !== null && value !== undefined && String(value).trim())
@@ -1528,13 +1539,15 @@ export async function publishSplitProductsToWordPress({ detail, contents, public
         used.set(supplierSku, count);
         if (count > 1) supplierSku = `${supplierSku}-${count}`;
       }
+      const colourSource = clean(sku.colour) || '';
+      const colourLabel = colourTextBySource.get(colourSource.toLowerCase()) ?? colourSource;
       return {
         index,
         source_sku_key: `${sku.colour ?? ''}|${sku.size ?? ''}`,
         label: sku.sizeText ?? sku.size ?? '',
-        options: { Color: sku.colour ?? '', Size: sku.sizeText ?? sku.size ?? '' },
+        options: { Color: colourLabel, Size: sku.sizeText ?? sku.size ?? '' },
         source_options: { Color: sku.colour ?? '', Size: sku.size ?? '' },
-        color: sku.colour ?? '',
+        color: colourLabel,
         size: sku.sizeText ?? sku.size ?? '',
         source_price: sku.price ?? null,
         source_currency: clean(template.source?.currency) || 'CNY',
