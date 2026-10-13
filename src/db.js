@@ -3431,7 +3431,8 @@ export function createDatabase(databaseUrl) {
   async function getSelectionProductSkus(productDetailId) {
     const id = Number(productDetailId);
     if (!Number.isInteger(id) || id <= 0) return null;
-    const publication = await pool.query(`SELECT publications.style_no, details.offer_id, details.last_crawled_at::text AS captured_at
+    const publication = await pool.query(`SELECT publications.style_no, publications.payload->'sku_matrix'->'rows' AS payload_sku_rows,
+        details.offer_id, details.last_crawled_at::text AS captured_at
       FROM product_wordpress_publications publications
       JOIN product_details details ON details.id = publications.product_detail_id
       WHERE publications.product_detail_id = $1`, [id]);
@@ -3457,6 +3458,38 @@ export function createDatabase(databaseUrl) {
       price: sku.price === null || sku.price === undefined ? null : Number(sku.price),
       image: sku.image_storage_path ? selectionImageUrl(row.offer_id, sku.image_storage_path) : (sku.image_source_url ?? null),
     }));
+    // Split-published products carry their composed supplier SKUs only in the
+    // stored WordPress payload (built from the split-content codes); their SKU
+    // rows are never recomposed, so the variant-image picker and the portal
+    // matcher would see "no variant SKUs". Recover the published SKUs by
+    // matching the payload rows on the source SKU key, then on the captured
+    // colour/size options.
+    const payloadRows = Array.isArray(row.payload_sku_rows) ? row.payload_sku_rows : [];
+    if (payloadRows.length && skus.some((sku) => !sku.variantSku)) {
+      const optionKey = (color, size) => `${String(color ?? '').trim().toLowerCase()}|${String(size ?? '').trim().toLowerCase()}`;
+      const bySourceKey = new Map();
+      const byOptions = new Map();
+      for (const payloadRow of payloadRows) {
+        const supplierSku = String(payloadRow?.supplier_sku ?? '').trim();
+        if (!supplierSku) continue;
+        const sourceKey = String(payloadRow?.source_sku_key ?? '').trim();
+        if (sourceKey && !bySourceKey.has(sourceKey)) bySourceKey.set(sourceKey, supplierSku);
+        const options = payloadRow?.source_options ?? payloadRow?.options ?? null;
+        const color = pick(options, /(颜色|色|color|colour)/i);
+        const size = pick(options, /(尺码|尺寸|码数|size)/i);
+        if (color || size) {
+          const key = optionKey(color, size);
+          if (!byOptions.has(key)) byOptions.set(key, supplierSku);
+        }
+      }
+      for (const sku of skus) {
+        if (sku.variantSku) continue;
+        const sourceKey = String(sku.skuKey ?? '').trim();
+        const recovered = (sourceKey ? bySourceKey.get(sourceKey) : undefined)
+          ?? byOptions.get(optionKey(sku.color, sku.size));
+        if (recovered) sku.variantSku = recovered;
+      }
+    }
     return { productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, capturedAt: row.captured_at, skus };
   }
 
