@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>选品 · 已发布到 wearhongxiu</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--line:#e4e7ec;--text:#111827;--muted:#6b7280;--info:#175cd3;--good:#067647;--warn:#b54708;--danger:#b42318}
@@ -172,7 +173,7 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 
 <main id="rows"><div class="loading">加载中…</div></main>
 
-<div id="lightbox"><button class="close" aria-label="关闭">×</button><img id="lightboxImg" alt=""></div>
+<div id="lightbox"><button class="close" aria-label="关闭">×</button><img id="lightboxImg" alt="" referrerpolicy="no-referrer"></div>
 
 <script>
 const state = { page: 1, pageSize: 100, total: 0, dir: 'desc', loading: false };
