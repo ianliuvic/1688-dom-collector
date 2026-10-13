@@ -2980,6 +2980,18 @@ export function createDatabase(databaseUrl) {
     return result.rows.map((row) => String(row.offer_id));
   }
 
+  /** Canonical external ids of every published split product (keeper + siblings)
+   * still tracked in split contents — kept in the products RAG during
+   * reconciles so live split pages never lose their index entries. */
+  async function listSplitExternalIds() {
+    const result = await pool.query(`
+      SELECT DISTINCT entry->'wp'->>'externalId' AS external_id
+      FROM product_split_contents contents,
+        jsonb_array_elements(coalesce(contents.result->'products', '[]'::jsonb)) AS entry
+      WHERE coalesce(entry->'wp'->>'externalId', '') <> ''`);
+    return result.rows.map((row) => String(row.external_id));
+  }
+
   /** Saved split-product contents (title/description/variants/SKUs per split product). */
   async function getSplitContents(productDetailId) {
     const result = await pool.query(
@@ -3531,7 +3543,7 @@ export function createDatabase(databaseUrl) {
     getProductSplitPlan, saveProductSplitPlan,
     getPipelineRun, upsertPipelineRun, listPipelineRuns,
     getVariantNormalization, saveVariantNormalization, addProductImage, updateSkuVariantSkus,
-    getSplitContents, saveSplitContents, listSplitContentsAll, listProductOfferIds, updateProductRawData,
+    getSplitContents, saveSplitContents, listSplitContentsAll, listProductOfferIds, listSplitExternalIds, updateProductRawData,
     listRefreshablePublications, listSplitPublishableBundles, mergeSplitContentWpResults,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,

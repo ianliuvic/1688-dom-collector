@@ -7195,11 +7195,19 @@ app.post('/api/products-rag/reconcile', { preHandler: requireDashboardOrApiKey }
   try {
     const offers = await db.listProductOfferIds();
     if (!offers.length) return reply.code(409).send({ error: 'no_products' });
-    const validCanonicalProductIds = offers.map((offerId) => `1688:${offerId}`);
+    const splitExternalIds = await db.listSplitExternalIds().catch(() => []);
+    const validCanonicalProductIds = [...new Set([
+      ...offers.map((offerId) => `1688:${offerId}`),
+      ...splitExternalIds,
+    ])];
     const result = await ragClient.reconcile({
       validCanonicalProductIds, mode, graceMinutes, dryRun, force,
     });
-    return { ok: true, inventory: validCanonicalProductIds.length, mode, dryRun, graceMinutes, result };
+    return {
+      ok: true, inventory: validCanonicalProductIds.length,
+      products: offers.length, splitProducts: splitExternalIds.length,
+      mode, dryRun, graceMinutes, result,
+    };
   } catch (error) {
     return reply.code(502).send({ error: 'rag_reconcile_failed', message: String(error?.message || error).slice(0, 300) });
   }
@@ -7213,10 +7221,14 @@ async function runProductsRagReconcile() {
   if (!ragClient.enabled) return { skipped: 'not_configured' };
   const offers = await db.listProductOfferIds();
   if (!offers.length) return { skipped: 'no_products' };
+  const splitExternalIds = await db.listSplitExternalIds().catch(() => []);
   const mode = String(process.env.PRODUCTS_RAG_RECONCILE_MODE || 'purge').toLowerCase() === 'deactivate'
     ? 'deactivate' : 'purge';
   const graceMinutes = Math.min(Math.max(Number(process.env.PRODUCTS_RAG_RECONCILE_GRACE_MINUTES) || 60, 0), 10080);
-  const validCanonicalProductIds = offers.map((offerId) => `1688:${offerId}`);
+  const validCanonicalProductIds = [...new Set([
+    ...offers.map((offerId) => `1688:${offerId}`),
+    ...splitExternalIds,
+  ])];
   const result = await ragClient.reconcile({ validCanonicalProductIds, mode, graceMinutes });
   app.log.info({ mode, inventory: validCanonicalProductIds.length, result }, 'products RAG reconcile completed');
   return result;
