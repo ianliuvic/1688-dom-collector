@@ -232,5 +232,14 @@ export function createRagClient(config) {
           imageUrls, topK, minScore }),
       });
     },
+    async reconcile({ validCanonicalProductIds, mode = 'deactivate', graceMinutes = 60,
+      dryRun = false, force = false } = {}) {
+      if (!enabled) throw new Error('Products RAG integration is not configured.');
+      return requestWithRetry(`${baseUrl}/api/products_rag/admin/reconcile`, {
+        method: 'POST', headers: headers(),
+        body: JSON.stringify({ sourcePlatform: '1688', validCanonicalProductIds, mode,
+          graceMinutes, dryRun, force }),
+      });
+    },
   };
 }

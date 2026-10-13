@@ -7181,6 +7181,47 @@ app.post('/api/product-details/:id/rag-sync', { preHandler: requireApiKey }, asy
   return reply.code(scheduled.scheduled ? 202 : 503).send(scheduled);
 });
 
+// Reconcile the products RAG index with the collector inventory: every product
+// that still exists here is sent as the keep list, and the service deactivates
+// (mode=deactivate) or physically removes (mode=purge) the entries of any other
+// product of the same platform that was not touched within the grace window.
+// This is what clears data whose source product no longer exists.
+app.post('/api/products-rag/reconcile', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  if (!ragClient.enabled) return reply.code(503).send({ error: 'products_rag_not_configured' });
+  const mode = request.body?.mode === 'purge' ? 'purge' : 'deactivate';
+  const dryRun = request.body?.dryRun === true;
+  const force = request.body?.force === true;
+  const graceMinutes = Math.min(Math.max(Number(request.body?.graceMinutes ?? 60) || 60, 0), 10080);
+  try {
+    const offers = await db.listProductOfferIds();
+    if (!offers.length) return reply.code(409).send({ error: 'no_products' });
+    const validCanonicalProductIds = offers.map((offerId) => `1688:${offerId}`);
+    const result = await ragClient.reconcile({
+      validCanonicalProductIds, mode, graceMinutes, dryRun, force,
+    });
+    return { ok: true, inventory: validCanonicalProductIds.length, mode, dryRun, graceMinutes, result };
+  } catch (error) {
+    return reply.code(502).send({ error: 'rag_reconcile_failed', message: String(error?.message || error).slice(0, 300) });
+  }
+});
+
+// Periodic products-RAG inventory reconcile (daily by default): physically
+// removes index data whose source product was deleted. Configure with
+// PRODUCTS_RAG_RECONCILE_HOURS (0 disables), PRODUCTS_RAG_RECONCILE_MODE
+// (purge|deactivate, default purge) and PRODUCTS_RAG_RECONCILE_GRACE_MINUTES.
+async function runProductsRagReconcile() {
+  if (!ragClient.enabled) return { skipped: 'not_configured' };
+  const offers = await db.listProductOfferIds();
+  if (!offers.length) return { skipped: 'no_products' };
+  const mode = String(process.env.PRODUCTS_RAG_RECONCILE_MODE || 'purge').toLowerCase() === 'deactivate'
+    ? 'deactivate' : 'purge';
+  const graceMinutes = Math.min(Math.max(Number(process.env.PRODUCTS_RAG_RECONCILE_GRACE_MINUTES) || 60, 0), 10080);
+  const validCanonicalProductIds = offers.map((offerId) => `1688:${offerId}`);
+  const result = await ragClient.reconcile({ validCanonicalProductIds, mode, graceMinutes });
+  app.log.info({ mode, inventory: validCanonicalProductIds.length, result }, 'products RAG reconcile completed');
+  return result;
+}
+
 app.post('/api/wordpress/publication-dates/backfill', { preHandler: requireApiKey }, async (_request, reply) => {
   const id = crypto.randomUUID();
   const job = { id, status: 'queued', total: 0, updated: 0, failed: 0,
@@ -8417,6 +8458,22 @@ setTimeout(() => {
 }, 15_000).unref?.();
 if (!config.wpStatusEventToken) {
   app.log.warn('WP_STATUS_EVENT_TOKEN is not configured; WordPress status push events will be rejected (reconcile still runs).');
+}
+
+// Periodic products-RAG inventory reconcile (see runProductsRagReconcile):
+// clears index data whose source product was deleted. Defaults to a daily
+// purge; set PRODUCTS_RAG_RECONCILE_HOURS=0 to disable it.
+const productsRagReconcileHours = Math.min(Math.max(Number(process.env.PRODUCTS_RAG_RECONCILE_HOURS ?? 24), 0), 168);
+if (ragClient.enabled && productsRagReconcileHours > 0) {
+  const productsRagReconcileTimer = setInterval(() => {
+    runProductsRagReconcile().catch((error) =>
+      app.log.error({ err: error }, 'products RAG reconcile failed'));
+  }, productsRagReconcileHours * 3600_000);
+  productsRagReconcileTimer.unref?.();
+  setTimeout(() => {
+    runProductsRagReconcile().catch((error) =>
+      app.log.error({ err: error }, 'initial products RAG reconcile failed'));
+  }, 600_000).unref?.();
 }
 const workers = [workerLoop('general', 0),
   ...Array.from({ length: config.detailCaptureConcurrency }, (_, index) =>

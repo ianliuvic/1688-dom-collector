@@ -2973,6 +2973,13 @@ export function createDatabase(databaseUrl) {
     return saveSplitContents(productDetailId, { ...record.result, products }, record.model);
   }
 
+  /** Offer ids of every captured product (products-RAG inventory reconcile). */
+  async function listProductOfferIds() {
+    const result = await pool.query(
+      `SELECT offer_id FROM product_details WHERE offer_id IS NOT NULL AND offer_id <> ''`);
+    return result.rows.map((row) => String(row.offer_id));
+  }
+
   /** Saved split-product contents (title/description/variants/SKUs per split product). */
   async function getSplitContents(productDetailId) {
     const result = await pool.query(
@@ -3524,7 +3531,7 @@ export function createDatabase(databaseUrl) {
     getProductSplitPlan, saveProductSplitPlan,
     getPipelineRun, upsertPipelineRun, listPipelineRuns,
     getVariantNormalization, saveVariantNormalization, addProductImage, updateSkuVariantSkus,
-    getSplitContents, saveSplitContents, listSplitContentsAll, updateProductRawData,
+    getSplitContents, saveSplitContents, listSplitContentsAll, listProductOfferIds, updateProductRawData,
     listRefreshablePublications, listSplitPublishableBundles, mergeSplitContentWpResults,
     listReviewQueue, getProductImage, listShopsOverview, listUnassignedOverview,
     listShopOverviewProducts, countShopOverviewProducts,
