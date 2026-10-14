@@ -3538,6 +3538,10 @@ app.post('/api/product-details/:id/publish-changes', { preHandler: requireDashbo
       return reply.code(409).send({ error: 'nothing_to_sync',
         message: '缺少翻译或发布记录，无法同步。' });
     }
+    // The final WordPress image set (and variants) may have changed: refresh
+    // the products RAG document so it follows the published gallery (queued,
+    // best effort — sync failures must not fail the WordPress publish).
+    await scheduleProductRagSync(id, { trigger: 'wordpress_publish_images' }).catch(() => {});
     const portal = await db.getPortalPublication(id).catch(() => null);
     const staging = portal?.portal_product_id
       && portal.result?.target === 'staging'

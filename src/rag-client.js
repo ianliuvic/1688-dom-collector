@@ -63,6 +63,45 @@ function publishedMainImage(publication) {
   return { url, id };
 }
 
+// Gallery entities from the FINAL published image set (the WordPress payload
+// images: manual order/add/remove edits and the publishing dedupe already
+// applied). Entity identity is anchored to the collector image row when known,
+// so unchanged images keep their embeddings across re-syncs. Returns null when
+// the product has no published image set — callers fall back to the captured
+// source gallery.
+function publishedGalleryImageEntities(detail, publication) {
+  const images = Array.isArray(publication?.payload?.images) ? publication.payload.images : [];
+  if (!images.length) return null;
+  const byId = new Map((detail?.images ?? []).map((image) => [String(image.id), image]));
+  const byUrl = new Map();
+  for (const image of detail?.images ?? []) {
+    const url = normalizedUrl(image.source_url);
+    if (url && !byUrl.has(url)) byUrl.set(url, image);
+  }
+  const seen = new Set();
+  const entries = [];
+  for (const image of images) {
+    const sourceUrl = normalizedUrl(image?.source_url);
+    const wpUrl = normalizedUrl(image?.url);
+    const imageUrl = sourceUrl || wpUrl;
+    if (!imageUrl || seen.has(imageUrl)) continue;
+    seen.add(imageUrl);
+    const collector = byId.get(String(image?.source_image_id ?? '')) ?? byUrl.get(imageUrl) ?? null;
+    const attachmentId = Number(image?.attachment_id) || null;
+    entries.push({
+      sourceImageId: collector ? String(collector.id) : (attachmentId ? `wp-${attachmentId}` : undefined),
+      imageUrl,
+      imageType: entries.length === 0 ? 'main' : 'gallery',
+      sortOrder: entries.length,
+      metadata: {
+        wpUrl: wpUrl || null, sourceUrl: sourceUrl || null, attachmentId,
+        collectorImageId: collector?.id ?? null,
+      },
+    });
+  }
+  return entries.length ? entries : null;
+}
+
 export function buildRagProduct({ detail, translation = null, publication = null, active = null }) {  if (!detail?.offer_id) throw new Error('A saved product detail with offer_id is required for RAG sync.');
   const payload = publication?.payload ?? {};
   const translatedData = translation?.translated_data ?? {};
@@ -74,10 +113,15 @@ export function buildRagProduct({ detail, translation = null, publication = null
   const tags = Array.isArray(payload.tags) ? payload.tags : [];
   const category = clean(payload.meta?.primary_category || payload.meta?.style
     || publication?.result?.primary_category || detail.raw_data?.category);
-  const galleryImages = galleryImageEntities(detail);
-  const mainImage = galleryImages[0]?.imageUrl || '';
   const wpMainImage = publishedMainImage(publication);
   const wpStatus = clean(publication?.wp_status || publication?.result?.status || payload.status);
+  // Published products follow the FINAL published image set (what is actually
+  // live on WordPress, manual edits included); everything else keeps the
+  // captured source gallery.
+  const publishedGallery = wpStatus === 'publish'
+    ? publishedGalleryImageEntities(detail, publication) : null;
+  const galleryImages = publishedGallery ?? galleryImageEntities(detail);
+  const mainImage = galleryImages[0]?.imageUrl || '';
   const isActive = active == null ? Boolean(publication?.wp_post_id && wpStatus === 'publish') : Boolean(active);
   const skuLabels = translatedSkuLabels(translation);
   const sourceLabels = sourceSkuLabels(detail);
