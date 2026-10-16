@@ -5,7 +5,9 @@
 // dHash/pHash distance — identical structure with matching colours counts as
 // the same photo re-cropped or re-encoded; and (optionally) a vision model
 // reviews the survivors for visually redundant images that hashes cannot catch
-// (slight crops, re-shots). Nothing on disk is deleted — the result only
+// (same framing, re-shots). Intentional detail crops — zoomed fabric/hardware/
+// print close-ups — are deliberately kept: they carry new visual information.
+// Nothing on disk is deleted — the result only
 // filters what gets published.
 
 import crypto from 'node:crypto';
@@ -150,8 +152,10 @@ export async function dedupeImagesWithLlm({ images, title = '', config = {} }) {
   const numbered = candidates.map((image, index) => ({ ...image, number: index + 1 }));
   const prompt = `你是商品图片审核助手，只输出严格JSON。
 下面的图片属于同一个商品（按编号顺序提供）。找出其中"与其他图片重复或几乎相同"的图片：
-- 同一张图的不同裁剪/压缩、轻微角度或距离差异、同一画面不同拼接，都算重复；
-- 只保留一张最有代表性的（编号最小的那张），其余列出应删除的编号；
+- 同一张图的不同裁剪/压缩、轻微角度或距离差异、同一画面不同拼接，且没有提供新视觉信息的，算重复；
+- **故意放大展示细节的特写/裁剪不算重复**：景别明显更近、聚焦面料纹理、五金配件、印花/走线/做工细节的图片，即使与某张大图同源也必须保留（它们是细节展示图）；
+- 判断标准：这张裁剪是否展示了其它图片里看不清的细节信息？是 → 保留；只是去边、换比例或轻微改动 → 算重复；
+- 确认重复时只保留一张最有代表性的（编号最小的那张），其余列出应删除的编号；
 - 不确定时不要算作重复。
 输出格式：{"duplicates":[{"number":4,"same_as":2,"reason":"同一张图的裁剪版"}]}
 标题：${JSON.stringify(String(title || '').slice(0, 100))}`;
