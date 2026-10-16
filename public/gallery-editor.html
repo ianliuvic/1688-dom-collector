@@ -51,6 +51,18 @@
   .picker-foot input { padding: 5px 8px; border: 1px solid #c9ced6; border-radius: 6px; font-size: 13px; flex: 1; }
   #picker-grid .thumb img { cursor: pointer; }
   #picker-grid .thumb.picked img { border-color: #2563eb; }
+  .purge-btn { border: 1px solid #fecdca; color: #b42318; background: #fff; }
+  .purge-btn:hover { border-color: #f97066; background: #fef3f2; }
+  #purge { position: fixed; inset: 0; background: rgba(10,12,18,.72); z-index: 95; display: flex; align-items: center; justify-content: center; }
+  #purge.hidden { display: none; }
+  .modal-card { background: #fff; border-radius: 12px; padding: 16px 18px; width: min(560px, 92vw); max-height: 86vh; overflow: auto; font-size: 13px; }
+  .modal-card h3 { margin: 0 0 8px; font-size: 15px; }
+  .modal-card .row-line { margin: 6px 0; }
+  .modal-card .row-line.warn { color: #b45309; }
+  .modal-card .row-line.err { color: #b91c1c; }
+  .modal-card .ok { color: #15803d; }
+  .modal-card select { padding: 4px 6px; border: 1px solid #c9ced6; border-radius: 6px; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
   #lightbox { position: fixed; inset: 0; background: rgba(10,12,18,.86); display: flex; align-items: center; justify-content: center; flex-direction: column; z-index: 100; cursor: zoom-out; }
   #lightbox.hidden { display: none; }
   #lightbox img { max-width: 92vw; max-height: 84vh; border-radius: 6px; }
@@ -83,6 +95,7 @@
     <div class="muted">从 1688 原图池点选一张（蓝框=已选）或粘贴 URL；保存后点「发布到 WP」生效</div>
   </div>
 </div>
+<div id="purge" class="hidden"><div class="modal-card" id="purge-card"></div></div>
 <script>
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = { anchor: 'SWOP288', limit: 10, offset: 0, total: 0, items: [] };
@@ -160,6 +173,7 @@ function renderRow(item) {
         <button data-act="reset" data-pid="${item.productDetailId}">恢复默认</button>
         <button data-act="save" data-pid="${item.productDetailId}">保存选图</button>
         <button data-act="publish" data-pid="${item.productDetailId}" class="primary">发布到 WP</button>
+        <button data-act="purge" data-pid="${item.productDetailId}" class="purge-btn" title="从采集器、WordPress 与 RAG 删除，并禁止后续采集">删除…</button>
       </div>
     </div>
     <div class="strip-title">已发布到 WP 的 Gallery（${item.wpImages.length} 张 · 点击看大图）</div>
@@ -202,6 +216,85 @@ async function load() {
 }
 
 function itemOf(pid) { return state.items.find((entry) => entry.productDetailId === Number(pid)); }
+
+// ---- 删除并清退（与 /products 的删除功能一致：purge-preview → 确认 → purge）----
+function showPurge(html) {
+  $('#purge-card').innerHTML = html;
+  $('#purge').classList.remove('hidden');
+}
+
+async function openPurge(item) {
+  showPurge(`<h3>删除并清退 #${item.productDetailId}</h3><div class="row-line">正在读取影响范围…</div>`);
+  let preview;
+  try {
+    preview = await api(`/api/product-details/${item.productDetailId}/purge-preview`);
+  } catch (error) {
+    showPurge(`<h3>删除并清退 #${item.productDetailId}</h3><div class="row-line err">无法读取影响范围：${esc(error.message)}</div>
+      <div class="modal-actions"><button data-act="purge-close">关闭</button></div>`);
+    return;
+  }
+  const wpPosts = preview.wp?.posts ?? [];
+  const wpList = wpPosts.length
+    ? wpPosts.map((post) => `<li>WordPress #${esc(String(post.postId))}（${esc(String(post.role))}，当前 ${esc(String(post.status || '未知'))}）</li>`).join('')
+    : '<li>无关联 WordPress 文章</li>';
+  const lines = ['<div class="row-line">将在以下系统删除该产品：</div>', `<ul>${wpList}</ul>`];
+  if (preview.portal?.portalProductId) {
+    lines.push(`<div class="row-line">Portal：${esc(String(preview.portal.portalProductId))}（${esc(String(preview.portal.status || ''))}）将归档移除</div>`);
+  }
+  if ((preview.shopify ?? []).length) {
+    lines.push(`<div class="row-line warn">⚠ Shopify 存在映射（${esc(preview.shopify.map((entry) => entry.store).join('、'))}）：本操作不会删除 Shopify 产品，请手动处理。</div>`);
+  }
+  if (preview.blocklisted) lines.push('<div class="row-line">该 offer 已在禁止采集名单中。</div>');
+  const maintenance = preview.activeJobs?.maintenance ?? [];
+  const busyParts = [];
+  if (preview.activeJobs?.wordpress) busyParts.push('发布任务');
+  if (preview.activeJobs?.pipeline) busyParts.push('流水线任务');
+  if (maintenance.length) busyParts.push(maintenance.join('、'));
+  const busy = busyParts.length > 0;
+  if (busy) lines.push(`<div class="row-line warn">⚠ 有任务进行中（${esc(busyParts.join('、'))}），暂不可清退。</div>`);
+  showPurge(`<h3>删除并清退 #${item.productDetailId}${item.styleNo ? ' · ' + esc(item.styleNo) : ''}</h3>
+    <div class="row-line">${esc(item.title || '')}</div>
+    ${lines.join('')}
+    <div class="row-line">WP 处理：<select id="purgeWpMode">
+      <option value="trash">移入回收站（可恢复）</option>
+      <option value="delete">彻底删除（不可恢复）</option></select></div>
+    <div class="row-line"><label><input type="checkbox" id="purgeBlocklist" checked> 加入禁止采集名单（后续扫描与采集自动跳过）</label></div>
+    <div class="row-line"><label><input type="checkbox" id="purgePortal" checked> 归档 Portal staging 记录（如有）</label></div>
+    <div class="row-line" id="purgeResult"></div>
+    <div class="modal-actions">
+      <button data-act="purge-close">取消</button>
+      <button class="primary" id="purgeConfirm" data-act="purge-confirm" data-pid="${item.productDetailId}" ${busy ? 'disabled' : ''}>确认清退</button>
+    </div>`);
+}
+
+async function confirmPurge(item) {
+  const btn = $('#purgeConfirm');
+  const resultEl = $('#purgeResult');
+  const wpMode = $('#purgeWpMode')?.value || 'trash';
+  const blocklist = !$('#purgeBlocklist') || $('#purgeBlocklist').checked;
+  const archivePortal = !$('#purgePortal') || $('#purgePortal').checked;
+  if (btn) { btn.disabled = true; btn.textContent = '正在清退…'; }
+  try {
+    const body = await api(`/api/product-details/${item.productDetailId}/purge`, {
+      method: 'POST', body: { wpMode, blocklist, archivePortal },
+    });
+    const wpCount = (body.wp?.posts ?? []).length;
+    if (resultEl) {
+      resultEl.innerHTML = `<span class="ok">✔ 已清退：WP ${wpCount} 篇（${wpMode === 'delete' ? '彻底删除' : '回收站'}）`
+        + `；Portal ${esc(String(body.portal?.status || '-'))}；RAG ${esc(String(body.rag?.status || '-'))}`
+        + `${body.blocked ? '；已加入禁止采集名单' : ''}</span>`;
+    }
+    setTimeout(() => {
+      $('#purge').classList.add('hidden');
+      state.items = state.items.filter((entry) => entry.productDetailId !== item.productDetailId);
+      if (state.total > 0) state.total -= 1;
+      render();
+    }, 1600);
+  } catch (error) {
+    if (resultEl) resultEl.innerHTML = `<span class="err">清退失败：${esc(error.message)}</span>`;
+    if (btn) { btn.disabled = false; btn.textContent = '确认清退'; }
+  }
+}
 
 const pickerState = { item: null, source: '', pick: null };
 
@@ -277,6 +370,7 @@ document.addEventListener('click', async (event) => {
   if (img) { openLightbox(img.dataset.full, img.dataset.cap); return; }
   const button = event.target.closest('button[data-act]');
   if (!button) return;
+  if (button.dataset.act === 'purge-close') { $('#purge').classList.add('hidden'); return; }
   const item = itemOf(button.dataset.pid);
   if (!item) return;
   const act = button.dataset.act;
@@ -324,6 +418,10 @@ document.addEventListener('click', async (event) => {
       await load();
     } else if (act === 'swatch-pick') {
       openPicker(item, button.dataset.source || '');
+    } else if (act === 'purge') {
+      openPurge(item);
+    } else if (act === 'purge-confirm') {
+      await confirmPurge(item);
     }
   } catch (error) {
     setStatus(item, `失败：${error.message}`, 'err');
