@@ -249,10 +249,15 @@ export function resolvePublishImagesDetailed(detail, translation, imageMode = 't
     .map((source) => available.get(String(source.imageId)))
     .filter(Boolean);
 
+  // The publish set is the deduped union of the captured main, gallery AND
+  // detail images: the 1688 gallery + detail images together form the candidate
+  // pool, and the stored dedupe removals (duplicate crops, non-product
+  // graphics) filter it below.
   const fallback = all
-    .filter((image) => ['main', 'gallery'].includes(image.image_type))
+    .filter((image) => ['main', 'gallery', 'description'].includes(image.image_type))
     .sort((a, b) => {
-      if (a.image_type !== b.image_type) return a.image_type === 'main' ? -1 : 1;
+      const rank = (type) => (type === 'main' ? 0 : type === 'gallery' ? 1 : 2);
+      if (rank(a.image_type) !== rank(b.image_type)) return rank(a.image_type) - rank(b.image_type);
       return Number(a.sort_order) - Number(b.sort_order);
     });
 
@@ -266,7 +271,8 @@ export function resolvePublishImagesDetailed(detail, translation, imageMode = 't
   }
 
   // Model input is deliberately bounded, but WordPress should receive every
-  // image from the verified product Gallery after the prioritized subset.
+  // surviving candidate after the prioritized subset (the gallery + detail
+  // union minus the stored dedupe removals applied below).
   const source = selected.length ? [...selected, ...fallback] : fallback;
   const seenIds = new Set();
   const seenUrl = new Set();

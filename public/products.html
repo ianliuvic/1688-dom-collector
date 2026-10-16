@@ -1777,7 +1777,7 @@ function renderPublishPreview(id, data){
     + '<button type="button" class="pp-edit-btn" data-pub-edit="' + esc(String(data.productDetailId)) + '">编辑…</button>'
     + '</div>'
     + publishThumbs
-    + '<div class="pp-muted" style="margin-top:6px">WP 商品图 = 主图+图库（去重后）· 详情图 ' + data.images.descriptionCount + ' 张（不进入 WP 商品图，仅选品/展示用）'
+    + '<div class="pp-muted" style="margin-top:6px">WP 商品图 = 主图+图库+详情图 合并去重后 · 详情图 ' + data.images.descriptionCount + ' 张参与候选（重复裁剪与非产品图已被剔除）'
     + (data.images.publishedImageCount !== null ? ' · 上次已发布 ' + data.images.publishedImageCount + ' 张 / 色卡 ' + (data.images.publishedColorCount || 0) + ' / 尺码 ' + (data.images.publishedSizeCount || 0) : '')
     + '</div>'
     + (data.images.dedupe
