@@ -40,6 +40,17 @@
   .swatch { width: 108px; text-align: center; font-size: 11px; color: #4b5563; }
   .swatch img { width: 72px; height: 72px; object-fit: cover; border-radius: 50%; border: 1px solid #d7dbe2; cursor: zoom-in; background: #eceff3; }
   .swatch .noimg { width: 72px; height: 72px; border-radius: 50%; background: #eceff3; margin: 0 auto; }
+  .swatch-btn { margin-top: 4px; padding: 2px 10px; border: 1px solid #c9ced6; border-radius: 6px; background: #fff; cursor: pointer; font-size: 11px; }
+  .swatch-btn:disabled { opacity: .45; cursor: default; }
+  #picker { position: fixed; inset: 0; background: rgba(10,12,18,.72); z-index: 90; display: flex; align-items: center; justify-content: center; }
+  #picker.hidden { display: none; }
+  .picker-card { background: #fff; border-radius: 12px; padding: 14px 16px; width: min(900px, 94vw); max-height: 86vh; overflow: auto; }
+  .picker-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .picker-head button { margin-left: auto; }
+  .picker-foot { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+  .picker-foot input { padding: 5px 8px; border: 1px solid #c9ced6; border-radius: 6px; font-size: 13px; flex: 1; }
+  #picker-grid .thumb img { cursor: pointer; }
+  #picker-grid .thumb.picked img { border-color: #2563eb; }
   #lightbox { position: fixed; inset: 0; background: rgba(10,12,18,.86); display: flex; align-items: center; justify-content: center; flex-direction: column; z-index: 100; cursor: zoom-out; }
   #lightbox.hidden { display: none; }
   #lightbox img { max-width: 92vw; max-height: 84vh; border-radius: 6px; }
@@ -61,6 +72,17 @@
 </header>
 <main id="rows"><div class="empty">载入中…</div></main>
 <div id="lightbox" class="hidden"><img id="lightbox-img" alt=""><div id="lightbox-cap"></div></div>
+<div id="picker" class="hidden">
+  <div class="picker-card">
+    <div class="picker-head"><strong>更换色卡图</strong><span id="picker-cap" class="muted"></span><button id="picker-close">关闭</button></div>
+    <div class="strip" id="picker-grid"></div>
+    <div class="picker-foot">
+      <input id="picker-url" placeholder="或粘贴图片 https:// URL（会自动下载入库）">
+      <button id="picker-ok" class="primary">确定更换</button>
+    </div>
+    <div class="muted">从 1688 原图池点选一张（蓝框=已选）或粘贴 URL；保存后点「发布到 WP」生效</div>
+  </div>
+</div>
 <script>
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = { anchor: 'SWOP288', limit: 10, offset: 0, total: 0, items: [] };
@@ -144,12 +166,16 @@ function renderRow(item) {
     <div class="strip">${item.wpImages.map((image) => `
       <div class="thumb"><img src="${esc(image.thumb || image.url)}" data-full="${esc(image.full || image.url)}"
         data-cap="${esc(image.source_url || image.url || '')}"></div>`).join('') || '<span class="muted">（无）</span>'}</div>
-    <div class="strip-title">Swatch（颜色名 + 色卡）</div>
+    <div class="strip-title">Swatch（颜色名 + 色卡 · 「换图」更换该颜色的色卡，发布后生效）</div>
     <div class="strip">${item.swatches.map((swatch) => `
       <div class="swatch">${swatch.thumb
         ? `<img src="${esc(swatch.thumb)}" data-full="${esc(swatch.full || swatch.thumb)}" data-cap="${esc(swatch.label)}">`
         : '<div class="noimg"></div>'}
-        <div>${esc(swatch.label)}${swatch.code ? ` <span class="muted">${esc(swatch.code)}</span>` : ''}</div></div>`).join('') || '<span class="muted">（无）</span>'}</div>
+        <div>${esc(swatch.label)}${swatch.code ? ` <span class="muted">${esc(swatch.code)}</span>` : ''}</div>
+        <button class="swatch-btn" data-act="swatch-pick" data-pid="${item.productDetailId}" data-source="${esc(swatch.source || '')}"
+          ${swatch.source && !item.bundle ? '' : 'disabled'}
+          title="${item.bundle ? '捆绑款请走拆分面板更换' : (swatch.source ? '更换该颜色的色卡图' : '无法定位颜色源')}">换图</button>
+      </div>`).join('') || '<span class="muted">（无）</span>'}</div>
     <div class="strip-title">1688 原图池 · 点缩略图看大图，角标「选/已选」切换，◀ ▶ 调顺序（蓝框=当前选中，绿 WP=已在 WP 上）</div>
     <div class="strip">${picked.map(poolThumb).join('')}${rest.map(poolThumb).join('')}</div>
   </div>`;
@@ -176,6 +202,68 @@ async function load() {
 }
 
 function itemOf(pid) { return state.items.find((entry) => entry.productDetailId === Number(pid)); }
+
+const pickerState = { item: null, source: '', pick: null };
+
+function openPicker(item, source) {
+  pickerState.item = item;
+  pickerState.source = source;
+  pickerState.pick = null;
+  $('#picker-cap').textContent = `${item.styleNo || ''} · ${source}`;
+  $('#picker-url').value = '';
+  $('#picker-grid').innerHTML = item.pool.map((entry) => `
+    <div class="thumb" data-pick-id="${esc(entry.id ?? '')}" data-pick-url="${esc(entry.url || entry.full || '')}">
+      <img src="${esc(entry.thumb || entry.url)}" alt="">
+      <span class="type">${esc(TYPE_LABEL[entry.type] || entry.type)}</span>
+    </div>`).join('');
+  $('#picker').classList.remove('hidden');
+}
+
+$('#picker-grid').addEventListener('click', (event) => {
+  const cell = event.target.closest('.thumb');
+  if (!cell) return;
+  pickerState.pick = {
+    id: cell.dataset.pickId || null,
+    url: cell.dataset.pickUrl || null,
+    thumb: cell.querySelector('img')?.src || null,
+  };
+  $('#picker-grid').querySelectorAll('.thumb').forEach((el) => el.classList.remove('picked'));
+  cell.classList.add('picked');
+});
+$('#picker-close').addEventListener('click', () => $('#picker').classList.add('hidden'));
+
+$('#picker-ok').addEventListener('click', async () => {
+  const item = pickerState.item;
+  if (!item) return;
+  const typedUrl = $('#picker-url').value.trim();
+  try {
+    $('#picker-cap').textContent = '保存中…';
+    let imageId = pickerState.pick?.id || null;
+    const url = typedUrl || (!imageId ? pickerState.pick?.url : null) || null;
+    if (!imageId && url) {
+      // URL-only picks are materialized into a stored image row first so the
+      // normalization PATCH can reference a real image id.
+      const saved = await api(`/api/product-details/${item.productDetailId}/publish-images/materialize`,
+        { method: 'POST', body: { url } });
+      imageId = String(saved.imageId);
+    }
+    if (!imageId) { $('#picker-cap').textContent = '请先点选一张图或粘贴 URL'; return; }
+    await api(`/api/product-details/${item.productDetailId}/variant-normalization`, {
+      method: 'PATCH', body: { source: pickerState.source, imageId },
+    });
+    const swatch = item.swatches.find((entry) => entry.source === pickerState.source);
+    if (swatch) {
+      swatch.thumb = pickerState.pick?.thumb
+        || (url ? `/api/image-thumb?url=${encodeURIComponent(url)}&w=160` : swatch.thumb);
+      swatch.full = pickerState.pick?.url || url || swatch.full;
+    }
+    $('#picker').classList.add('hidden');
+    render();
+    setStatus(item, '色卡已更换，点「发布到 WP」生效', 'ok');
+  } catch (error) {
+    $('#picker-cap').textContent = `失败：${error.message}`;
+  }
+});
 
 async function saveItem(item) {
   const order = item.order.filter((id) => id != null);
@@ -234,6 +322,8 @@ document.addEventListener('click', async (event) => {
       setStatus(item, '重置中…');
       await api(`/api/product-details/${item.productDetailId}/publish-images`, { method: 'PUT', body: { reset: true } });
       await load();
+    } else if (act === 'swatch-pick') {
+      openPicker(item, button.dataset.source || '');
     }
   } catch (error) {
     setStatus(item, `失败：${error.message}`, 'err');

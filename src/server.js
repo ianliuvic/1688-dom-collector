@@ -3677,8 +3677,22 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
       }
       return { thumb: null, full: null };
     };
+    // Variant-normalization colours carry the captured source text the swatch
+    // PATCH endpoint keys on; match them to the published colour labels.
+    const normalization = await db.getVariantNormalization(id).catch(() => null);
+    const normColours = Array.isArray(normalization?.result?.colours) ? normalization.result.colours : [];
+    const normSourceFor = (color) => {
+      const labels = [color?.label, color?.source_label, color?.code]
+        .map((value) => String(value ?? '').trim().toLowerCase()).filter(Boolean);
+      const match = normColours.find((entry) => labels.includes(String(entry?.source ?? '').trim().toLowerCase())
+        || labels.includes(String(entry?.text ?? '').trim().toLowerCase())
+        || labels.includes(String(entry?.code ?? '').trim().toLowerCase()));
+      if (match) return String(match.source ?? '');
+      return normColours.length === 1 ? String(normColours[0]?.source ?? '') : '';
+    };
     const swatches = (payload.colors?.colors ?? []).map((color) => ({
       label: String(color?.label ?? color?.value ?? ''), code: String(color?.code ?? ''),
+      source: normSourceFor(color),
       ...swatchThumbOf(color),
     }));
     items.push({
@@ -3689,6 +3703,7 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
       wpUrl: row.wp_url ?? null,
       publicationDate: row.publication_date ?? null,
       publicationDateSource: row.publication_date_source ?? null,
+      bundle: detail.bundle_status === 'bundle',
       wpImages, swatches, pool, working,
       manualEdits: detail.raw_data?.publishImages ?? null,
     });
