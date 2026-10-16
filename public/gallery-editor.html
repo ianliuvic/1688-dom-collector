@@ -51,6 +51,12 @@
   .picker-foot input { padding: 5px 8px; border: 1px solid #c9ced6; border-radius: 6px; font-size: 13px; flex: 1; }
   #picker-grid .thumb img { cursor: pointer; }
   #picker-grid .thumb.picked img { border-color: #2563eb; }
+  .thumb.dragging { opacity: .5; }
+  .thumb.drop-before::before, .thumb.drop-after::after {
+    content: ''; position: absolute; top: 0; bottom: 0; width: 3px; background: #2563eb; border-radius: 2px; z-index: 2;
+  }
+  .thumb.drop-before::before { left: -5px; }
+  .thumb.drop-after::after { right: -5px; }
   .purge-btn { border: 1px solid #fecdca; color: #b42318; background: #fff; }
   .purge-btn:hover { border-color: #f97066; background: #fef3f2; }
   .badge-bundle { font-size: 11px; font-weight: 600; color: #92400e; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 999px; padding: 1px 9px; cursor: help; }
@@ -149,7 +155,7 @@ function renderRow(item) {
     const id = entry.id == null ? '' : String(entry.id);
     const selected = id && item.order.includes(id);
     const num = selected ? position.get(id) : null;
-    return `<div class="thumb ${selected ? 'sel' : ''}">
+    return `<div class="thumb ${selected ? 'sel' : ''}" ${selected ? `draggable="true" data-drag-id="${esc(id)}"` : ''}>
       <img src="${esc(entry.thumb || entry.url)}" data-full="${esc(entry.full || entry.url)}"
            data-cap="${esc((TYPE_LABEL[entry.type] || entry.type) + (entry.url ? ' · ' + entry.url : ''))}">
       <span class="type">${esc(TYPE_LABEL[entry.type] || entry.type)}</span>
@@ -192,8 +198,8 @@ function renderRow(item) {
           ${swatch.source && !item.bundle ? '' : 'disabled'}
           title="${item.bundle ? '捆绑款请走拆分面板更换' : (swatch.source ? '更换该颜色的色卡图' : '无法定位颜色源')}">换图</button>
       </div>`).join('') || '<span class="muted">（无）</span>'}</div>
-    <div class="strip-title">1688 原图池 · 点缩略图看大图，角标「选/已选」切换，◀ ▶ 调顺序（蓝框=当前选中，绿 WP=已在 WP 上）</div>
-    <div class="strip">${picked.map(poolThumb).join('')}${rest.map(poolThumb).join('')}</div>
+    <div class="strip-title">1688 原图池 · 点缩略图看大图，角标「选/已选」切换，◀ ▶ 或直接拖拽调顺序（蓝框=当前选中，绿 WP=已在 WP 上）</div>
+    <div class="strip pool-strip">${picked.map(poolThumb).join('')}${rest.map(poolThumb).join('')}</div>
   </div>`;
 }
 
@@ -326,6 +332,90 @@ $('#picker-grid').addEventListener('click', (event) => {
   cell.classList.add('picked');
 });
 $('#picker-close').addEventListener('click', () => $('#picker').classList.add('hidden'));
+
+// ---- 拖拽调整选中图片顺序（与 ◀ ▶ 并存）----
+const dragState = { id: null, pid: null };
+
+function clearDropMarkers() {
+  document.querySelectorAll('.drop-before, .drop-after')
+    .forEach((el) => el.classList.remove('drop-before', 'drop-after'));
+}
+
+function clearDragUi() {
+  dragState.id = null;
+  dragState.pid = null;
+  clearDropMarkers();
+  document.querySelectorAll('.thumb.dragging').forEach((el) => el.classList.remove('dragging'));
+}
+
+function moveInOrder(order, id, targetId, after) {
+  const from = order.indexOf(id);
+  if (from < 0) return order;
+  const next = order.slice();
+  next.splice(from, 1);
+  let to = targetId == null ? next.length : next.indexOf(targetId);
+  if (to < 0) to = next.length;
+  next.splice(after ? to + 1 : to, 0, id);
+  return next;
+}
+
+document.addEventListener('dragstart', (event) => {
+  const thumb = event.target.closest('.thumb[data-drag-id]');
+  if (!thumb) return;
+  dragState.id = thumb.dataset.dragId;
+  dragState.pid = thumb.closest('[data-row]')?.dataset.row || null;
+  event.dataTransfer.setData('text/plain', thumb.dataset.dragId);
+  event.dataTransfer.effectAllowed = 'move';
+  thumb.classList.add('dragging');
+});
+
+document.addEventListener('dragover', (event) => {
+  if (!dragState.id) return;
+  const thumb = event.target.closest('.thumb[data-drag-id]');
+  const rowEl = event.target.closest('[data-row]');
+  if (!rowEl || rowEl.dataset.row !== dragState.pid) return;
+  if (thumb && thumb.dataset.dragId !== dragState.id) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const rect = thumb.getBoundingClientRect();
+    const before = event.clientX < rect.left + rect.width / 2;
+    clearDropMarkers();
+    thumb.classList.add(before ? 'drop-before' : 'drop-after');
+    return;
+  }
+  if (!thumb && event.target.closest('.strip.pool-strip')) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  }
+});
+
+document.addEventListener('drop', (event) => {
+  if (!dragState.id) return;
+  const rowEl = event.target.closest('[data-row]');
+  const item = rowEl && rowEl.dataset.row === dragState.pid ? itemOf(rowEl.dataset.row) : null;
+  if (!item) { clearDragUi(); return; }
+  const thumb = event.target.closest('.thumb[data-drag-id]');
+  const strip = event.target.closest('.strip.pool-strip');
+  if (thumb && thumb.dataset.dragId !== dragState.id) {
+    event.preventDefault();
+    const rect = thumb.getBoundingClientRect();
+    const after = event.clientX >= rect.left + rect.width / 2;
+    item.order = moveInOrder(item.order, dragState.id, thumb.dataset.dragId, after);
+    item.dirty = true;
+    clearDragUi();
+    render();
+  } else if (!thumb && strip) {
+    event.preventDefault();
+    item.order = moveInOrder(item.order, dragState.id, null, true);
+    item.dirty = true;
+    clearDragUi();
+    render();
+  } else {
+    clearDragUi();
+  }
+});
+
+document.addEventListener('dragend', () => clearDragUi());
 
 $('#picker-ok').addEventListener('click', async () => {
   const item = pickerState.item;
