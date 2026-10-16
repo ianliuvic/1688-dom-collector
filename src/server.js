@@ -3646,14 +3646,41 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
         inWp: wpSourceKeys.has(key),
       });
     }
-    const swatches = (payload.colors?.colors ?? []).map((color) => {
-      const match = wpImages.find((image) => image.attachment_id != null
+    // Colour swatch thumbs: source image id when the payload carries one, then
+    // the WP attachment match against the published gallery, then the normalized
+    // colour label matched against the translated SKU options (whose imageUrl is
+    // the saved swatch image URL).
+    const skuOptions = Array.isArray(translation?.sku_options) ? translation.sku_options : [];
+    const storedByKey = new Map((detail.images ?? [])
+      .map((image) => [normalizedSourceImageKey(image.source_url), image])
+      .filter(([key]) => key));
+    const swatchThumbOf = (color) => {
+      const sourceId = color?.image_source_id != null ? Number(color.image_source_id) : null;
+      if (Number.isInteger(sourceId) && sourceId > 0) {
+        const image = (detail.images ?? []).find((entry) => Number(entry.id) === sourceId);
+        if (image) {
+          const base = imagePublicPath(image.storage_path);
+          const source = /^https?:\/\//i.test(String(image.source_url || '')) ? String(image.source_url) : null;
+          return { thumb: base ? `${base}?w=160` : thumbOf(source), full: base || source };
+        }
+      }
+      const byAttachment = wpImages.find((image) => image.attachment_id != null
         && Number(image.attachment_id) === Number(color?.image_id));
-      return {
-        label: String(color?.label ?? color?.value ?? ''), code: String(color?.code ?? ''),
-        thumb: match?.thumb ?? null, full: match?.full ?? null,
-      };
-    });
+      if (byAttachment) return { thumb: byAttachment.thumb, full: byAttachment.full };
+      const labels = [color?.label, color?.source_label, color?.value]
+        .map((value) => String(value ?? '').trim().toLowerCase()).filter(Boolean);
+      const option = skuOptions.find((entry) => labels.includes(String(entry?.text ?? '').trim().toLowerCase()));
+      if (option?.imageUrl) {
+        const stored = storedByKey.get(normalizedSourceImageKey(option.imageUrl));
+        const base = stored ? imagePublicPath(stored.storage_path) : null;
+        return { thumb: base ? `${base}?w=160` : thumbOf(option.imageUrl), full: base || option.imageUrl };
+      }
+      return { thumb: null, full: null };
+    };
+    const swatches = (payload.colors?.colors ?? []).map((color) => ({
+      label: String(color?.label ?? color?.value ?? ''), code: String(color?.code ?? ''),
+      ...swatchThumbOf(color),
+    }));
     items.push({
       productDetailId: id,
       styleNo: row.style_no ?? payload.style_no ?? null,

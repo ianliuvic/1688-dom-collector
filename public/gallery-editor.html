@@ -83,10 +83,11 @@ document.addEventListener('keydown', (event) => {
 const TYPE_LABEL = { main: '主图', gallery: '图库', description: '详情图', 'description-web': '详情图·未下载' };
 
 async function api(path, options = {}) {
+  const hasBody = Boolean(options.body);
   const response = await fetch(path, {
-    headers: { 'content-type': 'application/json' },
     ...options,
-    body: options.body ? JSON.stringify(options.body) : undefined,
+    headers: hasBody ? { 'content-type': 'application/json' } : {},
+    body: hasBody ? JSON.stringify(options.body) : undefined,
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload?.message || payload?.error || `HTTP ${response.status}`);
