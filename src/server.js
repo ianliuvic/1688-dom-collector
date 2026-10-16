@@ -2011,6 +2011,70 @@ app.put('/api/product-details/:id/split-swatch', { preHandler: requireDashboardO
   return { saved: true, sync: { jobId: job.id }, resolved: swatchResolved };
 });
 
+// Persist English display labels for split-product colour variants. The synced
+// WordPress variation option names come from this text, so fixing it here is the
+// durable repair — WP-only renames get pushed back to source text by the next
+// split sync. Codes and composed SKUs are intentionally untouched. Matching is
+// by the captured source text across the split products (or one product when
+// productId is given); sync re-pushes the bundle to WordPress when published.
+app.put('/api/product-details/:id/split-colour-labels', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const productId = request.body?.productId == null ? null : String(request.body.productId);
+  const labels = (Array.isArray(request.body?.labels) ? request.body.labels : [])
+    .map((entry) => ({
+      source: String(entry?.source ?? '').trim(),
+      text: String(entry?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 60),
+    }))
+    .filter((entry) => entry.source && entry.text)
+    .slice(0, 100);
+  const sync = request.body?.sync !== false;
+  if (!labels.length) return reply.code(400).send({ error: 'labels_required' });
+  const record = await db.getSplitContents(id);
+  if (!record?.result?.products?.length) return reply.code(409).send({ error: 'split_content_required' });
+  const bySource = new Map(labels.map((entry) => [entry.source, entry.text]));
+  const result = structuredClone(record.result);
+  const updated = [];
+  const unmatched = new Set(bySource.keys());
+  for (const product of result.products ?? []) {
+    if (productId && String(product?.id) !== productId) continue;
+    for (const colour of product.colours ?? []) {
+      const text = bySource.get(String(colour?.source ?? '').trim());
+      if (!text) continue;
+      unmatched.delete(String(colour?.source ?? '').trim());
+      colour.text = text;
+      colour.placeholder = false;
+      colour.needsReview = false;
+      colour.labelManual = true;
+      updated.push({ productId: String(product.id), source: String(colour.source ?? ''), text });
+    }
+  }
+  if (!updated.length) {
+    return reply.code(404).send({ error: 'no_matching_colours', unmatched: [...unmatched] });
+  }
+  const saved = await db.saveSplitContents(id, result, record.model ?? null);
+  await appendManualEditLog(id, {
+    at: new Date().toISOString(), action: 'split_colour_labels',
+    count: updated.length, sources: updated.map((entry) => entry.source),
+  });
+  let syncJob = null;
+  if (sync) {
+    const detail = await db.getProductDetail(id);
+    const publication = await db.getWordPressPublication(id);
+    const isPublished = (result.products ?? []).some((item) => item?.wp?.postId);
+    if (publication?.payload && isPublished && detail) {
+      syncJob = await queueSplitSyncJob({
+        productDetailId: id, detail, publication, contents: result,
+        trigger: 'split_colour_labels',
+      });
+    }
+  }
+  return {
+    productDetailId: id, updated, unmatched: [...unmatched],
+    updatedAt: saved.updated_at, sync: syncJob ? { jobId: syncJob.id } : null,
+  };
+});
+
 // Remove one SKU variant from a split product's content (bundle split review
 // UI). The deletion is durable across content regenerations (stored as
 // removedSkus and re-applied), drops any size left without SKUs, logs a manual
