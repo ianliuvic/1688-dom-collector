@@ -2029,7 +2029,7 @@ app.put('/api/product-details/:id/split-colour-labels', { preHandler: requireDas
     .filter((entry) => entry.source && entry.text)
     .slice(0, 100);
   const sync = request.body?.sync !== false;
-  if (!labels.length) return reply.code(400).send({ error: 'labels_required' });
+  if (!labels.length && sync !== true) return reply.code(400).send({ error: 'labels_required' });
   const record = await db.getSplitContents(id);
   if (!record?.result?.products?.length) return reply.code(409).send({ error: 'split_content_required' });
   const bySource = new Map(labels.map((entry) => [entry.source, entry.text]));
@@ -2049,14 +2049,17 @@ app.put('/api/product-details/:id/split-colour-labels', { preHandler: requireDas
       updated.push({ productId: String(product.id), source: String(colour.source ?? ''), text });
     }
   }
-  if (!updated.length) {
+  if (labels.length && !updated.length) {
     return reply.code(404).send({ error: 'no_matching_colours', unmatched: [...unmatched] });
   }
-  const saved = await db.saveSplitContents(id, result, record.model ?? null);
-  await appendManualEditLog(id, {
-    at: new Date().toISOString(), action: 'split_colour_labels',
-    count: updated.length, sources: updated.map((entry) => entry.source),
-  });
+  const saved = updated.length
+    ? await db.saveSplitContents(id, result, record.model ?? null) : null;
+  if (updated.length) {
+    await appendManualEditLog(id, {
+      at: new Date().toISOString(), action: 'split_colour_labels',
+      count: updated.length, sources: updated.map((entry) => entry.source),
+    });
+  }
   let syncJob = null;
   if (sync) {
     const detail = await db.getProductDetail(id);
@@ -2071,7 +2074,7 @@ app.put('/api/product-details/:id/split-colour-labels', { preHandler: requireDas
   }
   return {
     productDetailId: id, updated, unmatched: [...unmatched],
-    updatedAt: saved.updated_at, sync: syncJob ? { jobId: syncJob.id } : null,
+    updatedAt: saved?.updated_at ?? null, sync: syncJob ? { jobId: syncJob.id } : null,
   };
 });
 
