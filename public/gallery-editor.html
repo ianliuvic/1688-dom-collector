@@ -53,6 +53,7 @@
   #picker-grid .thumb.picked img { border-color: #2563eb; }
   .purge-btn { border: 1px solid #fecdca; color: #b42318; background: #fff; }
   .purge-btn:hover { border-color: #f97066; background: #fef3f2; }
+  .badge-bundle { font-size: 11px; font-weight: 600; color: #92400e; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 999px; padding: 1px 9px; cursor: help; }
   #purge { position: fixed; inset: 0; background: rgba(10,12,18,.72); z-index: 95; display: flex; align-items: center; justify-content: center; }
   #purge.hidden { display: none; }
   .modal-card { background: #fff; border-radius: 12px; padding: 16px 18px; width: min(560px, 92vw); max-height: 86vh; overflow: auto; font-size: 13px; }
@@ -165,13 +166,14 @@ function renderRow(item) {
   return `<div class="card" data-row="${item.productDetailId}">
     <div class="row-head">
       <span class="style">${esc(item.styleNo || '—')}</span>
+      ${item.bundle ? '<span class="badge-bundle" title="捆绑拆分款（keeper）：图片/色卡请在 /products 拆分面板按款编辑；删除会连带 keeper 与全部兄弟款">捆绑款</span>' : ''}
       <span>${esc(item.title)}</span>
       <span class="muted">${esc((item.publicationDate || '').slice(0, 10))} · #${esc(item.wpPostId)}</span>
       ${item.wpUrl ? `<a class="muted" href="${esc(item.wpUrl)}" target="_blank" rel="noreferrer">WP 页面 ↗</a>` : ''}
       <div class="row-actions">
         <span class="status" data-status="${item.productDetailId}"></span>
-        <button data-act="reset" data-pid="${item.productDetailId}">恢复默认</button>
-        <button data-act="save" data-pid="${item.productDetailId}">保存选图</button>
+        <button data-act="reset" data-pid="${item.productDetailId}" ${item.bundle ? 'disabled title="捆绑款请在拆分面板编辑"' : ''}>恢复默认</button>
+        <button data-act="save" data-pid="${item.productDetailId}" ${item.bundle ? 'disabled title="捆绑款请在拆分面板编辑"' : ''}>保存选图</button>
         <button data-act="publish" data-pid="${item.productDetailId}" class="primary">发布到 WP</button>
         <button data-act="purge" data-pid="${item.productDetailId}" class="purge-btn" title="从采集器、WordPress 与 RAG 删除，并禁止后续采集">删除…</button>
       </div>
