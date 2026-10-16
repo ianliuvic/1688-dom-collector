@@ -1938,16 +1938,18 @@ export function createDatabase(databaseUrl) {
         JOIN product_details details ON details.id = publications.product_detail_id
         WHERE publications.wp_post_id IS NOT NULL AND publications.wp_status = 'publish'
       ), anchored AS (
-        SELECT base.*,
-          COALESCE(
-            (SELECT b.publication_date FROM base b WHERE b.style_key = $1 LIMIT 1),
-            (SELECT max(b.publication_date) FROM base b)
-          ) AS anchor_date
+        SELECT base.*, a.anchor_date, a.anchor_id
         FROM base
+        LEFT JOIN LATERAL (
+          SELECT b.publication_date AS anchor_date, b.product_detail_id AS anchor_id
+          FROM base b WHERE b.style_key = $1 LIMIT 1
+        ) a ON true
       )
       SELECT *, count(*) OVER()::int AS total
       FROM anchored
-      WHERE publication_date <= anchor_date
+      WHERE anchor_date IS NULL
+         OR publication_date < anchor_date
+         OR (publication_date = anchor_date AND product_detail_id <= anchor_id)
       ORDER BY publication_date DESC NULLS LAST, product_detail_id DESC
       LIMIT $2 OFFSET $3`, [anchor, safeLimit, safeOffset]);
     return result.rows;

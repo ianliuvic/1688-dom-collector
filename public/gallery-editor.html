@@ -167,7 +167,7 @@ async function load() {
     const data = await api(`/api/gallery-editor/rows?anchor=${encodeURIComponent(state.anchor)}&limit=${state.limit}&offset=${state.offset}`);
     state.total = data.total || 0;
     state.anchorDate = data.anchorDate;
-    state.items = (data.items || []).map((item) => ({ ...item, order: [...(item.working || [])], dirty: false }));
+    state.items = (data.items || []).map((item) => ({ ...item, order: (item.working || []).map(String), dirty: false }));
     render();
   } catch (error) {
     $('#rows').innerHTML = `<div class="empty">载入失败：${esc(error.message)}</div>`;
