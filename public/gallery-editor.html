@@ -33,6 +33,7 @@
   .thumb .type { position: absolute; left: 4px; top: 4px; font-size: 10px; background: rgba(17,24,39,.72); color: #fff; padding: 1px 5px; border-radius: 4px; }
   .thumb .wp { position: absolute; right: 4px; top: 4px; font-size: 10px; background: #16a34a; color: #fff; padding: 1px 5px; border-radius: 4px; }
   .thumb .num { position: absolute; left: 4px; bottom: 34px; font-size: 11px; background: #2563eb; color: #fff; padding: 1px 6px; border-radius: 4px; }
+  .thumb.preview .num { bottom: 5px; }
   .thumb .ctl { position: absolute; left: 0; right: 0; bottom: 0; display: flex; gap: 3px; padding: 3px; background: rgba(17,24,39,.62); border-radius: 0 0 8px 8px; }
   .thumb .ctl button { flex: 1; border: 0; border-radius: 4px; background: rgba(255,255,255,.92); font-size: 11px; padding: 2px 0; cursor: pointer; }
   .thumb .ctl button.on { background: #2563eb; color: #fff; }
@@ -184,10 +185,15 @@ function renderRow(item) {
         <button data-act="purge" data-pid="${item.productDetailId}" class="purge-btn" title="从采集器、WordPress 与 RAG 删除，并禁止后续采集">删除…</button>
       </div>
     </div>
-    <div class="strip-title">已发布到 WP 的 Gallery（${item.wpImages.length} 张 · 点击看大图）</div>
-    <div class="strip">${item.wpImages.map((image) => `
-      <div class="thumb"><img src="${esc(image.thumb || image.url)}" data-full="${esc(image.full || image.url)}"
-        data-cap="${esc(image.source_url || image.url || '')}"></div>`).join('') || '<span class="muted">（无）</span>'}</div>
+    <div class="strip-title">已发布到 WP 的 Gallery · 实时预览（当前已选 ${picked.length} 张 = 保存+发布后的线上图；线上现有 ${item.wpImages.length} 张，绿 WP=已在线上）</div>
+    <div class="strip">${picked.map((entry, index) => `
+      <div class="thumb sel preview">
+        <img src="${esc(entry.thumb || entry.url)}" data-full="${esc(entry.full || entry.url)}"
+          data-cap="${esc((TYPE_LABEL[entry.type] || entry.type) + (entry.url ? ' · ' + entry.url : ''))}">
+        <span class="type">${esc(TYPE_LABEL[entry.type] || entry.type)}</span>
+        ${entry.inWp ? '<span class="wp">WP</span>' : ''}
+        <span class="num">${index + 1}</span>
+      </div>`).join('') || '<span class="muted">（未选任何图）</span>'}</div>
     <div class="strip-title">Swatch（颜色名 + 色卡 · 「换图」更换该颜色的色卡，发布后生效）</div>
     <div class="strip">${item.swatches.map((swatch) => `
       <div class="swatch">${swatch.thumb
