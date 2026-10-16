@@ -32,8 +32,13 @@ export function normalizePublicationDate(value) {
   return Number.isNaN(date.getTime()) ? '' : date.toISOString();
 }
 
+// Real 1688 listing-date sources allowed to feed the WordPress arrival_date
+// meta: the shop-scan gmtCreate and the LinkFox capture createDate (the same
+// value when both exist). first_seen_at and crawl times never qualify.
+const ARRIVAL_DATE_SOURCES = new Set(['1688_listing_time', 'linkfox_create_date']);
+
 export function get1688ArrivalDate(detail) {
-  if (clean(detail?.publication_date_source) !== '1688_listing_time') return '';
+  if (!ARRIVAL_DATE_SOURCES.has(clean(detail?.publication_date_source))) return '';
   const normalized = normalizePublicationDate(detail?.publication_date);
   if (!normalized) return '';
   const date = new Date(normalized);

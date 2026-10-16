@@ -7310,7 +7310,7 @@ async function runProductsRagReconcile() {
 app.post('/api/wordpress/publication-dates/backfill', { preHandler: requireApiKey }, async (_request, reply) => {
   const id = crypto.randomUUID();
   const job = { id, status: 'queued', total: 0, updated: 0, failed: 0,
-    from1688ListingTime: 0, fromFirstSeenAt: 0,
+    from1688ListingTime: 0, fromLinkfoxCreateDate: 0, fromFirstSeenAt: 0,
     createdAt: new Date().toISOString(), startedAt: null, completedAt: null, errors: [] };
   wordpressPublicationDateJobs.set(id, job);
   trimTerminalJobs(wordpressPublicationDateJobs);
@@ -7329,6 +7329,7 @@ app.post('/api/wordpress/publication-dates/backfill', { preHandler: requireApiKe
             });
             job.updated += 1;
             if (row.publication_date_source === '1688_listing_time') job.from1688ListingTime += 1;
+            else if (row.publication_date_source === 'linkfox_create_date') job.fromLinkfoxCreateDate += 1;
             else job.fromFirstSeenAt += 1;
           } catch (error) {
             job.failed += 1;
@@ -7366,8 +7367,8 @@ app.post('/api/wordpress/arrival-dates/backfill', { preHandler: requireApiKey },
       const rows = await db.listWordPressArrivalDates();
       job.totalPublished = rows.length;
       const eligible = rows.map((row) => ({ ...row, arrivalDate: get1688ArrivalDate({
-        publication_date_source: row.listing_time ? '1688_listing_time' : '',
-        publication_date: row.listing_time,
+        publication_date_source: row.publication_date_source,
+        publication_date: row.publication_date,
       }) })).filter((row) => row.arrivalDate);
       job.eligible = eligible.length;
       job.skippedMissingListingTime = rows.length - eligible.length;
