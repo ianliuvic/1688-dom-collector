@@ -32,6 +32,9 @@
   .thumb.sel img { border-color: #2563eb; }
   .thumb .type { position: absolute; left: 4px; top: 4px; font-size: 10px; background: rgba(17,24,39,.72); color: #fff; padding: 1px 5px; border-radius: 4px; }
   .thumb .wp { position: absolute; right: 4px; top: 4px; font-size: 10px; background: #16a34a; color: #fff; padding: 1px 5px; border-radius: 4px; }
+  .thumb.rm img { opacity: .55; }
+  .thumb .rm-tag { position: absolute; right: 4px; bottom: 34px; font-size: 10px; background: #6b7280; color: #fff; padding: 1px 5px; border-radius: 4px; }
+  .thumb.preview .rm-tag { bottom: 5px; }
   .thumb .num { position: absolute; left: 4px; bottom: 34px; font-size: 11px; background: #2563eb; color: #fff; padding: 1px 6px; border-radius: 4px; }
   .thumb.preview .num { bottom: 5px; }
   .thumb .ctl { position: absolute; left: 0; right: 0; bottom: 0; display: flex; gap: 3px; padding: 3px; background: rgba(17,24,39,.62); border-radius: 0 0 8px 8px; }
@@ -156,11 +159,12 @@ function renderRow(item) {
     const id = entry.id == null ? '' : String(entry.id);
     const selected = id && item.order.includes(id);
     const num = selected ? position.get(id) : null;
-    return `<div class="thumb ${selected ? 'sel' : ''}" ${selected ? `draggable="true" data-drag-id="${esc(id)}"` : ''}>
+    return `<div class="thumb ${selected ? 'sel' : ''}${entry.removedReason ? ' rm' : ''}" ${selected ? `draggable="true" data-drag-id="${esc(id)}"` : ''}>
       <img src="${esc(entry.thumb || entry.url)}" data-full="${esc(entry.full || entry.url)}"
            data-cap="${esc((TYPE_LABEL[entry.type] || entry.type) + (entry.url ? ' · ' + entry.url : ''))}">
       <span class="type">${esc(TYPE_LABEL[entry.type] || entry.type)}</span>
       ${entry.inWp ? '<span class="wp">WP</span>' : ''}
+      ${entry.removedReason ? `<span class="rm-tag" title="去重已剔除：${esc(entry.removedReason)}">已剔</span>` : ''}
       ${num ? `<span class="num">${num}</span>` : ''}
       <div class="ctl">
         <button data-act="toggle" data-pid="${item.productDetailId}" data-id="${esc(id)}" data-web="${entry.web ? 1 : ''}" data-url="${esc(entry.url || '')}"

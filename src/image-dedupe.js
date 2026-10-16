@@ -151,13 +151,17 @@ export async function dedupeImagesWithLlm({ images, title = '', config = {} }) {
   if (candidates.length < 2) return { removed: [], model: config.model ?? null, skipped: true };
   const numbered = candidates.map((image, index) => ({ ...image, number: index + 1 }));
   const prompt = `你是商品图片审核助手，只输出严格JSON。
-下面的图片属于同一个商品（按编号顺序提供）。找出其中"与其他图片重复或几乎相同"的图片：
+下面的图片属于同一个商品（按编号顺序提供）。请挑出两类应删除的图片：
+A. "与其他图片重复或几乎相同"的图片：
 - 同一张图的不同裁剪/压缩、轻微角度或距离差异、同一画面不同拼接，且没有提供新视觉信息的，算重复；
 - **故意放大展示细节的特写/裁剪不算重复**：景别明显更近、聚焦面料纹理、五金配件、印花/走线/做工细节的图片，即使与某张大图同源也必须保留（它们是细节展示图）；
 - 判断标准：这张裁剪是否展示了其它图片里看不清的细节信息？是 → 保留；只是去边、换比例或轻微改动 → 算重复；
 - 确认重复时只保留一张最有代表性的（编号最小的那张），其余列出应删除的编号；
-- 不确定时不要算作重复。
-输出格式：{"duplicates":[{"number":4,"same_as":2,"reason":"同一张图的裁剪版"}]}
+B. "与产品本身无关"的图片（画面里不展示产品、不上身、也没有产品细节）：
+- 尺码表、测量表格、生产流程图、公司/品牌宣传图、物流/批发/起订量说明图、纯文字说明图等 → 删除；
+- 展示产品的图片（模特上身、平铺、产品细节特写）一律保留；
+- 不确定时不要算作重复或无关。
+输出格式：{"duplicates":[{"number":4,"same_as":2,"reason":"同一张图的裁剪版"}],"non_product":[{"number":9,"reason":"尺码表"}]}
 标题：${JSON.stringify(String(title || '').slice(0, 100))}`;
   const content = [
     { type: 'text', text: prompt },
@@ -200,6 +204,17 @@ export async function dedupeImagesWithLlm({ images, title = '', config = {} }) {
     } else {
       removed.push({ imageId: String(numbered[number - 1].id), keptImageId: null, reason: 'llm', note: String(entry?.reason || '').slice(0, 120) });
     }
+  }
+  // Non-product images (size charts, production-flow/business infographics, ...):
+  // never product shots, so they are removed on their own recognisance.
+  for (const entry of Array.isArray(parsed?.non_product) ? parsed.non_product : []) {
+    const number = Number(entry?.number);
+    if (!Number.isInteger(number) || number < 1 || number > numbered.length) continue;
+    if (removed.some((item) => item.imageId === String(numbered[number - 1].id))) continue;
+    removed.push({
+      imageId: String(numbered[number - 1].id), keptImageId: null,
+      reason: 'non-product', note: String(entry?.reason || '').slice(0, 120),
+    });
   }
   return { removed, model: config.model ?? null, considered: numbered.length };
 }

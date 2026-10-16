@@ -1758,7 +1758,7 @@ function renderPublishPreview(id, data){
   const publishInfo = data.images.publish || null;
   const publishFinal = publishInfo ? (publishInfo.final || []) : (data.images.gallery || []);
   const publishExcluded = publishInfo ? (publishInfo.excluded || []) : [];
-  const removedLabel = { exact: '内容完全重复', near: '近似重复', 'same-url': '同一图片 URL', llm: '模型判定冗余', manual: '手动移除' };
+  const removedLabel = { exact: '内容完全重复', near: '近似重复', 'same-url': '同一图片 URL', llm: '模型判定冗余', 'non-product': '非产品图（尺码表/流程图等）', manual: '手动移除' };
   const publishThumbs = '<div class="pp-thumbs pp-thumbs-lg">'
     + publishFinal.map((image) => '<img class="zoomable" src="' + esc(image.thumb) + '" loading="lazy" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-fallback="" alt="">').join('')
     + publishExcluded.map((image) => '<img class="zoomable removed" src="' + esc(image.thumb) + '" title="'
@@ -1783,7 +1783,8 @@ function renderPublishPreview(id, data){
     + (data.images.dedupe
       ? '<div class="pp-muted" style="margin-top:4px">图片去重：剔除 <b>' + (data.images.dedupe.removed || []).length + '</b> 张（精确 '
         + ((data.images.dedupe.counts || {}).exact || 0) + ' / 近似 ' + ((data.images.dedupe.counts || {}).near || 0)
-        + ' / 模型 ' + ((data.images.dedupe.counts || {}).llm || 0) + '）</div>'
+        + ' / 模型 ' + ((data.images.dedupe.counts || {}).llm || 0)
+        + ' / 非产品 ' + ((data.images.dedupe.counts || {}).nonProduct || 0) + '）</div>'
       : '<div class="pp-muted" style="margin-top:4px">图片去重：未运行（发布时仍会做实时精确哈希去重）</div>')
     + '</div>';
   const imagesCard = '<div class="pp-card"><div class="pp-card-title">颜色与尺码（'

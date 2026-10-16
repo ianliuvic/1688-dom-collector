@@ -2405,9 +2405,10 @@ app.post('/api/product-details/:id/image-dedupe', { preHandler: requireDashboard
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   const mode = request.body?.mode === 'hash' ? 'hash' : 'hash+llm';
   const candidates = (detail.images ?? [])
-    .filter((image) => image.image_type === 'main' || image.image_type === 'gallery')
+    .filter((image) => ['main', 'gallery', 'description'].includes(image.image_type))
     .sort((left, right) => (left.image_type !== right.image_type
-      ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)))
+      ? (['main', 'gallery', 'description'].indexOf(left.image_type) - ['main', 'gallery', 'description'].indexOf(right.image_type))
+      : Number(left.sort_order) - Number(right.sort_order)))
     .map((image) => {
       const sourceUrl = /^https:\/\//i.test(image.source_url || '') ? String(image.source_url) : null;
       const base = imagePublicPath(image.storage_path);
@@ -2446,7 +2447,8 @@ app.post('/api/product-details/:id/image-dedupe', { preHandler: requireDashboard
     counts: {
       exact: hashResult.removed.filter((entry) => entry.reason === 'exact').length,
       near: hashResult.removed.filter((entry) => entry.reason === 'near').length,
-      llm: (llm.removed ?? []).length,
+      llm: (llm.removed ?? []).filter((entry) => entry.reason !== 'non-product').length,
+      nonProduct: (llm.removed ?? []).filter((entry) => entry.reason === 'non-product').length,
     },
     updatedAt: new Date().toISOString(),
   };
@@ -3681,6 +3683,8 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
         detail.raw_data?.gallery?.complete !== true).rows.map((entry) => Number(entry.id));
     } catch { working = []; }
     const workingSet = new Set(working);
+    const dedupeRemoved = new Map(((detail.raw_data?.imageDedupe?.removed) ?? [])
+      .map((entry) => [String(entry?.imageId ?? ''), String(entry?.reason ?? 'dedupe')]));
     // The pick pool mirrors the split panel: every stored main/gallery/description
     // image plus detail-page URLs captured in the LinkFox description HTML that
     // were never downloaded (materialize them on first use).
@@ -3698,6 +3702,7 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
         thumb: base ? `${base}?w=160` : thumbOf(source), full: base || fullOf(source),
         selected: workingSet.has(Number(image.id)),
         inWp: Boolean(source && wpSourceKeys.has(normalizedSourceImageKey(source))),
+        removedReason: dedupeRemoved.get(String(image.id)) ?? null,
       });
     }
     for (const match of String(detail.raw_data?.linkfox?.raw?.description ?? '')
@@ -4161,9 +4166,10 @@ function pipelineModelConfig() {
 /** Image dedupe for a regular product's publish image set (gallery + main). */
 async function runRegularDedupeStep(detail) {
   const candidates = (detail.images ?? [])
-    .filter((image) => image.image_type === 'main' || image.image_type === 'gallery')
+    .filter((image) => ['main', 'gallery', 'description'].includes(image.image_type))
     .sort((left, right) => (left.image_type !== right.image_type
-      ? (left.image_type === 'main' ? -1 : 1) : Number(left.sort_order) - Number(right.sort_order)))
+      ? (['main', 'gallery', 'description'].indexOf(left.image_type) - ['main', 'gallery', 'description'].indexOf(right.image_type))
+      : Number(left.sort_order) - Number(right.sort_order)))
     .map((image) => ({
       id: String(image.id), type: image.image_type, sortOrder: Number(image.sort_order) || 0,
       sourceUrl: image.source_url ?? null, storagePath: image.storage_path ?? null,
@@ -4189,7 +4195,8 @@ async function runRegularDedupeStep(detail) {
       exact: hashResult.removed.filter((entry) => entry.reason === 'exact').length,
       near: hashResult.removed.filter((entry) => entry.reason === 'near').length,
       'source-url': hashResult.removed.filter((entry) => entry.reason === 'source-url').length,
-      llm: (llm.removed ?? []).length,
+      llm: (llm.removed ?? []).filter((entry) => entry.reason !== 'non-product').length,
+      nonProduct: (llm.removed ?? []).filter((entry) => entry.reason === 'non-product').length,
     },
     updatedAt: new Date().toISOString(),
   };
