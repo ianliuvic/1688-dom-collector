@@ -4822,6 +4822,93 @@ app.get('/api/pipelines', { preHandler: requireApiKey }, async (request) => db.l
   limit: request.query?.limit, status: request.query?.status ?? null,
 }));
 
+// ---- Full pre-publish chain (the non-shop capture flow) --------------------
+// After a capture, run everything that happens before a WordPress publication:
+// LinkFox merge (real listing date + enrichment) -> detail image download ->
+// unified pipeline with publish:false (bundle judgement/split, variant
+// normalization, image dedupe, English copy). Publishing is deliberately NOT
+// part of this chain — run publish-changes / the publish flow afterwards.
+const prepublishChainJobs = new Map();
+
+app.post('/api/product-details/prepublish-chain', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const body = request.body ?? {};
+  let id = Number(body.id) || 0;
+  if (!id) {
+    const offerId = String(body.offerId ?? '').trim()
+      || String(body.url ?? '').match(/\/offer\/(\d{10,13})\.html/i)?.[1] || '';
+    if (offerId) {
+      const rows = await db.listProductDetails({ offerId, limit: 1 }).catch(() => []);
+      id = Number(rows?.[0]?.id ?? 0);
+    }
+  }
+  if (!Number.isInteger(id) || id <= 0) {
+    return reply.code(404).send({ error: 'detail_not_found',
+      message: 'Capture the product first (product-capture / linkfox-capture), then run this chain.' });
+  }
+  const jobId = crypto.randomUUID();
+  const job = {
+    id: jobId, productDetailId: id, status: 'running', steps: {},
+    createdAt: new Date().toISOString(), startedAt: new Date().toISOString(),
+    completedAt: null, error: null,
+  };
+  prepublishChainJobs.set(jobId, job);
+  trimTerminalJobs(prepublishChainJobs);
+  (async () => {
+    try {
+      const initial = await db.getProductDetail(id);
+      if (!initial) { job.status = 'failed'; job.error = 'detail_not_found'; return; }
+      const blocked = await db.isOfferBlocked(initial.offer_id).catch(() => null);
+      if (blocked) { job.status = 'skipped'; job.error = 'blocked_offer'; return; }
+      // 1) LinkFox merge when the capture carries no LinkFox data yet: the
+      //    createDate is the real 1688 listing date and feeds publication_date.
+      if (body.linkfox === false) {
+        job.steps.linkfox = { skipped: 'disabled' };
+      } else if (initial.raw_data?.linkfox) {
+        job.steps.linkfox = { skipped: 'already_present' };
+      } else if (!config.linkfoxApiKey) {
+        job.steps.linkfox = { skipped: 'linkfox_not_configured' };
+      } else {
+        try {
+          const raw = await fetchLinkFoxProductDetail({ offerId: initial.offer_id }, config);
+          await db.updateProductLinkFoxData(id, linkfoxExtrasForMerge(raw));
+          job.steps.linkfox = { merged: true };
+        } catch (error) {
+          job.steps.linkfox = { failed: String(error?.message || error).slice(0, 200) };
+        }
+      }
+      // 2) Detail (description) images into local storage for the publish pool.
+      try {
+        const images = await ensureDescriptionImages(await db.getProductDetail(id));
+        job.steps.detailImages = { downloaded: images?.downloaded ?? 0, failed: images?.failed ?? 0 };
+      } catch (error) {
+        job.steps.detailImages = { failed: String(error?.message || error).slice(0, 200) };
+      }
+      // 3) Unified pipeline up to (excluding) WordPress publish.
+      const result = await runProductPipeline({
+        productDetailId: id,
+        status: body.status === 'publish' ? 'publish' : 'draft',
+        publish: false,
+        refreshSplit: body.refreshSplit === true,
+      });
+      job.steps.pipeline = {
+        status: result.status, steps: result.run?.steps ?? {},
+        dropped: result.run?.dropped ?? [], errors: result.run?.errors ?? [],
+      };
+      job.status = result.status === 'failed' ? 'failed' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/prepublish-chain-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  return prepublishChainJobs.get(request.params.id) ?? reply.code(404).send({ error: 'not_found' });
+});
+
 // Repair the swatch images of every published split product: re-runs the split
 // publish without any model call so each colour option gets its own uploaded
 // swatch attachment (older split products were published without one).
