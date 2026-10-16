@@ -3588,6 +3588,7 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
   const offset = Number(request.query?.offset) || 0;
   const rows = await db.listGalleryEditorRows({ anchorStyle: anchor, limit, offset });
   const thumbOf = (url) => (url ? `/api/image-thumb?url=${encodeURIComponent(url)}&w=160` : null);
+  const fullOf = (url) => (url ? `/api/image-thumb?url=${encodeURIComponent(url)}&full=1` : null);
   const items = [];
   for (const row of rows) {
     const id = Number(row.product_detail_id);
@@ -3601,7 +3602,7 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
       return {
         index, url: image?.url ?? null, source_url: source,
         attachment_id: image?.attachment_id ?? null, alt: image?.alt ?? '',
-        thumb: thumbOf(source || live), full: live,
+        thumb: thumbOf(source || live), full: fullOf(source || live),
       };
     });
     const wpSourceKeys = new Set(wpImages
@@ -3627,7 +3628,7 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
       const source = /^https?:\/\//i.test(String(image.source_url || '')) ? String(image.source_url) : null;
       pool.push({
         id: String(image.id), type: image.image_type, web: false, url: source,
-        thumb: base ? `${base}?w=160` : thumbOf(source), full: base || source,
+        thumb: base ? `${base}?w=160` : thumbOf(source), full: base || fullOf(source),
         selected: workingSet.has(Number(image.id)),
         inWp: Boolean(source && wpSourceKeys.has(normalizedSourceImageKey(source))),
       });
@@ -3642,7 +3643,7 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
       poolSeen.add(key);
       pool.push({
         id: null, type: 'description-web', web: true, url,
-        thumb: thumbOf(url), full: url, selected: false,
+        thumb: thumbOf(url), full: fullOf(url), selected: false,
         inWp: wpSourceKeys.has(key),
       });
     }
@@ -3661,7 +3662,7 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
         if (image) {
           const base = imagePublicPath(image.storage_path);
           const source = /^https?:\/\//i.test(String(image.source_url || '')) ? String(image.source_url) : null;
-          return { thumb: base ? `${base}?w=160` : thumbOf(source), full: base || source };
+          return { thumb: base ? `${base}?w=160` : thumbOf(source), full: base || fullOf(source) };
         }
       }
       const byAttachment = wpImages.find((image) => image.attachment_id != null
@@ -3673,7 +3674,7 @@ app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, as
       if (option?.imageUrl) {
         const stored = storedByKey.get(normalizedSourceImageKey(option.imageUrl));
         const base = stored ? imagePublicPath(stored.storage_path) : null;
-        return { thumb: base ? `${base}?w=160` : thumbOf(option.imageUrl), full: base || option.imageUrl };
+        return { thumb: base ? `${base}?w=160` : thumbOf(option.imageUrl), full: base || fullOf(option.imageUrl) };
       }
       return { thumb: null, full: null };
     };
@@ -7844,6 +7845,7 @@ app.get('/api/image-thumb', async (request, reply) => {
     return reply.code(400).send({ error: 'invalid_url' });
   }
   const requestedWidth = Number(request.query?.w);
+  const full = ['1', 'true'].includes(String(request.query?.full ?? ''));
   const width = Math.min(Math.max(Math.round(Number.isFinite(requestedWidth) && requestedWidth > 0
     ? requestedWidth : 160), 16), 480);
   if (!THUMB_PROXY_HOSTS.has(target.hostname.toLowerCase())) {
@@ -7851,7 +7853,7 @@ app.get('/api/image-thumb', async (request, reply) => {
     return reply.redirect(target.href);
   }
   const cacheDir = path.resolve(config.storagePath, 'image-thumbs');
-  const cacheKey = crypto.createHash('sha256').update(`${width}|${target.href}`).digest('hex');
+  const cacheKey = crypto.createHash('sha256').update(`${full ? 'full' : width}|${target.href}`).digest('hex');
   const cachePath = path.join(cacheDir, `${cacheKey}.webp`);
   let bytes;
   try {
@@ -7867,10 +7869,18 @@ app.get('/api/image-thumb', async (request, reply) => {
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const source = Buffer.from(await response.arrayBuffer());
-      bytes = await sharp(source, { failOn: 'none' })
-        .resize({ width, withoutEnlargement: true })
-        .webp({ quality: 72 })
-        .toBuffer();
+      // `full=1` is the lightbox mode: near-original size, higher quality. The
+      // browser cannot load these CDN URLs directly (hotlink protection), so
+      // large previews go through this proxy as well.
+      bytes = full
+        ? await sharp(source, { failOn: 'none' })
+          .resize({ width: 2400, withoutEnlargement: true })
+          .webp({ quality: 85 })
+          .toBuffer()
+        : await sharp(source, { failOn: 'none' })
+          .resize({ width, withoutEnlargement: true })
+          .webp({ quality: 72 })
+          .toBuffer();
       await fs.mkdir(cacheDir, { recursive: true });
       await fs.writeFile(cachePath, bytes);
     } catch (error) {

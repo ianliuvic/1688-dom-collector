@@ -313,7 +313,7 @@ function openPicker(item, source) {
   $('#picker-cap').textContent = `${item.styleNo || ''} · ${source}`;
   $('#picker-url').value = '';
   $('#picker-grid').innerHTML = item.pool.map((entry) => `
-    <div class="thumb" data-pick-id="${esc(entry.id ?? '')}" data-pick-url="${esc(entry.url || entry.full || '')}">
+    <div class="thumb" data-pick-id="${esc(entry.id ?? '')}" data-pick-url="${esc(entry.url || entry.full || '')}" data-pick-full="${esc(entry.full || '')}">
       <img src="${esc(entry.thumb || entry.url)}" alt="">
       <span class="type">${esc(TYPE_LABEL[entry.type] || entry.type)}</span>
     </div>`).join('');
@@ -326,6 +326,7 @@ $('#picker-grid').addEventListener('click', (event) => {
   pickerState.pick = {
     id: cell.dataset.pickId || null,
     url: cell.dataset.pickUrl || null,
+    full: cell.dataset.pickFull || null,
     thumb: cell.querySelector('img')?.src || null,
   };
   $('#picker-grid').querySelectorAll('.thumb').forEach((el) => el.classList.remove('picked'));
@@ -440,7 +441,8 @@ $('#picker-ok').addEventListener('click', async () => {
     if (swatch) {
       swatch.thumb = pickerState.pick?.thumb
         || (url ? `/api/image-thumb?url=${encodeURIComponent(url)}&w=160` : swatch.thumb);
-      swatch.full = pickerState.pick?.url || url || swatch.full;
+      swatch.full = pickerState.pick?.full
+        || (url ? `/api/image-thumb?url=${encodeURIComponent(url)}&full=1` : swatch.full);
     }
     $('#picker').classList.add('hidden');
     render();
