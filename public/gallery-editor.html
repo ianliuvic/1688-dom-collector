@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gallery 优化 · 已发布产品</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #f4f5f7; color: #1f2430; }
+  header { position: sticky; top: 0; z-index: 20; background: #fff; border-bottom: 1px solid #e2e5ea; padding: 10px 16px; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .toolbar input, .toolbar select { padding: 5px 8px; border: 1px solid #c9ced6; border-radius: 6px; font-size: 13px; }
+  .toolbar button, .row-actions button { padding: 6px 12px; border: 1px solid #c9ced6; border-radius: 6px; background: #fff; cursor: pointer; font-size: 13px; }
+  .toolbar button:hover, .row-actions button:hover { background: #eef1f5; }
+  .toolbar button.primary, .row-actions button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .toolbar button.primary:hover, .row-actions button.primary:hover { background: #1d4ed8; }
+  #pageinfo { color: #6b7280; }
+  main { padding: 14px 16px 60px; display: flex; flex-direction: column; gap: 16px; }
+  .card { background: #fff; border: 1px solid #e2e5ea; border-radius: 10px; padding: 12px 14px; }
+  .row-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .style { font-weight: 700; font-size: 15px; }
+  .muted { color: #6b7280; font-size: 12px; }
+  .row-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .status { font-size: 12px; min-width: 160px; }
+  .status.ok { color: #15803d; }
+  .status.err { color: #b91c1c; }
+  .strip-title { margin: 10px 0 6px; font-size: 12px; font-weight: 600; color: #4b5563; }
+  .strip { display: flex; flex-wrap: wrap; gap: 8px; }
+  .thumb { position: relative; width: 108px; }
+  .thumb img { width: 108px; height: 108px; object-fit: cover; border-radius: 8px; border: 2px solid transparent; background: #eceff3; cursor: zoom-in; display: block; }
+  .thumb.sel img { border-color: #2563eb; }
+  .thumb .type { position: absolute; left: 4px; top: 4px; font-size: 10px; background: rgba(17,24,39,.72); color: #fff; padding: 1px 5px; border-radius: 4px; }
+  .thumb .wp { position: absolute; right: 4px; top: 4px; font-size: 10px; background: #16a34a; color: #fff; padding: 1px 5px; border-radius: 4px; }
+  .thumb .num { position: absolute; left: 4px; bottom: 34px; font-size: 11px; background: #2563eb; color: #fff; padding: 1px 6px; border-radius: 4px; }
+  .thumb .ctl { position: absolute; left: 0; right: 0; bottom: 0; display: flex; gap: 3px; padding: 3px; background: rgba(17,24,39,.62); border-radius: 0 0 8px 8px; }
+  .thumb .ctl button { flex: 1; border: 0; border-radius: 4px; background: rgba(255,255,255,.92); font-size: 11px; padding: 2px 0; cursor: pointer; }
+  .thumb .ctl button.on { background: #2563eb; color: #fff; }
+  .thumb .ctl button:disabled { opacity: .45; cursor: default; }
+  .swatch { width: 108px; text-align: center; font-size: 11px; color: #4b5563; }
+  .swatch img { width: 72px; height: 72px; object-fit: cover; border-radius: 50%; border: 1px solid #d7dbe2; cursor: zoom-in; background: #eceff3; }
+  .swatch .noimg { width: 72px; height: 72px; border-radius: 50%; background: #eceff3; margin: 0 auto; }
+  #lightbox { position: fixed; inset: 0; background: rgba(10,12,18,.86); display: flex; align-items: center; justify-content: center; flex-direction: column; z-index: 100; cursor: zoom-out; }
+  #lightbox.hidden { display: none; }
+  #lightbox img { max-width: 92vw; max-height: 84vh; border-radius: 6px; }
+  #lightbox-cap { color: #d9dee7; font-size: 12px; margin-top: 10px; }
+  .empty { color: #6b7280; padding: 30px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Gallery 优化工作台（临时）· 按 New Arrivals 排序从锚点款往后</h1>
+  <div class="toolbar">
+    <label>起点款号 <input id="anchor" value="SWOP288" size="10"></label>
+    <label>每页 <select id="limit"><option>5</option><option selected>10</option><option>20</option></select></label>
+    <button id="load" class="primary">载入</button>
+    <button id="prev">上一页</button>
+    <button id="next">下一页</button>
+    <span id="pageinfo"></span>
+  </div>
+</header>
+<main id="rows"><div class="empty">载入中…</div></main>
+<div id="lightbox" class="hidden"><img id="lightbox-img" alt=""><div id="lightbox-cap"></div></div>
+<script>
+const $ = (selector, root = document) => root.querySelector(selector);
+const state = { anchor: 'SWOP288', limit: 10, offset: 0, total: 0, items: [] };
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+function openLightbox(full, caption) {
+  $('#lightbox-img').src = full;
+  $('#lightbox-cap').textContent = caption || '';
+  $('#lightbox').classList.remove('hidden');
+}
+$('#lightbox').addEventListener('click', () => $('#lightbox').classList.add('hidden'));
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') $('#lightbox').classList.add('hidden');
+});
+
+const TYPE_LABEL = { main: '主图', gallery: '图库', description: '详情图', 'description-web': '详情图·未下载' };
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: { 'content-type': 'application/json' },
+    ...options,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.message || payload?.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+function setStatus(item, text, kind = '') {
+  const el = document.querySelector(`[data-status="${item.productDetailId}"]`);
+  if (el) { el.textContent = text; el.className = `status ${kind}`; }
+}
+
+function orderedSelection(item) {
+  const byId = new Map(item.pool.filter((entry) => entry.id != null).map((entry) => [String(entry.id), entry]));
+  const picked = item.order.filter((id) => byId.has(String(id)));
+  const rest = item.pool.filter((entry) => !picked.includes(String(entry.id)));
+  return { picked: picked.map((id) => byId.get(String(id))), rest };
+}
+
+function renderRow(item) {
+  const { picked, rest } = orderedSelection(item);
+  const position = new Map(picked.map((entry, index) => [String(entry.id), index + 1]));
+  const poolThumb = (entry) => {
+    const id = entry.id == null ? '' : String(entry.id);
+    const selected = id && item.order.includes(id);
+    const num = selected ? position.get(id) : null;
+    return `<div class="thumb ${selected ? 'sel' : ''}">
+      <img src="${esc(entry.thumb || entry.url)}" data-full="${esc(entry.full || entry.url)}"
+           data-cap="${esc((TYPE_LABEL[entry.type] || entry.type) + (entry.url ? ' · ' + entry.url : ''))}">
+      <span class="type">${esc(TYPE_LABEL[entry.type] || entry.type)}</span>
+      ${entry.inWp ? '<span class="wp">WP</span>' : ''}
+      ${num ? `<span class="num">${num}</span>` : ''}
+      <div class="ctl">
+        <button data-act="toggle" data-pid="${item.productDetailId}" data-id="${esc(id)}" data-web="${entry.web ? 1 : ''}" data-url="${esc(entry.url || '')}"
+                class="${selected ? 'on' : ''}">${selected ? '已选' : '选'}</button>
+        <button data-act="left" data-pid="${item.productDetailId}" data-id="${esc(id)}" ${selected && num > 1 ? '' : 'disabled'}>◀</button>
+        <button data-act="right" data-pid="${item.productDetailId}" data-id="${esc(id)}" ${selected && num < picked.length ? '' : 'disabled'}>▶</button>
+      </div>
+    </div>`;
+  };
+  return `<div class="card" data-row="${item.productDetailId}">
+    <div class="row-head">
+      <span class="style">${esc(item.styleNo || '—')}</span>
+      <span>${esc(item.title)}</span>
+      <span class="muted">${esc((item.publicationDate || '').slice(0, 10))} · #${esc(item.wpPostId)}</span>
+      ${item.wpUrl ? `<a class="muted" href="${esc(item.wpUrl)}" target="_blank" rel="noreferrer">WP 页面 ↗</a>` : ''}
+      <div class="row-actions">
+        <span class="status" data-status="${item.productDetailId}"></span>
+        <button data-act="reset" data-pid="${item.productDetailId}">恢复默认</button>
+        <button data-act="save" data-pid="${item.productDetailId}">保存选图</button>
+        <button data-act="publish" data-pid="${item.productDetailId}" class="primary">发布到 WP</button>
+      </div>
+    </div>
+    <div class="strip-title">已发布到 WP 的 Gallery（${item.wpImages.length} 张 · 点击看大图）</div>
+    <div class="strip">${item.wpImages.map((image) => `
+      <div class="thumb"><img src="${esc(image.thumb || image.url)}" data-full="${esc(image.full || image.url)}"
+        data-cap="${esc(image.source_url || image.url || '')}"></div>`).join('') || '<span class="muted">（无）</span>'}</div>
+    <div class="strip-title">Swatch（颜色名 + 色卡）</div>
+    <div class="strip">${item.swatches.map((swatch) => `
+      <div class="swatch">${swatch.thumb
+        ? `<img src="${esc(swatch.thumb)}" data-full="${esc(swatch.full || swatch.thumb)}" data-cap="${esc(swatch.label)}">`
+        : '<div class="noimg"></div>'}
+        <div>${esc(swatch.label)}${swatch.code ? ` <span class="muted">${esc(swatch.code)}</span>` : ''}</div></div>`).join('') || '<span class="muted">（无）</span>'}</div>
+    <div class="strip-title">1688 原图池 · 点缩略图看大图，角标「选/已选」切换，◀ ▶ 调顺序（蓝框=当前选中，绿 WP=已在 WP 上）</div>
+    <div class="strip">${picked.map(poolThumb).join('')}${rest.map(poolThumb).join('')}</div>
+  </div>`;
+}
+
+function render() {
+  $('#rows').innerHTML = state.items.map(renderRow).join('') || '<div class="empty">没有产品</div>';
+  $('#pageinfo').textContent = state.total
+    ? `第 ${state.offset + 1}–${state.offset + state.items.length} 条 / 共 ${state.total} 条（锚点日期 ${String(state.anchorDate || '').slice(0, 10)}）`
+    : '';
+}
+
+async function load() {
+  $('#rows').innerHTML = '<div class="empty">载入中…</div>';
+  try {
+    const data = await api(`/api/gallery-editor/rows?anchor=${encodeURIComponent(state.anchor)}&limit=${state.limit}&offset=${state.offset}`);
+    state.total = data.total || 0;
+    state.anchorDate = data.anchorDate;
+    state.items = (data.items || []).map((item) => ({ ...item, order: [...(item.working || [])], dirty: false }));
+    render();
+  } catch (error) {
+    $('#rows').innerHTML = `<div class="empty">载入失败：${esc(error.message)}</div>`;
+  }
+}
+
+function itemOf(pid) { return state.items.find((entry) => entry.productDetailId === Number(pid)); }
+
+async function saveItem(item) {
+  const order = item.order.filter((id) => id != null);
+  if (!order.length) throw new Error('至少保留一张图');
+  await api(`/api/product-details/${item.productDetailId}/publish-images`, { method: 'PUT', body: { order } });
+  item.dirty = false;
+}
+
+document.addEventListener('click', async (event) => {
+  const img = event.target.closest('img[data-full]');
+  if (img) { openLightbox(img.dataset.full, img.dataset.cap); return; }
+  const button = event.target.closest('button[data-act]');
+  if (!button) return;
+  const item = itemOf(button.dataset.pid);
+  if (!item) return;
+  const act = button.dataset.act;
+  try {
+    if (act === 'toggle') {
+      const id = button.dataset.id;
+      if (!id && button.dataset.web) {
+        setStatus(item, '下载中…');
+        const saved = await api(`/api/product-details/${item.productDetailId}/publish-images/materialize`,
+          { method: 'POST', body: { url: button.dataset.url } });
+        const entry = item.pool.find((pool) => pool.url === button.dataset.url && pool.web);
+        if (entry) { entry.id = String(saved.imageId); entry.web = false; entry.thumb = saved.thumb || entry.thumb; }
+        item.order.push(String(saved.imageId));
+        item.dirty = true;
+      } else if (item.order.includes(id)) {
+        item.order = item.order.filter((value) => value !== id);
+        item.dirty = true;
+      } else {
+        item.order.push(id);
+        item.dirty = true;
+      }
+      render();
+    } else if (act === 'left' || act === 'right') {
+      const id = button.dataset.id;
+      const index = item.order.indexOf(id);
+      const target = act === 'left' ? index - 1 : index + 1;
+      if (index >= 0 && target >= 0 && target < item.order.length) {
+        item.order.splice(target, 0, item.order.splice(index, 1)[0]);
+        item.dirty = true;
+        render();
+      }
+    } else if (act === 'save') {
+      setStatus(item, '保存中…');
+      await saveItem(item);
+      setStatus(item, '选图已保存', 'ok');
+    } else if (act === 'publish') {
+      setStatus(item, '同步 WP 中…');
+      if (item.dirty) await saveItem(item);
+      const result = await api(`/api/product-details/${item.productDetailId}/publish-changes`, { method: 'POST' });
+      const wp = result.wp || {};
+      setStatus(item, `已发布：${(wp.images ?? []).length} 张（+${wp.imagesAdded ?? 0}/-${wp.imagesRemoved ?? 0}）`, 'ok');
+    } else if (act === 'reset') {
+      setStatus(item, '重置中…');
+      await api(`/api/product-details/${item.productDetailId}/publish-images`, { method: 'PUT', body: { reset: true } });
+      await load();
+    }
+  } catch (error) {
+    setStatus(item, `失败：${error.message}`, 'err');
+  }
+});
+
+$('#load').addEventListener('click', () => {
+  state.anchor = $('#anchor').value.trim() || 'SWOP288';
+  state.limit = Number($('#limit').value) || 10;
+  state.offset = 0;
+  load();
+});
+$('#prev').addEventListener('click', () => {
+  state.offset = Math.max(0, state.offset - state.limit);
+  load();
+});
+$('#next').addEventListener('click', () => {
+  if (state.offset + state.limit < state.total) { state.offset += state.limit; load(); }
+});
+
+load();
+</script>
+</body>
+</html>

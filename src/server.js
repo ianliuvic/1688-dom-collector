@@ -3572,6 +3572,106 @@ app.post('/api/product-details/:id/publish-changes', { preHandler: requireDashbo
   }
 });
 
+// ---- Gallery optimization workbench (temporary page, same level as /products) ----
+// Review and replace the published WordPress gallery of already-published
+// products from the captured 1688 gallery/detail images, then sync through the
+// normal publish-changes flow so the payload, RAG and manual-edit log stay
+// consistent with /products.
+app.get('/gallery-editor', { preHandler: requireDashboardAuth }, async (_request, reply) => {
+  const html = await fs.readFile(new URL('../public/gallery-editor.html', import.meta.url), 'utf8');
+  return reply.type('text/html; charset=utf-8').send(html);
+});
+
+app.get('/api/gallery-editor/rows', { preHandler: requireDashboardOrApiKey }, async (request) => {
+  const anchor = String(request.query?.anchor ?? '').trim().slice(0, 64);
+  const limit = Number(request.query?.limit) || 10;
+  const offset = Number(request.query?.offset) || 0;
+  const rows = await db.listGalleryEditorRows({ anchorStyle: anchor, limit, offset });
+  const thumbOf = (url) => (url ? `/api/image-thumb?url=${encodeURIComponent(url)}&w=160` : null);
+  const items = [];
+  for (const row of rows) {
+    const id = Number(row.product_detail_id);
+    const detail = await db.getProductDetail(id);
+    if (!detail) continue;
+    const translation = await db.getLatestProductTranslation(id, 'en');
+    const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+    const wpImages = (Array.isArray(payload.images) ? payload.images : []).map((image, index) => {
+      const source = /^https?:\/\//i.test(String(image?.source_url || '')) ? String(image.source_url) : null;
+      const live = String(image?.url || image?.source_url || '') || null;
+      return {
+        index, url: image?.url ?? null, source_url: source,
+        attachment_id: image?.attachment_id ?? null, alt: image?.alt ?? '',
+        thumb: thumbOf(source || live), full: live,
+      };
+    });
+    const wpSourceKeys = new Set(wpImages
+      .map((image) => normalizedSourceImageKey(image.source_url))
+      .filter(Boolean));
+    let working = [];
+    try {
+      working = resolvePublishImagesDetailed(detail, translation, 'translated',
+        detail.raw_data?.gallery?.complete !== true).rows.map((entry) => Number(entry.id));
+    } catch { working = []; }
+    const workingSet = new Set(working);
+    // The pick pool mirrors the split panel: every stored main/gallery/description
+    // image plus detail-page URLs captured in the LinkFox description HTML that
+    // were never downloaded (materialize them on first use).
+    const pool = [];
+    const poolSeen = new Set();
+    for (const image of detail.images ?? []) {
+      if (image.image_type === 'sku') continue;
+      const key = normalizedSourceImageKey(image.source_url) || `id:${image.id}`;
+      if (poolSeen.has(key)) continue;
+      poolSeen.add(key);
+      const base = imagePublicPath(image.storage_path);
+      const source = /^https?:\/\//i.test(String(image.source_url || '')) ? String(image.source_url) : null;
+      pool.push({
+        id: String(image.id), type: image.image_type, web: false, url: source,
+        thumb: base ? `${base}?w=160` : thumbOf(source), full: base || source,
+        selected: workingSet.has(Number(image.id)),
+        inWp: Boolean(source && wpSourceKeys.has(normalizedSourceImageKey(source))),
+      });
+    }
+    for (const match of String(detail.raw_data?.linkfox?.raw?.description ?? '')
+      .matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) {
+      let url = match[1].trim();
+      if (url.startsWith('//')) url = `https:${url}`;
+      if (!/^https:\/\//i.test(url)) continue;
+      const key = normalizedSourceImageKey(url);
+      if (!key || poolSeen.has(key)) continue;
+      poolSeen.add(key);
+      pool.push({
+        id: null, type: 'description-web', web: true, url,
+        thumb: thumbOf(url), full: url, selected: false,
+        inWp: wpSourceKeys.has(key),
+      });
+    }
+    const swatches = (payload.colors?.colors ?? []).map((color) => {
+      const match = wpImages.find((image) => image.attachment_id != null
+        && Number(image.attachment_id) === Number(color?.image_id));
+      return {
+        label: String(color?.label ?? color?.value ?? ''), code: String(color?.code ?? ''),
+        thumb: match?.thumb ?? null, full: match?.full ?? null,
+      };
+    });
+    items.push({
+      productDetailId: id,
+      styleNo: row.style_no ?? payload.style_no ?? null,
+      title: row.title ?? detail.title ?? '',
+      wpPostId: row.wp_post_id ?? null,
+      wpUrl: row.wp_url ?? null,
+      publicationDate: row.publication_date ?? null,
+      publicationDateSource: row.publication_date_source ?? null,
+      wpImages, swatches, pool, working,
+      manualEdits: detail.raw_data?.publishImages ?? null,
+    });
+  }
+  return {
+    anchor: anchor || null, anchorDate: rows[0]?.anchor_date ?? null,
+    total: rows[0]?.total ?? 0, limit, offset, items,
+  };
+});
+
 // Publish the split products of published bundles: the original post is updated
 // with its best-matching split product (same URL/style number), the remaining
 // split products are created as NEW drafts with their own style numbers and

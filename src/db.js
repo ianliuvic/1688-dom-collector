@@ -1918,6 +1918,41 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  /**
+   * Gallery workbench rows: published products in New Arrivals order (listing
+   * date descending), from the anchor style's position onward. Returns the
+   * stored WordPress payload so the page can show the live gallery/swatches.
+   */
+  async function listGalleryEditorRows({ anchorStyle = '', limit = 10, offset = 0 } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 10, 1), 50);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const anchor = String(anchorStyle || '').trim().slice(0, 64).toUpperCase();
+    const result = await pool.query(`
+      WITH base AS (
+        SELECT publications.product_detail_id, publications.wp_post_id, publications.external_id,
+          publications.wp_status, publications.wp_url, publications.payload,
+          upper(coalesce(publications.payload->>'style_no', '')) AS style_key,
+          coalesce(publications.payload->>'title', details.title) AS title,
+          ${publicationDateColumnsSql('details')}
+        FROM product_wordpress_publications publications
+        JOIN product_details details ON details.id = publications.product_detail_id
+        WHERE publications.wp_post_id IS NOT NULL AND publications.wp_status = 'publish'
+      ), anchored AS (
+        SELECT base.*,
+          COALESCE(
+            (SELECT b.publication_date FROM base b WHERE b.style_key = $1 LIMIT 1),
+            (SELECT max(b.publication_date) FROM base b)
+          ) AS anchor_date
+        FROM base
+      )
+      SELECT *, count(*) OVER()::int AS total
+      FROM anchored
+      WHERE publication_date <= anchor_date
+      ORDER BY publication_date DESC NULLS LAST, product_detail_id DESC
+      LIMIT $2 OFFSET $3`, [anchor, safeLimit, safeOffset]);
+    return result.rows;
+  }
+
   async function saveWordPressArrivalDate(productDetailId, arrivalDate) {
     const result = await pool.query(`UPDATE product_wordpress_publications
       SET payload=jsonb_set(COALESCE(payload, '{}'::jsonb), '{meta,arrival_date}', to_jsonb($2::text), true),
@@ -3566,7 +3601,7 @@ export function createDatabase(databaseUrl) {
     recoverPendingProductAudits,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
     getWordPressPublication, resolveWordPressPublication, findShopifySource, getShopifyPublication,
-    saveShopifyPublication, listWordPressPublicationDates, listWordPressArrivalDates,
+    saveShopifyPublication, listWordPressPublicationDates, listWordPressArrivalDates, listGalleryEditorRows,
     saveWordPressArrivalDate, auditAndRepairProductPrices,
     saveWordPressPublication, applyWordpressPostStatus, recordWordpressStatusEvent,
     listWordpressStatusReconcileTargets, listSplitContentWpPostEntries,
