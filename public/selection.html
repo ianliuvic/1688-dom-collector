@@ -65,6 +65,8 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 .portal-actions button.danger{border:1px solid var(--danger);background:#fff;color:var(--danger);border-radius:8px;padding:5px 14px;font-size:12.5px;cursor:pointer}
 .portal-actions button.danger:hover{background:#fef3f2}
 .portal-actions button.danger:disabled{opacity:.55;cursor:default}
+.portal-actions button.reset{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:8px;padding:5px 14px;font-size:12.5px;cursor:pointer}
+.portal-actions button.reset:hover{background:var(--bg)}
 .vi-block{margin:2px 0 10px}
 .vi-block h5{margin:2px 0 4px;font-size:12px}
 .vi-row{display:flex;align-items:center;gap:8px;margin-bottom:5px}
@@ -430,10 +432,11 @@ function portalPanelHtml(id) {
     : '';
   return '<div class="portal-panel" data-portal-panel="' + esc(id) + '">' +
     '<h4>发布到 Portal <span class="portal-msg">（' + stateText + '）</span></h4>' +
-    '<div class="portal-note">勾选要发布到 Portal 的图片（共 ' + draft.images.length + ' 张，已选 ' + selected + ' 张）；默认与 WP 产品图一致，1688 详情图默认不勾选（带「详情」标记，勾选后会在发布时自动下载）；拖拽图片或用 ◀ ▶ 调整顺序，顺序即 Portal 客户侧的展示顺序；未勾选的图片不会展示。</div>' +
+    '<div class="portal-note">勾选要发布到 Portal 的图片（共 ' + draft.images.length + ' 张，已选 ' + selected + ' 张）；' + (draft.portal && draft.portal.productId ? '已发布产品会保留上次选择，可点「恢复 WP 默认」重新套用 WP 产品图；' : '默认与 WP 产品图一致；') + '1688 详情图默认不勾选（带「详情」标记，勾选后会在发布时自动下载）；拖拽图片或用 ◀ ▶ 调整顺序，顺序即 Portal 客户侧的展示顺序；未勾选的图片不会展示。</div>' +
     (draft.images.length ? '<div class="portal-grid">' + tiles + '</div>' : '<div class="empty">该产品没有可选图片</div>') +
     variantSection +
     '<div class="portal-actions">' +
+      '<button type="button" class="reset" data-portal-reset="' + esc(id) + '"' + (draft.saving ? ' disabled' : '') + '>恢复 WP 默认</button>' +
       '<button type="button" class="primary" data-portal-publish="' + esc(id) + '"' + (draft.saving ? ' disabled' : '') + '>' +
         (draft.saving ? '发布中…' : portal && portal.productId && !isArchived ? '更新发布到 Portal' : portal && portal.productId ? '重新发布到 Portal' : '发布到 Portal') + '</button>' +
       (portal && portal.productId && !isArchived ? '<button type="button" class="danger" data-portal-unpublish="' + esc(id) + '"' + (draft.saving ? ' disabled' : '') + '>从 Portal 移除（归档）</button>' : '') +
@@ -563,6 +566,25 @@ document.addEventListener('click', (event) => {
     const [item] = draft.images.splice(index, 1);
     draft.images.splice(next, 0, item);
     refreshPortalSlot(id);
+    return;
+  }
+  const reset = event.target.closest('button[data-portal-reset]');
+  if (reset) {
+    const panel = reset.closest('[data-portal-panel]');
+    const id = panel ? panel.dataset.portalPanel : null;
+    const draft = id ? portalDrafts[id] : null;
+    if (draft) {
+      for (const image of draft.images) image.visible = image.kind === 'wp';
+      draft.images.sort((left, right) => (left.kind === 'wp' ? 0 : 1) - (right.kind === 'wp' ? 0 : 1));
+      const next = {};
+      for (const colour of draft.colours) {
+        if (colour.wpSwatchImage) next[colour.color] = colour.wpSwatchImage;
+      }
+      draft.variantImages = next;
+      draft.message = '已恢复 WP 默认图片和 swatch；点击发布后生效';
+      draft.error = '';
+      refreshPortalSlot(id);
+    }
     return;
   }
   const publish = event.target.closest('button[data-portal-publish]');
