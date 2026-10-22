@@ -6495,6 +6495,18 @@ app.get('/api/spanish-backfill-jobs/:id', { preHandler: requireDashboardOrApiKey
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
+app.post('/api/product-details/:id/spanish/push', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  const english = await db.getLatestProductTranslation(detail.id, 'en');
+  if (!english) return reply.code(409).send({ error: 'english_translation_required' });
+  const spanish = await ensureSpanishTranslation(detail, english);
+  const pushed = await saveSpanishPayloadForPublication(detail, english, spanish.translation);
+  if (!pushed.saved) return reply.code(409).send({ error: pushed.reason || 'wordpress_post_missing' });
+  return { ok: true, product_detail_id: detail.id, translation_id: spanish.translation.id,
+    created: spanish.created, wordpress: pushed.result };
+});
+
 function wordpressPublishOptions(body = {}) {
   const allowedStatuses = new Set(['draft', 'pending', 'publish', 'private']);
   const status = allowedStatuses.has(body.status) ? body.status : 'draft';
