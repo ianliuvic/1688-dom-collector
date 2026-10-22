@@ -146,7 +146,8 @@ function modelTranslationConfig() {
     baseUrl: config.modelBaseUrl,
     complexModel: config.complexModel,
     storagePath: config.storagePath,
-    reasoningEffort: config.reasoningEffort,
+    // Spanish is a structured text-to-text pass; high reasoning only adds latency.
+    reasoningEffort: process.env.SPANISH_TRANSLATION_REASONING_EFFORT || 'low',
     maxTranslationImages: config.translationImageLimit,
     modelImageTransport: config.modelImageTransport,
   };
