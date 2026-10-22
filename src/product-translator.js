@@ -334,3 +334,168 @@ description必须是35至120个英文单词的单段产品级描述。只写多�
       translation: translationAttempt.payload.usage ?? null },
   };
 }
+
+function englishTranslationSource(english) {
+  const row = english || {};
+  const stored = row.translated_data && typeof row.translated_data === 'object'
+    ? row.translated_data : {};
+  const text = (key, column) => String(row[column] ?? stored[key] ?? '').trim();
+  const array = (column, key) => (Array.isArray(row[column]) ? row[column]
+    : (Array.isArray(stored[key]) ? stored[key] : []));
+  return {
+    title: text('title', 'title'),
+    description: text('description', 'description'),
+    sellerName: text('sellerName', 'seller_name'),
+    attributes: array('attributes', 'attributes').map((item, index) => ({
+      index, name: item?.name ?? '', value: item?.value ?? '',
+    })),
+    skuDimensions: array('sku_dimensions', 'skuDimensions').map((item, index) => ({
+      index, name: item?.name ?? '', values: Array.isArray(item?.values) ? item.values : [],
+    })),
+    skuOptions: array('sku_options', 'skuOptions').map((item, index) => ({
+      index, dimensionName: item?.dimensionName ?? '', text: item?.text ?? '',
+      imageUrl: item?.imageUrl ?? item?.image ?? null,
+    })),
+    skuRows: array('sku_rows', 'skuRows').map((item, index) => ({
+      index, skuKey: item?.skuKey ?? item?.sku_key ?? '',
+      skuText: item?.skuText ?? item?.sku_text ?? '',
+      options: item?.options && typeof item.options === 'object' ? item.options : {},
+    })),
+    priceTextCandidates: Array.isArray(row.price_text_candidates) ? row.price_text_candidates
+      : (Array.isArray(stored.priceTextCandidates) ? stored.priceTextCandidates : []),
+  };
+}
+
+function validateSpanishTranslation(source, translated) {
+  if (!translated || typeof translated !== 'object') {
+    throw new Error('Spanish translation response is not a JSON object.');
+  }
+  if (typeof translated.title !== 'string' || typeof translated.description !== 'string'
+      || typeof translated.sellerName !== 'string') {
+    throw new Error('Spanish translation response is missing required text fields.');
+  }
+  for (const key of ['attributes', 'skuDimensions', 'skuOptions', 'skuRows']) {
+    if (!hasMatchingIndices(source[key], translated[key])) {
+      throw new Error(`Spanish translation response does not preserve ${key} indices.`);
+    }
+  }
+  if (!Array.isArray(translated.priceTextCandidates)
+      || translated.priceTextCandidates.length !== source.priceTextCandidates.length
+      || translated.priceTextCandidates.some((value) => typeof value !== 'string')) {
+    throw new Error('Spanish translation response does not preserve price text candidates.');
+  }
+  for (const [index, dimension] of source.skuDimensions.entries()) {
+    if (!Array.isArray(translated.skuDimensions[index]?.values)
+        || translated.skuDimensions[index].values.length !== dimension.values.length) {
+      throw new Error(`Spanish translation response does not preserve SKU dimension ${index} values.`);
+    }
+  }
+  for (const [index, item] of translated.attributes.entries()) {
+    if (typeof item.name !== 'string' || typeof item.value !== 'string') {
+      throw new Error(`Spanish translation response has invalid attribute ${index}.`);
+    }
+  }
+  for (const [index, item] of translated.skuOptions.entries()) {
+    if (typeof item.text !== 'string'
+        || item.dimensionName !== source.skuOptions[index].dimensionName
+        || item.imageUrl !== source.skuOptions[index].imageUrl) {
+      throw new Error(`Spanish translation response changed SKU option identity ${index}.`);
+    }
+  }
+  for (const [index, item] of translated.skuRows.entries()) {
+    if (item.skuKey !== source.skuRows[index].skuKey || typeof item.skuText !== 'string'
+        || !item.options || typeof item.options !== 'object' || Array.isArray(item.options)) {
+      throw new Error(`Spanish translation response changed SKU row identity ${index}.`);
+    }
+  }
+  const title = translated.title.trim();
+  const description = translated.description.trim();
+  if (/[\u3400-\u9fff]/.test(title) || /[\u3400-\u9fff]/.test(description)) {
+    throw new Error('Spanish translation contains Chinese characters.');
+  }
+  if (title.length < 4 || title.length > 160) {
+    throw new Error('Spanish product title must be 4 to 160 characters.');
+  }
+  if (description.length < 40 || description.length > 2200) {
+    throw new Error('Spanish product description must be 40 to 2200 characters.');
+  }
+  return translated;
+}
+
+/**
+ * Translate the already-generated English catalog copy and structured product
+ * data into neutral Latin American Spanish. This is a text-only pass and does
+ * not call the vision model again.
+ */
+export async function translateProductToSpanish({ detail, english, config }) {
+  if (!config?.apiKey) throw new Error('DEEPSEEK_API_KEY is not configured.');
+  if (!english?.id || !english?.title) throw new Error('An English product translation is required.');
+  const source = englishTranslationSource(english);
+  const model = config.complexModel || 'deepseek-flash';
+  const translationShape = {
+    title: '',
+    description: '',
+    sellerName: '',
+    attributes: source.attributes.map((item) => ({ index: item.index, name: '', value: '' })),
+    skuDimensions: source.skuDimensions.map((item) => ({ index: item.index, name: '', values: item.values.map(() => '') })),
+    skuOptions: source.skuOptions.map((item) => ({ index: item.index,
+      dimensionName: item.dimensionName, text: '', imageUrl: item.imageUrl })),
+    skuRows: source.skuRows.map((item) => ({ index: item.index, skuKey: item.skuKey, skuText: '', options: {} })),
+    priceTextCandidates: source.priceTextCandidates.map(() => ''),
+  };
+  const prompt = `你是专业的泳装和服装B2B商品本地化编辑。把输入JSON中的英文商品内容翻译成自然、专业的拉美西班牙语，只返回严格JSON。
+必须严格保持输出结构、数组数量和顺序、index、skuKey、imageUrl、dimensionName不变。保留款号、品牌名、数字、S/M/L/XL、罩杯、单位、货币、SKU代码和图片URL；不要换算价格、库存、尺码或单位；颜色/印花/部件/单品/套装按原意翻译。空字符串保持为空。
+标题用4到15个西语词，描述用自然的一段西语。优先使用泳装行业表达：trajes de baño、al por mayor、marca privada、pedido mínimo、envío directo。不要输出Markdown或JSON之外的内容。
+输出结构：${JSON.stringify(translationShape)}
+输入JSON：${JSON.stringify(source)}`;
+
+  async function callModel(content, label) {
+    const response = await fetch(endpointFrom(config.baseUrl), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(applyReasoning({ model, messages: [{ role: 'user', content }],
+        response_format: { type: 'json_object' }, temperature: 0, max_tokens: DEFAULT_MAX_TOKENS },
+      config.reasoningEffort)),
+      signal: AbortSignal.timeout(600000),
+    });
+    if (!response.ok) throw new Error(`DeepSeek ${label} failed (${response.status}).`);
+    const payload = await response.json();
+    return { payload, raw: contentText(payload.choices?.[0]?.message?.content) };
+  }
+
+  let attempt;
+  let translated;
+  let correction = '';
+  let previousOutput = '';
+  for (let index = 0; index < 3; index += 1) {
+    attempt = await callModel(correction
+      ? `${prompt}\n上一次输出：${previousOutput}\n未通过校验：${correction}。请完整修正并重新输出。`
+      : prompt, 'Spanish product translation');
+    const structured = parseJson(attempt.raw);
+    translated = restoreTranslationIdentity(source, structured || {});
+    try {
+      validateSpanishTranslation(source, translated);
+      break;
+    } catch (error) {
+      if (index === 2) throw error;
+      correction = error.message;
+      previousOutput = attempt.raw;
+    }
+  }
+  return {
+    schemaVersion: 2,
+    sourceLanguage: 'en',
+    targetLanguage: 'es',
+    model,
+    namingStrategy: 'translation_from_en',
+    imageSources: [],
+    sourceHash: translationSourceHash({
+      source,
+      sourceEnglishId: String(english.id),
+      sourceEnglishHash: String(english.source_hash ?? ''),
+    }),
+    source,
+    translated,
+    usage: { translation: attempt?.payload?.usage ?? null },
+  };
+}

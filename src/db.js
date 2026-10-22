@@ -1784,6 +1784,32 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  async function listPublishedSpanishTranslationBackfill({ limit = 5000, offset = 0, all = false } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 5000, 1), 10000);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const result = await pool.query(`SELECT details.id AS product_detail_id,
+      publications.wp_post_id, publications.style_no, publications.wp_status,
+      english.id AS english_translation_id
+      FROM product_wordpress_publications publications
+      JOIN product_details details ON details.id=publications.product_detail_id
+      JOIN LATERAL (
+        SELECT id FROM product_detail_translations
+        WHERE product_detail_id=details.id AND target_language='en'
+        ORDER BY updated_at DESC, created_at DESC LIMIT 1
+      ) english ON true
+      LEFT JOIN LATERAL (
+        SELECT id FROM product_detail_translations
+        WHERE product_detail_id=details.id AND target_language='es'
+        ORDER BY updated_at DESC, created_at DESC LIMIT 1
+      ) spanish ON true
+      WHERE publications.wp_status='publish'
+        AND publications.wp_post_id IS NOT NULL
+        AND ($3::boolean OR spanish.id IS NULL)
+      ORDER BY details.id
+      LIMIT $1 OFFSET $2`, [safeLimit, safeOffset, all === true]);
+    return result.rows;
+  }
+
   async function getWordPressPublication(productDetailId) {
     const result = await pool.query(
       'SELECT * FROM product_wordpress_publications WHERE product_detail_id=$1',
@@ -3638,6 +3664,7 @@ export function createDatabase(databaseUrl) {
     createProductAudit, startProductAudit, completeProductAudit, failProductAudit, listProductAudits,
     recoverPendingProductAudits,
     saveProductTranslation, listProductTranslations, getLatestProductTranslation,
+    listPublishedSpanishTranslationBackfill,
     getWordPressPublication, resolveWordPressPublication, findShopifySource, getShopifyPublication,
     saveShopifyPublication, listWordPressPublicationDates, listWordPressArrivalDates, listGalleryEditorRows,
     saveWordPressArrivalDate, auditAndRepairProductPrices,

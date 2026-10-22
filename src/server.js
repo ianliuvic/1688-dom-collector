@@ -9,7 +9,7 @@ import { createCollector, is1688ShopUrl, isAllowed1688Url } from './collector.js
 import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
-import { translateProductDetail } from './product-translator.js';
+import { translateProductDetail, translateProductToSpanish } from './product-translator.js';
 import { prepareWordPressProductDraft, publishProductToWordPress,
   get1688ArrivalDate, setWordPressProductArrivalDate,
   setWordPressProductPublicationDate, setWordPressProductStatus,
@@ -19,7 +19,8 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   reserveWordPressStyleNumber, applyWordPressProductCategories, fetchWordPressProductCategoryIds,
   resolvePublishImagesDetailed,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
-  resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows, wordpressClient } from './wordpress-publisher.js';
+  resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows, wordpressClient,
+  saveSpanishProductToWordPress, buildSpanishProductPayload } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -60,6 +61,7 @@ const config = {
   reasoningEffort: process.env.DEEPSEEK_REASONING_EFFORT || 'high',
   translationImageLimit: Math.min(Math.max(Number(process.env.TRANSLATION_IMAGE_LIMIT) || 60, 1), 100),
   translationConcurrency: Math.min(Math.max(Number(process.env.TRANSLATION_CONCURRENCY) || 1, 1), 10),
+  spanishTranslationConcurrency: Math.min(Math.max(Number(process.env.SPANISH_TRANSLATION_CONCURRENCY) || 4, 1), 8),
   savedAuditConcurrency: Math.min(Math.max(Number(process.env.SAVED_AUDIT_CONCURRENCY) || 3, 1), 5),
   savedAuditsStartPaused: process.env.SAVED_AUDITS_START_PAUSED === 'true',
   wordpressPublishConcurrency: Math.min(Math.max(Number(process.env.WORDPRESS_PUBLISH_CONCURRENCY) || 3, 1), 5),
@@ -106,6 +108,7 @@ const skuAuditJobs = new Map();
 const imageAuditJobs = new Map();
 const detailImageJobs = new Map();
 const translationJobs = new Map();
+const spanishBackfillJobs = new Map();
 const wordpressJobs = new Map();
 const wordpressPublicationDateJobs = new Map();
 const wordpressArrivalDateJobs = new Map();
@@ -133,6 +136,37 @@ let wordpressMaintenanceQueue = Promise.resolve();
 async function buildBestSellerPlan(limit = 48) {
   const candidates = await db.listBestSellerCandidates();
   return selectBestSellers(candidates, Math.min(Math.max(Number(limit) || 36, 1), 48));
+}
+
+function modelTranslationConfig() {
+  return {
+    apiKey: config.modelApiKey,
+    baseUrl: config.modelBaseUrl,
+    complexModel: config.complexModel,
+    storagePath: config.storagePath,
+    reasoningEffort: config.reasoningEffort,
+    maxTranslationImages: config.translationImageLimit,
+    modelImageTransport: config.modelImageTransport,
+  };
+}
+
+async function ensureSpanishTranslation(detail, english) {
+  let spanish = await db.getLatestProductTranslation(detail.id, 'es');
+  if (spanish) return { translation: spanish, created: false };
+  const generated = await translateProductToSpanish({
+    detail, english, config: modelTranslationConfig(),
+  });
+  spanish = await db.saveProductTranslation(detail.id, generated);
+  return { translation: spanish, created: true };
+}
+
+async function saveSpanishPayloadForPublication(detail, english, spanish) {
+  const publication = await db.getWordPressPublication(detail.id);
+  if (!publication?.wp_post_id) return { saved: false, reason: 'wordpress_post_missing' };
+  const result = await saveSpanishProductToWordPress({
+    publication, english, spanish, config,
+  });
+  return { saved: true, result };
 }
 
 function trimTerminalJobs(jobMap, maxEntries = 2000) {
@@ -4566,6 +4600,9 @@ async function runRegularPipelineStep({ detail, status, publish, run }) {
   }
   const fresh = await db.getProductDetail(detail.id);
   const normalizationRecord = await db.getVariantNormalization(detail.id);
+  const spanishResult = await ensureSpanishTranslation(fresh, translation);
+  run.steps.spanish = { translationId: spanishResult.translation?.id ?? null,
+    created: spanishResult.created === true, title: spanishResult.translation?.title ?? null };
   const published = await publishProductToWordPress({
     detail: fresh, translation, config,
     optionOverrides: await db.listProductOptionOverrides(detail.id),
@@ -4606,6 +4643,9 @@ async function runRegularPipelineStep({ detail, status, publish, run }) {
     wpPostId: wp.post_id ?? null, wpUrl: wp.permalink ?? null, wpEditUrl: wp.edit_link ?? null,
     wpStatus: wp.status ?? status, syncHash, payload, result: wp, lastError: null,
   });
+  const spanishPayload = await saveSpanishPayloadForPublication(detail, translation,
+    spanishResult.translation);
+  run.steps.spanish.payloadSaved = spanishPayload.saved === true;
   await scheduleProductRagSync(detail.id, { trigger: 'pipeline_publish' }).catch(() => {});
   run.published = {
     styleNo: published.draft.styleNo, title: translation?.title ?? null,
@@ -6296,10 +6336,10 @@ app.post('/api/product-details/:id/translations', { preHandler: requireDashboard
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   const targetLanguage = request.body?.targetLanguage || 'en';
   const preserveCatalogCopy = request.body?.preserveCatalogCopy === true;
-  if (targetLanguage !== 'en') {
-    return reply.code(400).send({ error: 'Only targetLanguage=en is currently supported.' });
+  if (!['en', 'es'].includes(targetLanguage)) {
+    return reply.code(400).send({ error: 'Only targetLanguage=en or targetLanguage=es is currently supported.' });
   }
-  const previousTranslation = preserveCatalogCopy
+  const previousTranslation = preserveCatalogCopy && targetLanguage === 'en'
     ? await db.getLatestProductTranslation(detail.id, targetLanguage) : null;
   const id = crypto.randomUUID();
   const job = { id, productDetailId: detail.id, offerId: detail.offer_id, targetLanguage,
@@ -6311,13 +6351,22 @@ app.post('/api/product-details/:id/translations', { preHandler: requireDashboard
     job.status = 'running';
     job.startedAt = new Date().toISOString();
     try {
-      const translated = await translateProductDetail({ detail, targetLanguage, config: {
-        apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
-        complexModel: config.complexModel, storagePath: config.storagePath,
-        reasoningEffort: config.reasoningEffort,
-        maxTranslationImages: config.translationImageLimit,
-        modelImageTransport: config.modelImageTransport,
-      } });
+      let translated;
+      if (targetLanguage === 'es') {
+        const english = await db.getLatestProductTranslation(detail.id, 'en');
+        if (!english) throw new Error('english_translation_required');
+        translated = await translateProductToSpanish({
+          detail, english, config: modelTranslationConfig(),
+        });
+      } else {
+        translated = await translateProductDetail({ detail, targetLanguage, config: {
+          apiKey: config.modelApiKey, baseUrl: config.modelBaseUrl,
+          complexModel: config.complexModel, storagePath: config.storagePath,
+          reasoningEffort: config.reasoningEffort,
+          maxTranslationImages: config.translationImageLimit,
+          modelImageTransport: config.modelImageTransport,
+        } });
+      }
       if (previousTranslation) {
         translated.translated.title = previousTranslation.title;
         translated.translated.description = previousTranslation.description;
@@ -6326,7 +6375,9 @@ app.post('/api/product-details/:id/translations', { preHandler: requireDashboard
       const saved = await db.saveProductTranslation(detail.id, translated);
       await appendManualEditLog(detail.id, { at: new Date().toISOString(),
         action: 'translation_regenerated', translationId: saved.id });
-      await scheduleProductRagSync(detail.id, { trigger: 'translation' });
+      if (targetLanguage === 'en') {
+        await scheduleProductRagSync(detail.id, { trigger: 'translation' });
+      }
       job.translationId = saved.id;
       job.result = saved;
       job.status = 'completed';
@@ -6344,14 +6395,103 @@ app.get('/api/product-details/:id/translations', { preHandler: requireApiKey }, 
   const detail = await db.getProductDetail(request.params.id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   const targetLanguage = request.query?.targetLanguage || null;
-  if (targetLanguage && targetLanguage !== 'en') {
-    return reply.code(400).send({ error: 'Only targetLanguage=en is currently supported.' });
+  if (targetLanguage && !['en', 'es'].includes(targetLanguage)) {
+    return reply.code(400).send({ error: 'Only targetLanguage=en or targetLanguage=es is currently supported.' });
   }
   return db.listProductTranslations(detail.id, targetLanguage);
 });
 
 app.get('/api/translation-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const job = translationJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+/**
+ * Backfill Spanish translations for products already published on WordPress.
+ * Each worker loads the English translation, creates the Spanish one when
+ * missing, then writes the Spanish overlay payload to the WordPress product.
+ */
+app.post('/api/product-details/spanish/backfill', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const limit = Math.min(Math.max(Number(request.body?.limit) || 5000, 1), 10000);
+  const all = request.body?.all === true;
+  const concurrency = Math.min(Math.max(Number(request.body?.concurrency)
+    || config.spanishTranslationConcurrency, 1), 8);
+  const rows = await db.listPublishedSpanishTranslationBackfill({ limit, all });
+  const job = {
+    id: crypto.randomUUID(), status: rows.length ? 'running' : 'completed',
+    total: rows.length, processed: 0, translated: 0, existing: 0, pushed: 0,
+    skipped: 0, failed: 0, paused: false, results: [], errors: [],
+    concurrency, all, createdAt: new Date().toISOString(),
+    startedAt: new Date().toISOString(), completedAt: rows.length ? null : new Date().toISOString(),
+  };
+  spanishBackfillJobs.set(job.id, job);
+  trimTerminalJobs(spanishBackfillJobs);
+  if (!rows.length) return reply.code(202).send(job);
+
+  (async () => {
+    let next = 0;
+    let stop = false;
+    const workers = Array.from({ length: Math.min(concurrency, rows.length) }, async () => {
+      while (!stop) {
+        const index = next++;
+        if (index >= rows.length) return;
+        const row = rows[index];
+        const productDetailId = Number(row.product_detail_id);
+        try {
+          const detail = await db.getProductDetail(productDetailId);
+          const english = await db.getLatestProductTranslation(productDetailId, 'en');
+          if (!detail || !english) {
+            job.skipped += 1;
+            job.results.push({ productDetailId, status: 'skipped', reason: 'english_translation_missing' });
+            continue;
+          }
+          let spanish = await db.getLatestProductTranslation(productDetailId, 'es');
+          if (!spanish) {
+            const generated = await translateProductToSpanish({
+              detail, english, config: modelTranslationConfig(),
+            });
+            spanish = await db.saveProductTranslation(productDetailId, generated);
+            job.translated += 1;
+          } else {
+            job.existing += 1;
+          }
+          const pushed = await saveSpanishPayloadForPublication(detail, english, spanish);
+          if (!pushed.saved) throw new Error(pushed.reason || 'spanish_payload_not_saved');
+          job.pushed += 1;
+          job.results.push({
+            productDetailId, wpPostId: row.wp_post_id, styleNo: row.style_no,
+            status: 'completed', translationId: spanish.id,
+          });
+        } catch (error) {
+          job.failed += 1;
+          job.errors.push({ productDetailId, message: String(error?.message || error).slice(0, 300) });
+          if (isExternalModelAccessError(error)) {
+            stop = true;
+            job.paused = true;
+            job.status = 'paused';
+            job.error = 'model_provider_access';
+          }
+        } finally {
+          job.processed += 1;
+        }
+      }
+    });
+    await Promise.all(workers);
+    if (!job.paused) job.status = job.failed ? 'completed_with_errors' : 'completed';
+    job.completedAt = new Date().toISOString();
+    app.log.info({ jobId: job.id, total: job.total, translated: job.translated,
+      pushed: job.pushed, failed: job.failed, paused: job.paused }, 'Spanish backfill completed');
+  })().catch((error) => {
+    job.status = 'failed';
+    job.error = String(error?.message || error).slice(0, 300);
+    job.completedAt = new Date().toISOString();
+  });
+
+  return reply.code(202).send(job);
+});
+
+app.get('/api/spanish-backfill-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const job = spanishBackfillJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
@@ -7546,6 +7686,8 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
     job.startedAt = new Date().toISOString();
     let draft;
     try {
+      const spanishResult = await ensureSpanishTranslation(detail, translation);
+      job.spanishTranslationId = spanishResult.translation?.id ?? null;
       const published = await publishProductToWordPress({ detail, translation, options, config,
         optionOverrides: await db.listProductOptionOverrides(detail.id) });
       draft = published.draft;
@@ -7557,9 +7699,12 @@ app.post('/api/product-details/:id/wordpress/publish', { preHandler: requireApiK
         wpStatus: wp.status ?? options.status, syncHash, payload: published.payload, result: wp,
         lastError: null,
       });
+      const spanishPayload = await saveSpanishPayloadForPublication(detail, translation,
+        spanishResult.translation);
       await scheduleProductRagSync(detail.id, { trigger: 'wordpress_publish' });
       job.publicationId = saved.id;
-      job.result = { publication: saved, wordpress: wp, mediaCount: published.media.length };
+      job.result = { publication: saved, wordpress: wp, mediaCount: published.media.length,
+        spanishPayload };
       job.status = 'completed';
     } catch (error) {
       job.status = 'failed';

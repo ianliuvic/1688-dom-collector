@@ -746,6 +746,138 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
   return { externalId, styleNo, publishingImages, swatchImages, uploadImages, payload };
 }
 
+function englishSpanishOptionMap(english, spanish, dimensionPattern) {
+  const en = Array.isArray(english?.sku_options) ? english.sku_options : [];
+  const es = Array.isArray(spanish?.skuOptions) ? spanish.skuOptions : [];
+  const map = new Map();
+  en.forEach((option, index) => {
+    if (!dimensionPattern.test(String(option?.dimensionName ?? ''))) return;
+    const from = clean(option?.text);
+    const to = clean(es[index]?.text);
+    if (from && to) map.set(from, to);
+  });
+  return map;
+}
+
+function spanishAttributeValue(spanish, pattern) {
+  const attributes = Array.isArray(spanish?.attributes) ? spanish.attributes : [];
+  const match = attributes.find((item) => pattern.test(String(item?.name ?? '')));
+  return clean(match?.value);
+}
+
+/**
+ * Build the Spanish-only product payload saved beside the English post. The
+ * English payload remains the source of prices, SKU identities, image IDs and
+ * taxonomy IDs; this overlay changes only display copy and visible labels.
+ */
+export function buildSpanishProductPayload({ publicationPayload, english, spanish }) {
+  const esData = { ...(spanish ?? {}), ...((spanish?.translated_data && typeof spanish.translated_data === 'object')
+    ? spanish.translated_data : {}) };
+  if (!publicationPayload?.external_id || !clean(esData.title)) {
+    throw new Error('An English publication payload and Spanish translation are required.');
+  }
+  const payload = JSON.parse(JSON.stringify(publicationPayload));
+  const title = clean(esData.title);
+  const description = clean(esData.description);
+  const colorMap = englishSpanishOptionMap(english, esData, /(color|colour|颜色)/i);
+
+  payload.title = title;
+  payload.description = description;
+  payload.target_language = 'es';
+  payload.translation_id = String(esData.id ?? '');
+  payload.source_translation_id = String(english?.id ?? '');
+
+  const meta = { ...(payload.meta ?? {}) };
+  meta.title = title;
+  meta.description = description;
+  meta.customization = /^yes$/i.test(clean(meta.customization)) ? 'Sí' : meta.customization;
+  const translateLeadTime = (value) => {
+    const text = clean(value);
+    if (/7\s*(?:to|-)\s*14\s*working days/i.test(text)) return '7 a 14 días hábiles';
+    if (/3\s*working days/i.test(text)) return '3 días hábiles';
+    return text;
+  };
+  meta.sample_lead_time = translateLeadTime(meta.sample_lead_time);
+  meta.lead_time = translateLeadTime(meta.lead_time);
+  meta.bulk_lead_time = /~?\s*28\s*days/i.test(clean(meta.bulk_lead_time))
+    ? '~28 días' : meta.bulk_lead_time;
+  meta.moq = clean(meta.moq).replace(/\bpcs?\b/gi, 'pzs');
+  const translatedMaterial = spanishAttributeValue(esData, /(material|fabric|composition|tejido|composición)/i);
+  if (translatedMaterial) meta.material = translatedMaterial;
+  payload.meta = meta;
+
+  payload.source_attributes = Array.isArray(esData.attributes) ? esData.attributes : [];
+  if (payload.source) {
+    payload.source = {
+      ...payload.source,
+      seller_name: clean(esData.sellerName) || payload.source.seller_name,
+    };
+  }
+
+  if (payload.catalog) {
+    const catalog = payload.catalog;
+    if (catalog.colors?.colors) {
+      catalog.colors = {
+        ...catalog.colors,
+        colors: catalog.colors.colors.map((color) => ({
+          ...color,
+          label: colorMap.get(clean(color.label)) || color.label,
+        })),
+      };
+    }
+    if (catalog.sku_matrix?.rows) {
+      catalog.sku_matrix = {
+        ...catalog.sku_matrix,
+        rows: catalog.sku_matrix.rows.map((row) => {
+          const options = { ...(row.options ?? {}) };
+          for (const key of Object.keys(options)) {
+            if (/(color|colour|颜色)/i.test(key)) {
+              options[key] = colorMap.get(clean(options[key])) || options[key];
+            }
+          }
+          return {
+            ...row,
+            options,
+            color: colorMap.get(clean(row.color)) || row.color,
+          };
+        }),
+      };
+    }
+    if (catalog.bulk_pricing?.tiers) {
+      catalog.bulk_pricing = {
+        ...catalog.bulk_pricing,
+        tiers: catalog.bulk_pricing.tiers.map((tier) => ({
+          ...tier,
+          label: clean(tier.label).replace(/\bpcs?\b/gi, 'pzs'),
+        })),
+      };
+    }
+    payload.catalog = catalog;
+  }
+
+  if (Array.isArray(payload.images)) {
+    payload.images = payload.images.map((image, index) => ({
+      ...image,
+      alt: `${title}${index ? ` vista ${index + 1}` : ''}`,
+    }));
+  }
+  return payload;
+}
+
+export async function saveSpanishProductToWordPress({ publication, english, spanish, config }) {
+  const publicationPayload = publication?.payload;
+  const postId = Number(publication?.wp_post_id ?? publicationPayload?.post_id ?? 0);
+  if (!postId) throw new Error('A published WordPress post ID is required for the Spanish payload.');
+  const payload = buildSpanishProductPayload({ publicationPayload, english, spanish });
+  const wp = wordpressClient(config);
+  return wp('/wp-json/hx/v1/products/es-payload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ post_id: postId, external_id: payload.external_id, payload }),
+    timeoutMs: 120000,
+  });
+}
+
 export async function setWordPressProductPublicationDate({ postId, publicationDate, config }) {  const normalized = normalizePublicationDate(publicationDate);
   if (!Number(postId) || !normalized) throw new Error('A WordPress post ID and valid publication date are required.');
   const wp = wordpressClient(config);
