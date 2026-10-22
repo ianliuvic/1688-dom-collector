@@ -3427,6 +3427,42 @@ export function createDatabase(databaseUrl) {
     const wpImages = (Array.isArray(payload.images) ? payload.images : [])
       .map((image) => ({ url: image?.url ?? null, sourceUrl: image?.source_url ?? null, alt: image?.alt ?? null }))
       .filter((image) => image.url || image.sourceUrl);
+    // WordPress stores each colour swatch as a media attachment. Its URL is
+    // resolved in the API route (the attachment is often outside the gallery),
+    // while the SKU list lets the UI match translated/source colour labels.
+    const skuRows = Array.isArray(payload.sku_matrix?.rows) ? payload.sku_matrix.rows : [];
+    const colourOf = (options) => {
+      for (const [key, value] of Object.entries(options ?? {})) {
+        if (/(^color$|colou?r|颜色)/i.test(String(key)) && value !== null && value !== undefined && String(value).trim()) {
+          return String(value).trim();
+        }
+      }
+      return null;
+    };
+    const skusByColour = new Map();
+    for (const row of skuRows) {
+      const colour = String(row?.color ?? colourOf(row?.options) ?? '').trim();
+      const sku = String(row?.supplier_sku ?? '').trim();
+      if (!colour || !sku) continue;
+      const key = colour.toLowerCase();
+      if (!skusByColour.has(key)) skusByColour.set(key, []);
+      skusByColour.get(key).push(sku);
+    }
+    const wpSwatches = (Array.isArray(payload.colors?.colors) ? payload.colors.colors : [])
+      .map((colour) => {
+        const label = String(colour?.label ?? colour?.value ?? '').trim();
+        if (!label) return null;
+        const variantSkus = skusByColour.get(label.toLowerCase()) ?? [];
+        return {
+          label,
+          value: colour?.value ?? null,
+          code: colour?.code ?? null,
+          imageId: colour?.image_id ?? colour?.image_source_id ?? null,
+          imageUrl: colour?.image_source_url ?? colour?.image_url ?? null,
+          variantSkus,
+        };
+      })
+      .filter(Boolean);
     const stored = await pool.query(`SELECT source_url, storage_path FROM product_detail_images
       WHERE product_detail_id = $1 AND image_type = 'description' ORDER BY sort_order ASC`, [id]);
     const detailImages = [];
@@ -3457,7 +3493,7 @@ export function createDatabase(databaseUrl) {
       ? portalPub.result.variantImages
       : null;
     return {
-      productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, wpImages, detailImages,
+      productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, wpImages, wpSwatches, detailImages,
       portal: portalPub ? {
         productId: portalPub.portal_product_id ?? null,
         status: portalPub.portal_status ?? null,

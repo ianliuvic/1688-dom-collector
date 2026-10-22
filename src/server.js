@@ -6698,11 +6698,60 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
   };
 });
 
+// WordPress swatch attachments are commonly outside the published gallery, so
+// resolve their public media URLs on demand and cache them for the session.
+const wordpressSwatchUrlCache = new Map();
+async function resolveSelectionSwatchImages(swatches) {
+  const missing = [...new Set((Array.isArray(swatches) ? swatches : [])
+    .map((swatch) => String(swatch?.imageId ?? '').trim())
+    .filter((id) => /^\d+$/.test(id) && !wordpressSwatchUrlCache.has(id)))];
+  if (!missing.length) return;
+  let wp;
+  try {
+    wp = wordpressClient(config);
+  } catch {
+    return;
+  }
+  for (let offset = 0; offset < missing.length; offset += 100) {
+    const chunk = missing.slice(offset, offset + 100);
+    const query = new URLSearchParams({
+      include: chunk.join(','),
+      per_page: String(chunk.length),
+      _fields: 'id,source_url',
+    });
+    try {
+      const rows = await wp(`/wp-json/wp/v2/media?${query.toString()}`, { timeoutMs: 30000 });
+      const found = new Set();
+      for (const row of (Array.isArray(rows) ? rows : [])) {
+        const id = String(row?.id ?? '').trim();
+        const url = typeof row?.source_url === 'string' ? row.source_url.trim() : '';
+        if (!id || !url) continue;
+        wordpressSwatchUrlCache.set(id, url);
+        found.add(id);
+      }
+      for (const id of chunk) {
+        if (!found.has(id)) wordpressSwatchUrlCache.set(id, null);
+      }
+    } catch {
+      for (const id of chunk) wordpressSwatchUrlCache.set(id, null);
+    }
+  }
+}
+
 app.get('/api/selection/products/:id/media', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const media = await db.getSelectionProductMedia(request.params.id);
   if (!media) return reply.code(404).send({ error: 'not_found' });
+  const swatches = Array.isArray(media.wpSwatches) ? media.wpSwatches : [];
+  await resolveSelectionSwatchImages(swatches);
   return {
     ...media,
+    wpSwatches: swatches.map((swatch) => ({
+      label: swatch.label,
+      value: swatch.value ?? null,
+      code: swatch.code ?? null,
+      imageUrl: swatch.imageUrl || wordpressSwatchUrlCache.get(String(swatch.imageId ?? '')) || null,
+      variantSkus: Array.isArray(swatch.variantSkus) ? swatch.variantSkus : [],
+    })),
     detailImages: (media.detailImages ?? []).map((image) => ({
       ...image,
       url: typeof image.url === 'string' && image.url.startsWith('/') ? `${config.publicBaseUrl}${image.url}` : image.url,

@@ -350,7 +350,28 @@ function portalDraftFor(id, media, colours) {
     const url = String((entry && entry.url) || '').trim();
     if (color && url) variantImages[color] = url;
   }
-  portalDrafts[id] = { images, colours: Array.isArray(colours) ? colours : [], variantImages, portal: media.portal || null, message: '', error: '', saving: false };
+  const wpSwatches = Array.isArray(media.wpSwatches) ? media.wpSwatches : [];
+  const lower = (value) => String(value || '').trim().toLowerCase();
+  const swatchForColour = (colour) => {
+    const skus = new Set((Array.isArray(colour.variantSkus) ? colour.variantSkus : []).map(lower).filter(Boolean));
+    if (skus.size) {
+      const bySku = wpSwatches.find((swatch) => Array.isArray(swatch.variantSkus)
+        && swatch.variantSkus.some((sku) => skus.has(lower(sku))));
+      if (bySku) return bySku;
+    }
+    return wpSwatches.find((swatch) => lower(swatch.label) === lower(colour.color)) ?? null;
+  };
+  const colourList = (Array.isArray(colours) ? colours : []).map((colour) => {
+    const swatch = swatchForColour(colour);
+    const wpSwatchImage = swatch && /^https?:\/\//i.test(String(swatch.imageUrl || '')) ? swatch.imageUrl : '';
+    if (!colour.image && wpSwatchImage) colour.image = wpSwatchImage;
+    if (!variantImages[colour.color] && wpSwatchImage) variantImages[colour.color] = wpSwatchImage;
+    return { ...colour, wpSwatchImage };
+  });
+  portalDrafts[id] = {
+    images, colours: colourList, variantImages, wpSwatches,
+    portal: media.portal || null, message: '', error: '', saving: false,
+  };
   return portalDrafts[id];
 }
 
@@ -380,6 +401,7 @@ function portalPanelHtml(id) {
   const assignable = colours.filter((colour) => colour.assignable !== false);
   const variantRows = assignable.map((colour) => {
     const current = draft.variantImages[colour.color] || '';
+    const wpSwatchImage = colour.wpSwatchImage || '';
     let found = false;
     const options = ['<option value="">不设置</option>'];
     draft.images.forEach((image, imageIndex) => {
@@ -387,7 +409,11 @@ function portalPanelHtml(id) {
       if (isSelected) found = true;
       options.push('<option value="' + esc(image.url) + '"' + (isSelected ? ' selected' : '') + '>' + (imageIndex + 1) + (image.kind === 'detail' ? ' · 详情' : '') + '</option>');
     });
-    if (current && !found) options.push('<option value="' + esc(current) + '" selected>已保存（不在当前列表）</option>');
+    const swatchInImages = Boolean(wpSwatchImage) && draft.images.some((image) => image.url === wpSwatchImage);
+    if (wpSwatchImage && !swatchInImages) {
+      options.push('<option value="' + esc(wpSwatchImage) + '"' + (current === wpSwatchImage ? ' selected' : '') + '>WP swatch</option>');
+    }
+    if (current && !found && current !== wpSwatchImage) options.push('<option value="' + esc(current) + '" selected>已保存（不在当前列表）</option>');
     return '<div class="vi-row">' +
       '<span class="vi-color" title="' + esc(colour.color) + '">' + (colour.image ? '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(thumbUrl(colour.image, 64)) + '" alt="" onerror="this.style.display=\'none\'">' : '') + esc(colour.color) + '</span>' +
       '<select data-portal-variant="' + esc(colour.color) + '" title="选择该颜色的变体图片">' + options.join('') + '</select>' +
@@ -397,14 +423,14 @@ function portalPanelHtml(id) {
   const variantSection = colours.length
     ? '<div class="vi-block"><h5>变体图片（按颜色，可选）</h5>'
       + (assignable.length
-        ? '<div class="portal-note">为每个颜色选择一张图；发布后 Portal 的商品变体图片会自动设置，被分配的图片会自动勾选发布。</div>' + variantRows
+        ? '<div class="portal-note">默认使用 WP 对应的 swatch 图片，也可以手动选择其他图片；发布后 Portal 的商品变体图片会自动设置。</div>' + variantRows
           + (assignable.length < colours.length ? '<div class="portal-note">另有 ' + (colours.length - assignable.length) + ' 个颜色没有变体 SKU，暂不能分配。</div>' : '')
         : '<div class="portal-note">该产品还没有变体 SKU，暂不能分配变体图片。</div>')
       + '</div>'
     : '';
   return '<div class="portal-panel" data-portal-panel="' + esc(id) + '">' +
     '<h4>发布到 Portal <span class="portal-msg">（' + stateText + '）</span></h4>' +
-    '<div class="portal-note">勾选要发布到 Portal 的图片（共 ' + draft.images.length + ' 张，已选 ' + selected + ' 张）；WP 产品图默认勾选，1688 详情图默认不勾选（带「详情」标记，勾选后会在发布时自动下载）；拖拽图片或用 ◀ ▶ 调整顺序，顺序即 Portal 客户侧的展示顺序；未勾选的图片不会展示。</div>' +
+    '<div class="portal-note">勾选要发布到 Portal 的图片（共 ' + draft.images.length + ' 张，已选 ' + selected + ' 张）；默认与 WP 产品图一致，1688 详情图默认不勾选（带「详情」标记，勾选后会在发布时自动下载）；拖拽图片或用 ◀ ▶ 调整顺序，顺序即 Portal 客户侧的展示顺序；未勾选的图片不会展示。</div>' +
     (draft.images.length ? '<div class="portal-grid">' + tiles + '</div>' : '<div class="empty">该产品没有可选图片</div>') +
     variantSection +
     '<div class="portal-actions">' +
@@ -636,7 +662,12 @@ async function toggleMedia(button) {
       const variantSku = String(sku.variantSku ?? '').trim();
       if (variantSku) entry.variantSkus.add(variantSku.toLowerCase());
     }
-    colours = [...colourMap.values()].map((entry) => ({ color: entry.color, image: entry.image, assignable: entry.variantSkus.size > 0 }));
+    colours = [...colourMap.values()].map((entry) => ({
+      color: entry.color,
+      image: entry.image,
+      assignable: entry.variantSkus.size > 0,
+      variantSkus: [...entry.variantSkus],
+    }));
     const total = skus.reduce((sum, sku) => sum + (Number(sku.stock) || 0), 0);
     html += '<h4>SKU 库存（' + skus.length + ' 个 · 合计 ' + total + (data.capturedAt ? ' · 采集于 ' + esc(String(data.capturedAt).slice(0, 10)) : '') + '）</h4>';
     html += skus.length
