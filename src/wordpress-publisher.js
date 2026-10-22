@@ -780,6 +780,22 @@ export function buildSpanishProductPayload({ publicationPayload, english, spanis
   const title = clean(esData.title);
   const description = clean(esData.description);
   const colorMap = englishSpanishOptionMap(english, esData, /(color|colour|颜色)/i);
+  const englishColors = (Array.isArray(english?.sku_options) ? english.sku_options : [])
+    .filter((option) => /(color|colour|颜色)/i.test(String(option?.dimensionName ?? '')));
+  const spanishColors = (Array.isArray(esData.skuOptions) ? esData.skuOptions : [])
+    .filter((option) => /(color|colour|颜色)/i.test(String(option?.dimensionName ?? '')));
+  const publicationColors = Array.isArray(publicationPayload?.catalog?.colors?.colors)
+    ? publicationPayload.catalog.colors.colors : [];
+  // Normalized storefront labels can be more specific than the source language
+  // ("Light Yellow" vs "Yellow"). Prefer source_label, then positional mapping,
+  // so the overlay never leaves a normalized English color label behind.
+  publicationColors.forEach((color, index) => {
+    const label = clean(color?.label);
+    if (!label || colorMap.has(label)) return;
+    const source = clean(color?.source_label);
+    const translated = (source && colorMap.get(source)) || clean(spanishColors[index]?.text);
+    if (translated) colorMap.set(label, translated);
+  });
 
   payload.title = title;
   payload.description = description;
