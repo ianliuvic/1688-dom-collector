@@ -499,3 +499,77 @@ export async function translateProductToSpanish({ detail, english, config }) {
     usage: { translation: attempt?.payload?.usage ?? null },
   };
 }
+
+/**
+ * Translate a WordPress-resolved product that has no collector English
+ * translation row (legacy/split products). This only needs the visible catalog
+ * fields, not the 1688 source capture.
+ */
+export async function translateWordpressProductToSpanish({ product, config }) {
+  if (!config?.apiKey) throw new Error('DEEPSEEK_API_KEY is not configured.');
+  const source = {
+    title: String(product?.title ?? '').trim(),
+    description: String(product?.description ?? product?.meta?.description ?? '').trim(),
+    material: String(product?.meta?.material ?? '').trim(),
+    style: String(product?.meta?.style ?? product?.meta?.primary_category ?? '').trim(),
+    colors: (Array.isArray(product?.catalog?.colors?.colors) ? product.catalog.colors.colors : [])
+      .map((color) => String(color?.label ?? '').trim()).filter(Boolean),
+  };
+  if (!source.title) throw new Error('A WordPress product title is required.');
+  const model = config.complexModel || 'deepseek-flash';
+  const shape = {
+    title: '',
+    description: '',
+    material: '',
+    style: '',
+    colors: source.colors.map(() => ''),
+  };
+  const prompt = `把下面的英文泳装商品信息翻译成自然、专业的拉美西班牙语，只返回严格JSON。
+保持 colors 数组数量、顺序和索引不变；保留数字、品牌名、SKU和尺码；使用 trajes de baño、al por mayor、marca privada 等行业表达。标题用4到15个西语词，描述用自然的一段西语。
+输出结构：${JSON.stringify(shape)}
+输入：${JSON.stringify(source)}`;
+  let attempt;
+  let translated;
+  let correction = '';
+  let previousOutput = '';
+  for (let index = 0; index < 3; index += 1) {
+    const text = correction
+      ? `${prompt}\n上一次输出：${previousOutput}\n未通过校验：${correction}。请完整修正并重新输出。`
+      : prompt;
+    const response = await fetch(endpointFrom(config.baseUrl), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(applyReasoning({ model, messages: [{ role: 'user', content: text }],
+        response_format: { type: 'json_object' }, temperature: 0, max_tokens: DEFAULT_MAX_TOKENS },
+      config.reasoningEffort)),
+      signal: AbortSignal.timeout(600000),
+    });
+    if (!response.ok) throw new Error(`DeepSeek Spanish WordPress translation failed (${response.status}).`);
+    attempt = await response.json();
+    translated = parseJson(contentText(attempt.choices?.[0]?.message?.content));
+    try {
+      if (!translated || typeof translated.title !== 'string'
+          || typeof translated.description !== 'string'
+          || !Array.isArray(translated.colors)
+          || translated.colors.length !== source.colors.length) {
+        throw new Error('Spanish WordPress translation did not preserve the required fields or colors.');
+      }
+      if (/[\u3400-\u9fff]/.test(translated.title + translated.description)) {
+        throw new Error('Spanish WordPress translation contains Chinese characters.');
+      }
+      if (translated.title.trim().length < 4
+          || (translated.description.trim() && translated.description.trim().length < 20)) {
+        throw new Error('Spanish WordPress translation is too short.');
+      }
+      break;
+    } catch (error) {
+      if (index === 2) throw error;
+      correction = error.message;
+      previousOutput = JSON.stringify(translated || {});
+    }
+  }
+  return {
+    schemaVersion: 1, sourceLanguage: 'en', targetLanguage: 'es', model,
+    source, translated, usage: attempt?.usage ?? null,
+  };
+}

@@ -9,7 +9,8 @@ import { createCollector, is1688ShopUrl, isAllowed1688Url } from './collector.js
 import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
-import { translateProductDetail, translateProductToSpanish } from './product-translator.js';
+import { translateProductDetail, translateProductToSpanish,
+  translateWordpressProductToSpanish } from './product-translator.js';
 import { prepareWordPressProductDraft, publishProductToWordPress,
   get1688ArrivalDate, setWordPressProductArrivalDate,
   setWordPressProductPublicationDate, setWordPressProductStatus,
@@ -20,7 +21,7 @@ import { prepareWordPressProductDraft, publishProductToWordPress,
   resolvePublishImagesDetailed,
   publishSplitProductsToWordPress, repairSplitKeeperCategories,
   resolvePublishImageRows, dedupePublishImageRows, computePublishImageRows, wordpressClient,
-  saveSpanishProductToWordPress, buildSpanishProductPayload } from './wordpress-publisher.js';
+  saveSpanishProductToWordPress, buildSpanishProductPayload, saveSpanishOverlayPayload } from './wordpress-publisher.js';
 import { localResolverLookup, parseProductResolverQuery } from './product-resolver.js';
 import { createLoginManager } from './login-manager.js';
 import { createConcurrentQueue } from './concurrent-queue.js';
@@ -109,6 +110,7 @@ const imageAuditJobs = new Map();
 const detailImageJobs = new Map();
 const translationJobs = new Map();
 const spanishBackfillJobs = new Map();
+const spanishWordpressBackfillJobs = new Map();
 const wordpressJobs = new Map();
 const wordpressPublicationDateJobs = new Map();
 const wordpressArrivalDateJobs = new Map();
@@ -167,6 +169,54 @@ async function saveSpanishPayloadForPublication(detail, english, spanish) {
     publication, english, spanish, config,
   });
   return { saved: true, result };
+}
+
+function buildLegacySpanishOverlay(product, translated, postId) {
+  const payload = JSON.parse(JSON.stringify(product));
+  const title = String(translated?.title ?? '').trim();
+  const description = String(translated?.description ?? '').trim();
+  if (!title) throw new Error('Spanish WordPress title is empty.');
+  payload.title = title;
+  payload.description = description;
+  payload.meta = { ...(payload.meta ?? {}), title, description };
+  if (String(translated.material ?? '').trim()) payload.meta.material = translated.material.trim();
+  if (String(translated.style ?? '').trim()) {
+    payload.meta.style = translated.style.trim();
+    payload.meta.primary_category = translated.style.trim();
+  }
+  payload.target_language = 'es';
+  payload.translation_id = `wp:${postId}`;
+  payload.external_id = payload.external_id || `wp:${postId}`;
+  const catalog = payload.catalog && typeof payload.catalog === 'object' ? payload.catalog : {};
+  const colors = Array.isArray(catalog.colors?.colors) ? catalog.colors.colors : [];
+  const translatedColors = Array.isArray(translated.colors) ? translated.colors : [];
+  const colorMap = new Map();
+  catalog.colors = {
+    ...(catalog.colors ?? {}),
+    colors: colors.map((color, index) => {
+      const label = String(translatedColors[index] ?? '').trim() || String(color.label ?? '');
+      colorMap.set(String(color.label ?? ''), label);
+      return { ...color, label };
+    }),
+  };
+  if (Array.isArray(catalog.sku_matrix?.rows)) {
+    catalog.sku_matrix = {
+      ...catalog.sku_matrix,
+      rows: catalog.sku_matrix.rows.map((row) => {
+        const options = { ...(row.options ?? {}) };
+        for (const key of Object.keys(options)) {
+          if (/(color|colour|颜色)/i.test(key)) {
+            options[key] = colorMap.get(String(options[key])) || options[key];
+          }
+        }
+        return { ...row, options, color: colorMap.get(String(row.color)) || row.color };
+      }),
+    };
+  }
+  payload.catalog = catalog;
+  if (payload.colors) payload.colors = catalog.colors;
+  if (payload.sku_matrix) payload.sku_matrix = catalog.sku_matrix;
+  return payload;
 }
 
 function trimTerminalJobs(jobMap, maxEntries = 2000) {
@@ -6492,6 +6542,85 @@ app.post('/api/product-details/spanish/backfill', { preHandler: requireDashboard
 
 app.get('/api/spanish-backfill-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const job = spanishBackfillJobs.get(request.params.id);
+  return job ?? reply.code(404).send({ error: 'not_found' });
+});
+
+/**
+ * Backfill Spanish overlays for published WordPress products that have no
+ * collector source/publication mapping (legacy and split products). The WP
+ * resolver provides the English catalog fields; the result is stored only as
+ * the Spanish overlay.
+ */
+app.post('/api/wordpress/spanish/backfill', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const concurrency = Math.min(Math.max(Number(request.body?.concurrency)
+    || config.spanishTranslationConcurrency, 1), 8);
+  const job = {
+    id: crypto.randomUUID(), status: 'running', total: 0, processed: 0,
+    translated: 0, skipped: 0, failed: 0, paused: false, scanned: 0,
+    results: [], errors: [], concurrency, createdAt: new Date().toISOString(),
+    startedAt: new Date().toISOString(), completedAt: null,
+  };
+  spanishWordpressBackfillJobs.set(job.id, job);
+  trimTerminalJobs(spanishWordpressBackfillJobs);
+  (async () => {
+    const wp = wordpressClient(config);
+    const ids = [];
+    for (let page = 1; page <= 50; page += 1) {
+      const rows = await wp(`/wp-json/wp/v2/product?status=publish&per_page=100&page=${page}&_fields=id`, { timeoutMs: 30000 });
+      if (!Array.isArray(rows) || !rows.length) break;
+      ids.push(...rows.map((row) => Number(row.id)).filter(Boolean));
+      if (rows.length < 100) break;
+    }
+    job.total = ids.length;
+    let next = 0;
+    let stop = false;
+    const workers = Array.from({ length: Math.min(concurrency, ids.length) }, async () => {
+      while (!stop) {
+        const index = next++;
+        if (index >= ids.length) return;
+        const postId = ids[index];
+        job.scanned += 1;
+        try {
+          const existing = await wp(`/wp-json/hx/v1/products/es-payload?post_id=${postId}`, { timeoutMs: 30000 });
+          if (existing?.payload) {
+            job.skipped += 1;
+            continue;
+          }
+          const product = await wp(`/wp-json/hx/v1/products/resolve?post_id=${postId}`, { timeoutMs: 30000 });
+          const translated = await translateWordpressProductToSpanish({ product, config: modelTranslationConfig() });
+          const overlay = buildLegacySpanishOverlay(product, translated.translated, postId);
+          await saveSpanishOverlayPayload({ postId, payload: overlay, config });
+          job.translated += 1;
+          job.results.push({ postId, styleNo: product.sku ?? null, title: translated.translated.title });
+        } catch (error) {
+          job.failed += 1;
+          job.errors.push({ postId, message: String(error?.message || error).slice(0, 300) });
+          if (isExternalModelAccessError(error)) {
+            stop = true;
+            job.paused = true;
+            job.status = 'paused';
+            job.error = 'model_provider_access';
+          }
+        } finally {
+          job.processed += 1;
+        }
+      }
+    });
+    await Promise.all(workers);
+    if (!job.paused) job.status = job.failed ? 'completed_with_errors' : 'completed';
+    job.completedAt = new Date().toISOString();
+    app.log.info({ jobId: job.id, total: job.total, translated: job.translated,
+      skipped: job.skipped, failed: job.failed }, 'WordPress Spanish backfill completed');
+  })().catch((error) => {
+    job.status = 'failed';
+    job.error = String(error?.message || error).slice(0, 300);
+    job.completedAt = new Date().toISOString();
+  });
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress/spanish/backfill-jobs/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const job = spanishWordpressBackfillJobs.get(request.params.id);
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 

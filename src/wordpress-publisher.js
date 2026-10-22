@@ -918,11 +918,18 @@ export async function saveSpanishProductToWordPress({ publication, english, span
   const postId = Number(publication?.wp_post_id ?? publicationPayload?.post_id ?? 0);
   if (!postId) throw new Error('A published WordPress post ID is required for the Spanish payload.');
   const payload = buildSpanishProductPayload({ publicationPayload, english, spanish });
+  return saveSpanishOverlayPayload({ postId, payload, config });
+}
+
+export async function saveSpanishOverlayPayload({ postId, payload, config }) {
+  if (!Number(postId) || !payload?.external_id) {
+    throw new Error('A product post ID and Spanish payload are required.');
+  }
   const wp = wordpressClient(config);
   return wp('/wp-json/hx/v1/products/es-payload', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ post_id: postId, external_id: payload.external_id, payload }),
+    body: JSON.stringify({ post_id: Number(postId), external_id: payload.external_id, payload }),
     timeoutMs: 120000,
   });
 }
