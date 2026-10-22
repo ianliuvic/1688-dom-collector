@@ -809,7 +809,37 @@ export function buildSpanishProductPayload({ publicationPayload, english, spanis
   const meta = { ...(payload.meta ?? {}) };
   meta.title = title;
   meta.description = description;
-  meta.customization = /^yes$/i.test(clean(meta.customization)) ? 'Sí' : meta.customization;
+  const categoryNames = {
+    'Bikini Set': 'Conjunto de bikini',
+    'Bikini Bottom': 'Parte inferior de bikini',
+    'Bikini Top': 'Parte superior de bikini',
+    'One-Piece': 'Traje de baño de una pieza',
+    'One Piece': 'Traje de baño de una pieza',
+    'Tankini Set': 'Conjunto tankini',
+    'Tankini Top': 'Parte superior tankini',
+    'Three-Piece': 'Conjunto de tres piezas',
+    'Plus Size': 'Tallas grandes',
+    'Plus Size Swim': 'Tallas grandes',
+    'Cover ups': 'Pareos',
+    'Cover-Ups': 'Pareos',
+    'Rashguard': 'Rashguard',
+    "Kids' Swim": 'Trajes de baño infantiles',
+    'Girls Swim': 'Trajes de baño para niñas',
+    'Boys Swim': 'Trajes de baño para niños',
+    "Men's Swim": 'Trajes de baño para hombre',
+    'Maternity Swim': 'Trajes de baño de maternidad',
+    'Women Swim': 'Trajes de baño para mujer',
+    'Best Sellers': 'Más vendidos',
+    'New Arrivals': 'Novedades',
+  };
+  if (meta.style && categoryNames[meta.style]) meta.style = categoryNames[meta.style];
+  if (meta.primary_category && categoryNames[meta.primary_category]) {
+    meta.primary_category = categoryNames[meta.primary_category];
+  }
+  meta.customization = (meta.customization === true || /^yes$/i.test(clean(meta.customization)))
+    ? 'Sí' : meta.customization;
+  meta.customizable = (meta.customizable === true || /^yes$/i.test(clean(meta.customizable)))
+    ? 'Sí' : meta.customizable;
   const translateLeadTime = (value) => {
     const text = clean(value);
     if (/7\s*(?:to|-)\s*14\s*working days/i.test(text)) return '7 a 14 días hábiles';
