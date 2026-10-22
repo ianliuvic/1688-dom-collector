@@ -1038,25 +1038,13 @@ async function publishProductToPortal(productDetailId, options = {}) {
   // passed to the portal as extra media URLs.
   const wpImageSet = new Set((Array.isArray(publication.payload?.images) ? publication.payload.images : [])
     .map((image) => normalizedImageUrl(image?.url)).filter(Boolean));
-  let chosenList = Array.isArray(chosenImages)
+  const chosenList = Array.isArray(chosenImages)
     ? chosenImages.map((entry) => ({ url: String(entry?.url ?? '').trim(), visible: entry?.visible !== false }))
       .filter((entry) => entry.url)
     : null;
-  // A colour image assigned to a variant must be part of the published gallery —
-  // the portal only offers published images in the variant picker — so assigned
-  // images are auto-included and marked visible.
-  if (variantAssignments.length) {
-    if (chosenList) {
-      const chosenByUrl = new Map(chosenList.map((entry) => [entry.url, entry]));
-      for (const assignment of variantAssignments) {
-        const existing = chosenByUrl.get(assignment.url);
-        if (existing) existing.visible = true;
-        else chosenList.push({ url: assignment.url, visible: true });
-      }
-    } else {
-      chosenList = variantAssignments.map((assignment) => ({ url: assignment.url, visible: true }));
-    }
-  }
+  // Variant swatches are defaults on the variant itself, not extra gallery
+  // images. Keeping them out of the chosen gallery preserves the rule that the
+  // default Portal image set is exactly the WordPress product image set.
   const remoteDetailUrls = (chosenList ?? []).filter((entry) => entry.visible
     && !wpImageSet.has(normalizedImageUrl(entry.url))
     && /^https?:\/\//i.test(entry.url)
