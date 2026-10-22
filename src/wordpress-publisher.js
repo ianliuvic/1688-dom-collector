@@ -836,10 +836,8 @@ export function buildSpanishProductPayload({ publicationPayload, english, spanis
   if (meta.primary_category && categoryNames[meta.primary_category]) {
     meta.primary_category = categoryNames[meta.primary_category];
   }
-  meta.customization = (meta.customization === true || /^yes$/i.test(clean(meta.customization)))
-    ? 'Sí' : meta.customization;
-  meta.customizable = (meta.customizable === true || /^yes$/i.test(clean(meta.customizable)))
-    ? 'Sí' : meta.customizable;
+  // Keep the template's truthy values intact; the Spanish UI layer translates
+  // the displayed Yes to Sí without changing the template's boolean logic.
   const translateLeadTime = (value) => {
     const text = clean(value);
     if (/7\s*(?:to|-)\s*14\s*working days/i.test(text)) return '7 a 14 días hábiles';
