@@ -780,12 +780,15 @@ export function buildSpanishProductPayload({ publicationPayload, english, spanis
   const title = clean(esData.title);
   const description = clean(esData.description);
   const colorMap = englishSpanishOptionMap(english, esData, /(color|colour|颜色)/i);
-  const englishColors = (Array.isArray(english?.sku_options) ? english.sku_options : [])
-    .filter((option) => /(color|colour|颜色)/i.test(String(option?.dimensionName ?? '')));
   const spanishColors = (Array.isArray(esData.skuOptions) ? esData.skuOptions : [])
     .filter((option) => /(color|colour|颜色)/i.test(String(option?.dimensionName ?? '')));
-  const publicationColors = Array.isArray(publicationPayload?.catalog?.colors?.colors)
-    ? publicationPayload.catalog.colors.colors : [];
+  const catalog = (payload.catalog && typeof payload.catalog === 'object') ? payload.catalog : {
+    colors: payload.colors,
+    sizes: payload.sizes,
+    sku_matrix: payload.sku_matrix,
+    bulk_pricing: payload.bulk_pricing,
+  };
+  const publicationColors = Array.isArray(catalog.colors?.colors) ? catalog.colors.colors : [];
   // Normalized storefront labels can be more specific than the source language
   // ("Light Yellow" vs "Yellow"). Prefer source_label, then positional mapping,
   // so the overlay never leaves a normalized English color label behind.
@@ -830,46 +833,48 @@ export function buildSpanishProductPayload({ publicationPayload, english, spanis
     };
   }
 
-  if (payload.catalog) {
-    const catalog = payload.catalog;
-    if (catalog.colors?.colors) {
-      catalog.colors = {
-        ...catalog.colors,
-        colors: catalog.colors.colors.map((color) => ({
-          ...color,
-          label: colorMap.get(clean(color.label)) || color.label,
-        })),
-      };
-    }
-    if (catalog.sku_matrix?.rows) {
-      catalog.sku_matrix = {
-        ...catalog.sku_matrix,
-        rows: catalog.sku_matrix.rows.map((row) => {
-          const options = { ...(row.options ?? {}) };
-          for (const key of Object.keys(options)) {
-            if (/(color|colour|颜色)/i.test(key)) {
-              options[key] = colorMap.get(clean(options[key])) || options[key];
-            }
-          }
-          return {
-            ...row,
-            options,
-            color: colorMap.get(clean(row.color)) || row.color,
-          };
-        }),
-      };
-    }
-    if (catalog.bulk_pricing?.tiers) {
-      catalog.bulk_pricing = {
-        ...catalog.bulk_pricing,
-        tiers: catalog.bulk_pricing.tiers.map((tier) => ({
-          ...tier,
-          label: clean(tier.label).replace(/\bpcs?\b/gi, 'pzs'),
-        })),
-      };
-    }
-    payload.catalog = catalog;
+  if (catalog.colors?.colors) {
+    catalog.colors = {
+      ...catalog.colors,
+      colors: catalog.colors.colors.map((color) => ({
+        ...color,
+        label: colorMap.get(clean(color.label)) || color.label,
+      })),
+    };
   }
+  if (catalog.sku_matrix?.rows) {
+    catalog.sku_matrix = {
+      ...catalog.sku_matrix,
+      rows: catalog.sku_matrix.rows.map((row) => {
+        const options = { ...(row.options ?? {}) };
+        for (const key of Object.keys(options)) {
+          if (/(color|colour|颜色)/i.test(key)) {
+            options[key] = colorMap.get(clean(options[key])) || options[key];
+          }
+        }
+        return {
+          ...row,
+          options,
+          color: colorMap.get(clean(row.color)) || row.color,
+        };
+      }),
+    };
+  }
+  if (catalog.bulk_pricing?.tiers) {
+    catalog.bulk_pricing = {
+      ...catalog.bulk_pricing,
+      tiers: catalog.bulk_pricing.tiers.map((tier) => ({
+        ...tier,
+        label: clean(tier.label).replace(/\bpcs?\b/gi, 'pzs'),
+      })),
+    };
+  }
+  // Keep the nested catalog for the overlay reader and mirror the mutated
+  // top-level fields so both stored shapes stay consistent.
+  payload.catalog = catalog;
+  if (payload.colors) payload.colors = catalog.colors;
+  if (payload.sku_matrix) payload.sku_matrix = catalog.sku_matrix;
+  if (payload.bulk_pricing) payload.bulk_pricing = catalog.bulk_pricing;
 
   if (Array.isArray(payload.images)) {
     payload.images = payload.images.map((image, index) => ({
