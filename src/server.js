@@ -1183,6 +1183,7 @@ async function buildSelectionSourcePayload(productDetailId) {
   };
   for (const image of wpImages) addPoolImage(image.url, 'wp', image.alt || null, image.sourceUrl || null);
   for (const image of (detail.images ?? [])) {
+    if (String(image.source_url || '').startsWith('local-upload:')) continue;
     const url = imageUrlFor(image);
     const sourceUrl = image.source_url || null;
     const kind = image.image_type === 'description' ? 'detail' : (image.image_type === 'gallery' ? '1688 gallery' : '1688 image');

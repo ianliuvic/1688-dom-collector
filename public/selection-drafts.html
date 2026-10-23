@@ -266,7 +266,7 @@ function bindEditor(){
     }catch(e){alert('上传图片失败：'+String(e.message||e));}
     finally{mediaUpload.disabled=false;}
   };
-  editor.querySelectorAll('[data-add-pool]').forEach((button)=>{button.onclick=()=>{const card=button.closest('[data-pool-card]');const url=card?.dataset.url;if(!url)return;const box=editor.querySelector('#media');box.insertAdjacentHTML('beforeend',mediaRow({url,visible:true},box.children.length));card.remove();bindRemoval();};});
+  editor.querySelectorAll('[data-add-pool]').forEach((button)=>{button.onclick=()=>addPoolToMedia(button);});
   bindPricingPreview();
   bindMediaDrag();
   bindRemoval();
@@ -320,6 +320,35 @@ function bindMediaDrag(){
   };
   box.ondragend=()=>{clearMarks();box.querySelectorAll('.dragging').forEach((card)=>card.classList.remove('dragging'));dragIndex=null;};
 }
+function addPoolToMedia(button){
+  const card=button.closest('[data-pool-card]');
+  const url=card?.dataset.url;
+  if(!url)return;
+  const box=document.querySelector('#editor #media');
+  if(!box)return;
+  box.insertAdjacentHTML('beforeend',mediaRow({url,visible:true},box.children.length));
+  card.remove();
+  bindRemoval();
+}
+function ensurePoolImage(url){
+  if(!url)return;
+  let pool=document.querySelector('#editor #mediaPool');
+  if(!pool){
+    const mediaSection=document.querySelector('#editor #media')?.closest('.section');
+    if(!mediaSection)return;
+    const section=document.createElement('div');
+    section.className='section media-pool';
+    section.innerHTML='<h3>Original 1688 images not selected</h3><p class="hint">包含未选入的 1688 gallery、主图和详情图。点击图片下方按钮即可重新加入 selected media。</p><div class="media-grid" id="mediaPool"></div>';
+    mediaSection.insertAdjacentElement('afterend',section);
+    pool=section.querySelector('#mediaPool');
+  }
+  if([...pool.querySelectorAll('[data-pool-card]')].some((card)=>card.dataset.url===url))return;
+  const sourceEntry=(current?.source_payload?.mediaPool||[]).find((entry)=>entry.url===url);
+  const index=pool.children.length;
+  pool.insertAdjacentHTML('beforeend',poolCard({url,kind:sourceEntry?.kind||'source'},index));
+  const button=pool.querySelector('[data-pool-card="'+index+'"] [data-add-pool]');
+  if(button)button.onclick=()=>addPoolToMedia(button);
+}
 function bindPricingPreview(){
   const editor=document.getElementById('editor');
   const box=editor.querySelector('[data-pricing-editor]');
@@ -344,7 +373,8 @@ function bindPricingPreview(){
 }
 function bindRemoval(){
   const editor=document.getElementById('editor');
-  editor.querySelectorAll('[data-remove-tier],[data-remove-size],[data-remove-media],[data-remove-swatch]').forEach((button)=>{button.onclick=()=>{const target=button.closest('tr,[data-media-row],[data-swatch-card]');if(target)target.remove();};});
+  editor.querySelectorAll('[data-remove-tier],[data-remove-size],[data-remove-swatch]').forEach((button)=>{button.onclick=()=>{const target=button.closest('tr,[data-swatch-card]');if(target)target.remove();};});
+  editor.querySelectorAll('[data-remove-media]').forEach((button)=>{button.onclick=()=>{const card=button.closest('[data-media-row]');if(!card)return;const url=card.dataset.url||'';const isUpload=/\/upload-[^/]+$/i.test(url);card.remove();renumberMedia();if(!isUpload)ensurePoolImage(url);bindRemoval();};});
   editor.querySelectorAll('[data-remove-color]').forEach((button)=>{button.onclick=()=>{const groups=editor.querySelectorAll('[data-color-group]');if(groups.length<=1){alert('每个产品至少保留一个 color。');return;}const group=button.closest('[data-color-group]');if(!group)return;const name=group.querySelector('[data-color-name]')?.value||'这个 color';if(confirm('删除 '+name+' 及其下的所有 size？')){group.remove();updateColorDeleteState();}};});
   function updateColorDeleteState(){const groups=editor.querySelectorAll('[data-color-group]');groups.forEach((group)=>{const button=group.querySelector('[data-remove-color]');if(!button)return;button.disabled=groups.length<=1;button.title=groups.length<=1?'每个产品至少保留一个 color':'删除这个 color';});}
   updateColorDeleteState();
