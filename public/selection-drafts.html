@@ -109,13 +109,25 @@ function sourcePricingHtml(source){
   const min=source?.sourcePriceMin; const max=source?.sourcePriceMax;
   const sourcePrice=min==null&&max==null?'—':(min!=null&&max!=null&&Number(min)!==Number(max)?symbol+Number(min).toFixed(2)+' – '+symbol+Number(max).toFixed(2):symbol+Number(max??min).toFixed(2));
   const rule=source?.pricingRule;
-  const tiers=Array.isArray(rule?.tiers)?rule.tiers:[];
+  const tiers=(Array.isArray(rule?.tiers)?rule.tiers:[]).slice().sort((left,right)=>Number(left.minQuantity||0)-Number(right.minQuantity||0));
   const formula=rule?.formula?String(rule.formula):'';
+  const first=tiers[0];
+  const sample=first&&Number(first.minQuantity)>1?(()=>{
+    const rampEnd=Math.min(50,Number(first.minQuantity));
+    const maxQuantity=Number(first.minQuantity)-1;
+    const progress=(maxQuantity-1)/Math.max(rampEnd-1,1);
+    const priceAtOne=Math.round((Number(first.price)+2.5)*100)/100;
+    const priceAtEnd=Math.round((Number(first.price)+2.5*Math.max(0,1-progress))*100)/100;
+    const markupAtEnd=Math.round(2.5*Math.max(0,1-progress)*100)/100;
+    return {minQuantity:1,maxQuantity,priceAtOne,priceAtEnd,markupAtEnd};
+  })():null;
   return '<div class="section"><h3>1688 source price <span class="badge">read only</span></h3>'
     +'<div class="source-price"><strong>'+esc(sourcePrice)+'</strong><span>'+esc(currency)+' · captured 1688 price</span></div>'
     +'<div class="section" style="margin-top:12px;padding-top:0;border-top:0"><h3>Price calculation rule <span class="badge">read only</span></h3>'
     +(formula?'<p class="hint">'+esc(formula)+'</p>':'<p class="hint">No stored formula for this source.</p>')
+    +(sample?'<p class="hint">1 pc = first tier + $2.50; '+sample.maxQuantity+' pcs = first tier + $'+sample.markupAtEnd.toFixed(2)+'.</p>':'')
     +(tiers.length?'<table class="rule-table"><thead><tr><th>Tier</th><th>Quantity</th><th>Source markup</th><th>Portal price</th></tr></thead><tbody>'
+      +(sample?'<tr><td>1–'+sample.maxQuantity+' pcs · sample</td><td>1–'+sample.maxQuantity+'</td><td>+'+symbol+'2.50 → +'+symbol+sample.markupAtEnd.toFixed(2)+'</td><td>USD '+sample.priceAtEnd.toFixed(2)+' – '+sample.priceAtOne.toFixed(2)+'</td></tr>':'')
       +tiers.map((tier)=>'<tr><td>'+esc(tier.label||'')+'</td><td>'+esc(tier.minQuantity??'')+(tier.maxQuantity!=null?'–'+esc(tier.maxQuantity):'+')+'</td><td>'+(tier.cnyMarkup==null?'—':symbol+Number(tier.cnyMarkup).toFixed(2))+'</td><td>USD '+Number(tier.price||0).toFixed(2)+'</td></tr>').join('')
       +'</tbody></table>':'')
     +'</div></div>';
