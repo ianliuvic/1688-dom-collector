@@ -36,6 +36,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px
 </div>
 <script>
 let drafts = [];
+let wpCategories = [];
 let activeId = new URLSearchParams(location.search).get('draft') || '';
 let current = null;
 let message = '';
@@ -53,9 +54,16 @@ function renderList(){
   list.innerHTML=rows.length?rows.map((row)=>{const d=draftOf(row);return '<button type="button" class="draft-item'+(String(row.product_detail_id)===String(activeId)?' on':'')+'" data-id="'+esc(row.product_detail_id)+'"><strong>'+esc(d.styleNumber||('#'+row.product_detail_id))+' · '+esc(d.title||row.source_title||'')+'</strong><small>'+esc(row.shop_name||'未知店铺')+' · '+statusLabel(row.status)+(row.portal_product_id?' · Portal '+esc(row.portal_product_id):'')+(row.last_error?' · '+esc(String(row.last_error).slice(0,45)):'')+'</small></button>';}).join(''):'<div class="empty">还没有加入 selection 的产品</div>';
 }
 async function load(){
-  const response=await fetch('/api/selection/drafts?limit=300',{headers:{accept:'application/json'}});
+  const [response,taxonomiesResponse]=await Promise.all([
+    fetch('/api/selection/drafts?limit=300',{headers:{accept:'application/json'}}),
+    fetch('/api/wordpress/taxonomies',{headers:{accept:'application/json'}}).catch(()=>null),
+  ]);
   if(!response.ok) throw new Error('HTTP '+response.status);
   const body=await response.json(); drafts=body.items||[];
+  if(taxonomiesResponse?.ok){
+    const taxonomies=await taxonomiesResponse.json().catch(()=>null);
+    wpCategories=Array.isArray(taxonomies?.categories)?taxonomies.categories.filter((category)=>category?.id&&category?.name):[];
+  }
   if(!activeId && drafts[0]) activeId=String(drafts[0].product_detail_id);
   await openDraft(activeId, false);
   renderList();
@@ -80,7 +88,7 @@ function renderEditor(){
   +'<div class="grid">'
   +field('Style number','styleNumber',d.styleNumber||'')
   +field('Title','title',d.title||'')
-  +field('Category','category',d.category||'')
+  +categoryField(d.category||'')
   +'<label class="field"><span>Tags（逗号分隔）</span><input id="f-tags" value="'+esc((d.tags||[]).join(', '))+'"></label>'
   +'<label class="field wide"><span>Description</span><textarea id="f-description">'+esc(d.description||'')+'</textarea></label>'
   +field('Price min','priceMin',d.priceMin??'')
@@ -96,6 +104,15 @@ function renderEditor(){
   bindEditor();
 }
 function field(label,id,value){return '<label class="field"><span>'+esc(label)+'</span><input id="f-'+id+'" value="'+esc(value)+'"></label>';}
+function categoryField(value){
+  const categories=wpCategories.slice().sort((left,right)=>String(left.name).localeCompare(String(right.name)));
+  if(!categories.length)return field('Category','category',value);
+  const known=categories.some((category)=>String(category.name)===String(value));
+  return '<label class="field"><span>Category</span><select id="f-category"><option value="">选择 WP 分类</option>'
+    +(!known&&value?'<option value="'+esc(value)+'" selected>'+esc(value)+'（当前）</option>':'')
+    +categories.map((category)=>'<option value="'+esc(category.name)+'" '+(String(category.name)===String(value)?'selected':'')+'>'+esc(category.name)+'</option>').join('')
+    +'</select></label>';
+}
 function tierRow(tier,index){return '<tr data-tier="'+index+'"><td><input data-tier-field="label" value="'+esc(tier.label||'')+'"></td><td><input data-tier-field="minQuantity" type="number" min="1" value="'+esc(tier.minQuantity??1)+'"></td><td><input data-tier-field="maxQuantity" type="number" min="1" value="'+esc(tier.maxQuantity??'')+'"></td><td><input data-tier-field="price" type="number" min="0" step="0.01" value="'+esc(tier.price??'')+'"></td><td><button type="button" class="mini danger" data-remove-tier="'+index+'">删除</button></td></tr>';}
 function groupVariants(variants,swatches){
   const groups=new Map();
@@ -155,7 +172,7 @@ function readDraft(){
   const d=JSON.parse(JSON.stringify(current.draft_payload||{}));
   d.styleNumber=document.getElementById('f-styleNumber').value.trim();
   d.title=document.getElementById('f-title').value.trim();
-  d.category=document.getElementById('f-category').value.trim()||null;
+  d.category=(document.getElementById('f-category')?.value||'').trim()||null;
   d.description=document.getElementById('f-description').value;
   d.tags=document.getElementById('f-tags').value.split(',').map((v)=>v.trim()).filter(Boolean);
   d.priceMin=num(document.getElementById('f-priceMin').value); d.priceMax=num(document.getElementById('f-priceMax').value); d.moq=num(document.getElementById('f-moq').value); d.currency=document.getElementById('f-currency').value.trim().toUpperCase()||'USD';
