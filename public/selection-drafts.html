@@ -126,9 +126,9 @@ function sourcePricingHtml(source){
     +'<div class="source-price"><strong>'+esc(sourcePrice)+'</strong><span>'+esc(currency)+' · captured 1688 price</span></div>'
     +'<div class="section" style="margin-top:12px;padding-top:0;border-top:0"><h3>Price calculation rule <span class="badge">read only</span></h3>'
     +(formula?'<p class="hint">'+esc(formula)+'</p>':'<p class="hint">No stored formula for this source.</p>')
-    +(sample?'<p class="hint">1 pc = first tier + $2.50; '+sample.maxQuantity+' pcs = first tier + $'+sample.markupAtEnd.toFixed(2)+'.</p>':'')
+    +(sample?'<p class="hint">1 pc = first tier + USD 2.50; '+sample.maxQuantity+' pcs = first tier + USD '+sample.markupAtEnd.toFixed(2)+'. Sample delta is USD; tier markups are CNY.</p>':'')
     +(tiers.length?'<table class="rule-table"><thead><tr><th>Tier</th><th>Quantity</th><th>Source markup</th><th>Portal price</th></tr></thead><tbody>'
-      +(sample?'<tr><td>1–'+sample.maxQuantity+' pcs · sample</td><td>1–'+sample.maxQuantity+'</td><td>+'+symbol+'2.50 → +'+symbol+sample.markupAtEnd.toFixed(2)+'</td><td>USD '+sample.priceAtEnd.toFixed(2)+' – '+sample.priceAtOne.toFixed(2)+'</td></tr>':'')
+      +(sample?'<tr><td>1–'+sample.maxQuantity+' pcs · sample</td><td>1–'+sample.maxQuantity+'</td><td>+USD 2.50 → +USD '+sample.markupAtEnd.toFixed(2)+'</td><td>USD '+sample.priceAtEnd.toFixed(2)+' – '+sample.priceAtOne.toFixed(2)+'</td></tr>':'')
       +tiers.map((tier)=>'<tr><td>'+esc(tier.label||'')+'</td><td>'+esc(tier.minQuantity??'')+(tier.maxQuantity!=null?'–'+esc(tier.maxQuantity):'+')+'</td><td>'+(tier.cnyMarkup==null?'—':symbol+Number(tier.cnyMarkup).toFixed(2))+'</td><td>USD '+Number(tier.price||0).toFixed(2)+'</td></tr>').join('')
       +'</tbody></table>':'')
     +'</div></div>';
