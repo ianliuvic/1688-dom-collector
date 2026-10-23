@@ -1269,12 +1269,27 @@ async function buildSelectionSourcePayload(productDetailId) {
   })).filter((tier) => Number.isFinite(tier.price) && tier.minQuantity > 0);
   const prices = priceTiers.map((tier) => tier.price);
   const wpSwatches = [...swatchesByLabel.values()];
+  const sourceAttributes = Array.isArray(translation?.attributes) && translation.attributes.length
+    ? translation.attributes
+    : (Array.isArray(detail.attributes) ? detail.attributes : []);
+  const materialAttribute = sourceAttributes.find((attribute) =>
+    /(fabric|material|composition|面料|材质)/i.test(String(attribute?.name || '')));
+  const fabricMaterial = String(payload.meta?.material || materialAttribute?.value || '').trim() || null;
+  const rawPackage = detail.raw_data?.package && typeof detail.raw_data.package === 'object'
+    ? detail.raw_data.package : {};
+  const wpWeightGrams = Number(payload.meta?.package_weight_grams ?? payload.meta?.weight_grams);
+  const capturedWeightKg = Number(rawPackage.weightKg ?? rawPackage.officialWeightKg);
+  const packageWeightGrams = wpWeightGrams > 0
+    ? Math.round(wpWeightGrams)
+    : (capturedWeightKg > 0 ? Math.round(capturedWeightKg * 1000) : null);
   return {
     styleNumber: String(publication?.style_no || detail.raw_data?.styleNo || detail.offer_id || '').trim(),
     title: String(translation?.title || payload.title || detail.title || '').trim(),
     description: String(translation?.description || payload.description || detail.description || ''),
     category: payload.meta?.primary_category || detail.raw_data?.category || null,
     tags: Array.isArray(payload.tags) ? payload.tags.filter((tag) => typeof tag === 'string') : [],
+    fabricMaterial,
+    packageWeightGrams,
     currency: String(pricing?.currency || 'USD').toUpperCase(),
     priceMin: prices.length ? Math.min(...prices) : (detail.price_min === null ? null : Number(detail.price_min)),
     priceMax: prices.length ? Math.max(...prices) : (detail.price_max === null ? null : Number(detail.price_max)),
@@ -1347,6 +1362,8 @@ const SELECTION_FIELDS = [
   { key: 'description', label: 'Description' },
   { key: 'category', label: 'Category' },
   { key: 'tags', label: 'Tags' },
+  { key: 'fabricMaterial', label: 'Material composition' },
+  { key: 'packageWeightGrams', label: 'Product weight' },
   { key: 'media', label: 'Selected media' },
   { key: 'mediaPool', label: 'Original image pool' },
   { key: 'variants', label: 'Colors & variants' },
@@ -7585,6 +7602,8 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
     title: String(draft.title).trim(),
     description: String(draft.description || ''),
     category: draft.category || null,
+    fabricMaterial: draft.fabricMaterial || null,
+    packageWeightGrams: draft.packageWeightGrams ?? null,
     currency: String(draft.currency || 'USD').toUpperCase(),
     priceMin: draft.priceMin ?? null,
     priceMax: draft.priceMax ?? null,

@@ -101,13 +101,15 @@ async function openDraft(id, push=true){
 function renderEditor(){
   const editor=document.getElementById('editor');
   if(!current){editor.innerHTML='<div class="empty">从“全部产品”加入一个产品后开始编辑。</div>';return;}
-  const d=draftOf(current); const s=sourceOf(current); const media=Array.isArray(d.media)?d.media:[]; const sourcePool=Array.isArray(s.mediaPool)?s.mediaPool:[]; const selectedMedia=new Set(media.map((entry)=>entry.url)); const sourceBySelectedUrl=new Map(sourcePool.filter((entry)=>entry.sourceUrl).map((entry)=>[entry.url,entry.sourceUrl])); const selectedSourceUrls=new Set(media.map((entry)=>entry.sourceUrl||sourceBySelectedUrl.get(entry.url)).filter(Boolean)); const poolSeen=new Set(); const mediaPool=sourcePool.filter((entry)=>{if(!entry.url||selectedMedia.has(entry.url))return false;if(entry.sourceUrl&&selectedSourceUrls.has(entry.sourceUrl))return false;if(entry.sourceUrl&&poolSeen.has(entry.sourceUrl))return false;if(entry.sourceUrl)poolSeen.add(entry.sourceUrl);return true;}); const variants=Array.isArray(d.variants)?d.variants:[]; const tiers=Array.isArray(d.priceTiers)?d.priceTiers:[]; const swatches=Array.isArray(d.swatches)?d.swatches:[]; const variantGroups=groupVariants(variants,swatches);
+  const d=draftOf(current); const s=sourceOf(current); const media=Array.isArray(d.media)?d.media:[]; const sourcePool=Array.isArray(s.mediaPool)?s.mediaPool:[]; const selectedMedia=new Set(media.map((entry)=>entry.url)); const sourceBySelectedUrl=new Map(sourcePool.filter((entry)=>entry.sourceUrl).map((entry)=>[entry.url,entry.sourceUrl])); const selectedSourceUrls=new Set(media.map((entry)=>entry.sourceUrl||sourceBySelectedUrl.get(entry.url)).filter(Boolean)); const poolSeen=new Set(); const mediaPool=sourcePool.filter((entry)=>{if(!entry.url||selectedMedia.has(entry.url))return false;if(entry.sourceUrl&&selectedSourceUrls.has(entry.sourceUrl))return false;if(entry.sourceUrl&&poolSeen.has(entry.sourceUrl))return false;if(entry.sourceUrl)poolSeen.add(entry.sourceUrl);return true;}); const variants=Array.isArray(d.variants)?d.variants:[]; const tiers=Array.isArray(d.priceTiers)?d.priceTiers:[]; const swatches=Array.isArray(d.swatches)?d.swatches:[]; const variantGroups=groupVariants(variants,swatches); const materialValue=Object.prototype.hasOwnProperty.call(d,'fabricMaterial')?String(d.fabricMaterial??''):String(s.fabricMaterial??'85% Polyester, 15% Spandex'); const weightValue=Object.prototype.hasOwnProperty.call(d,'packageWeightGrams')?(d.packageWeightGrams??''):(s.packageWeightGrams??200);
   editor.innerHTML='<div class="editor-head"><div><h2>'+esc(d.title||('产品 #'+current.product_detail_id))+'</h2><div class="hint">Portal draft · revision '+esc(current.revision??1)+'</div></div><div><span class="badge '+statusClass(current.status)+'">'+statusLabel(current.status)+'</span>'+(current.portal_product_id?' <span class="badge ok">Portal '+esc(current.portal_product_id)+'</span>':'')+'</div></div>'
   +'<div class="grid">'
   +field('Style number','styleNumber',d.styleNumber||'')
   +field('Title','title',d.title||'')
   +categoryField(d.category||'')
   +'<label class="field"><span>Tags（逗号分隔）</span><input id="f-tags" value="'+esc((d.tags||[]).join(', '))+'"></label>'
+  +field('Material composition','fabricMaterial',materialValue)
+  +'<label class="field"><span>Product weight (g)</span><input id="f-packageWeightGrams" type="number" min="1" step="1" value="'+esc(weightValue)+'"></label>'
   +'<label class="field wide"><span>Description</span><textarea id="f-description">'+esc(d.description||'')+'</textarea></label>'
   +'</div>'
   +pricingEditorHtml(s,d)
@@ -220,6 +222,9 @@ function readDraft(){
   d.category=(document.getElementById('f-category')?.value||'').trim()||null;
   d.description=document.getElementById('f-description').value;
   d.tags=document.getElementById('f-tags').value.split(',').map((v)=>v.trim()).filter(Boolean);
+  d.fabricMaterial=(document.getElementById('f-fabricMaterial')?.value||'').trim()||null;
+  const packageWeight=num(document.getElementById('f-packageWeightGrams')?.value);
+  d.packageWeightGrams=Number.isFinite(packageWeight)&&packageWeight>0?Math.round(packageWeight):null;
   const baseRule=JSON.parse(JSON.stringify(current?.draft_payload?.pricingRule||current?.source_payload?.pricingRule||{}));
   const sourceMax=Number(baseRule.sourceMaxPrice??current?.source_payload?.sourcePriceMax??0);
   const exchangeRate=Number(baseRule.exchangeRate??6.5)||6.5;
