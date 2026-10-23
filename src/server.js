@@ -7381,6 +7381,40 @@ app.post('/api/selection/products/:id/materialize-image', { preHandler: requireD
   }
 });
 
+app.post('/api/selection/products/:id/upload-image', { preHandler: requireDashboardOrApiKey, bodyLimit: 16 * 1024 * 1024 }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const dataBase64 = String(request.body?.dataBase64 || '');
+  const contentType = String(request.body?.contentType || '').toLowerCase();
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  if (!/^image\/(jpeg|png|webp|gif)$/.test(contentType)) return reply.code(400).send({ error: 'invalid_image_type' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  let bytes;
+  try { bytes = Buffer.from(dataBase64.replace(/^data:[^;]+;base64,/i, ''), 'base64'); } catch { return reply.code(400).send({ error: 'invalid_image_data' }); }
+  if (!bytes.length || bytes.length > 10 * 1024 * 1024) return reply.code(400).send({ error: 'invalid_image_size' });
+  const sha = crypto.createHash('sha256').update(bytes).digest('hex');
+  const existing = (detail.images ?? []).find((image) => image.source_url === `local-upload:${sha}` && image.storage_path);
+  if (existing) return { url: `${config.publicBaseUrl}${imagePublicPath(existing.storage_path)}` };
+  const extension = ({ 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' })[contentType] || '.jpg';
+  const root = path.resolve(config.storagePath, 'product-images');
+  const folder = path.resolve(root, String(detail.offer_id ?? 'unassigned'));
+  if (!folder.startsWith(`${root}${path.sep}`)) return reply.code(400).send({ error: 'invalid_storage_folder' });
+  await fs.mkdir(folder, { recursive: true });
+  const fileName = `upload-${sha.slice(0, 12)}${extension}`;
+  const filePath = path.join(folder, fileName);
+  await fs.writeFile(filePath, bytes);
+  await db.addProductImage(detail.id, {
+    type: 'gallery',
+    sortOrder: 900,
+    sourceUrl: `local-upload:${sha}`,
+    storagePath: filePath,
+    mimeType: contentType,
+    contentSha256: sha,
+    byteSize: bytes.length,
+  });
+  return { url: `${config.publicBaseUrl}${imagePublicPath(filePath)}` };
+});
+
 /* ---- Portal selection drafts (source/editable/published lifecycle) ---- */
 app.get('/api/selection/drafts', { preHandler: requireDashboardOrApiKey }, async (request) => {
   return db.listSelectionDrafts({
