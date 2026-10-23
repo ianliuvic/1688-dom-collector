@@ -2850,6 +2850,15 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  async function updateSelectionDraftSource(productDetailId, sourcePayload, draftPayload) {
+    const result = await pool.query(`
+      UPDATE product_selection_drafts
+      SET source_payload=$2, draft_payload=$3, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+      WHERE product_detail_id=$1
+      RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), JSON.stringify(draftPayload ?? {})]);
+    return result.rows[0] ?? null;
+  }
+
   async function resetSelectionDraft(productDetailId) {
     const result = await pool.query(`
       UPDATE product_selection_drafts
@@ -3791,7 +3800,7 @@ export function createDatabase(databaseUrl) {
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     summarizeWordPressPublications, listWordPressPublications, listProductSaleQuantities,
     listSelectionProducts, listSelectionFacets, getSelectionProductMedia, getSelectionProductSkus,
-    getSelectionDraft, addSelectionDraft, updateSelectionDraft, resetSelectionDraft,
+    getSelectionDraft, addSelectionDraft, updateSelectionDraft, updateSelectionDraftSource, resetSelectionDraft,
     removeSelectionDraft, markSelectionDraftPublished, markSelectionDraftFailed, listSelectionDrafts,
     listPortalDelistedProducts,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,

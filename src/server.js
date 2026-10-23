@@ -7317,6 +7317,37 @@ app.patch('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey },
   return updated ? { draft: updated } : reply.code(404).send({ error: 'not_found' });
 });
 
+app.post('/api/selection/drafts/:id/refresh-source', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const row = await db.getSelectionDraft(id);
+  if (!row) return reply.code(404).send({ error: 'not_found' });
+  const source = await buildSelectionSourcePayload(id);
+  if (!source) return reply.code(404).send({ error: 'source_not_found' });
+  const current = row.draft_payload ?? {};
+  const oldVariants = Array.isArray(current.variants) ? current.variants : [];
+  const variants = (source.variants ?? []).map((variant) => {
+    const old = oldVariants.find((entry) => (entry.sourceRowKey && entry.sourceRowKey === variant.sourceRowKey)
+      || (entry.supplierSku && entry.supplierSku === variant.supplierSku));
+    const oldTitle = String(old?.title || '');
+    return {
+      ...variant,
+      title: oldTitle && !/[\u3400-\u9fff]/.test(oldTitle) ? oldTitle : variant.title,
+      optionValues: old?.optionValues && !/[\u3400-\u9fff]/.test(JSON.stringify(old.optionValues)) ? old.optionValues : variant.optionValues,
+      imageUrl: old?.imageUrl || variant.imageUrl || null,
+      sourcePrice: old?.sourcePrice ?? variant.sourcePrice ?? null,
+      stock: old?.stock ?? variant.stock ?? null,
+    };
+  });
+  const oldSwatches = Array.isArray(current.swatches) ? current.swatches : [];
+  const swatches = (source.swatches ?? []).map((swatch) => {
+    const old = oldSwatches.find((entry) => String(entry.value || '').toLowerCase() === String(swatch.value || '').toLowerCase());
+    return { ...swatch, color: old?.color || swatch.color || null, imageUrl: old?.imageUrl || swatch.imageUrl || null };
+  });
+  const merged = { ...current, variants: variants.length ? variants : current.variants, swatches };
+  const saved = await db.updateSelectionDraftSource(id, source, merged);
+  return { draft: saved };
+});
+
 app.post('/api/selection/drafts/:id/reset', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
   const updated = await db.resetSelectionDraft(id);
