@@ -1125,6 +1125,124 @@ async function applyPortalVariantImages(portal, product, assignments, productDet
   return { colors: matchedColors, unmatchedColors, variants: patch.length, updated: updated?.updated ?? 0 };
 }
 
+/**
+ * Build the immutable source snapshot for a selection draft. A WP publication
+ * supplies the published gallery/copy when available; otherwise the captured
+ * 1688 detail and its English translation are used, so unpublished products
+ * can still become Portal candidates.
+ */
+async function buildSelectionSourcePayload(productDetailId) {
+  const id = Number(productDetailId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const [detail, publication, translation] = await Promise.all([
+    db.getProductDetail(id),
+    db.getWordPressPublication(id),
+    db.getLatestProductTranslation(id, 'en'),
+  ]);
+  if (!detail) return null;
+  const payload = publication?.payload ?? {};
+  const wpImages = (Array.isArray(payload.images) ? payload.images : [])
+    .map((image, index) => ({
+      url: image?.url || image?.source_url || null,
+      alt: image?.alt || null,
+      visible: true,
+      sortOrder: index,
+    }))
+    .filter((image) => image.url);
+  const capturedImages = (detail.images ?? [])
+    .filter((image) => ['main', 'gallery'].includes(image.image_type))
+    .map((image, index) => {
+      const base = imagePublicPath(image.storage_path);
+      return {
+        url: base ? `${config.publicBaseUrl}${base}` : (image.source_url || null),
+        alt: null,
+        visible: true,
+        sortOrder: index,
+      };
+    })
+    .filter((image) => image.url);
+  const seenMedia = new Set();
+  const media = (wpImages.length ? wpImages : capturedImages).filter((image) => {
+    if (seenMedia.has(image.url)) return false;
+    seenMedia.add(image.url);
+    return true;
+  });
+  const skuRows = Array.isArray(detail.skus) ? detail.skus : [];
+  const pickOption = (options, pattern) => {
+    for (const [key, value] of Object.entries(options ?? {})) {
+      if (pattern.test(String(key)) && value !== null && value !== undefined && String(value).trim()) {
+        return String(value).trim();
+      }
+    }
+    return '';
+  };
+  const variants = skuRows.map((sku, index) => {
+    const color = pickOption(sku.option_data, /(^color$|colou?r|颜色)/i);
+    const size = pickOption(sku.option_data, /(^size$|尺码|尺寸|码数)/i);
+    const base = imagePublicPath(sku.image_storage_path);
+    return {
+      sourceRowKey: sku.sku_key ?? null,
+      supplierSku: String(sku.variant_sku || sku.sku_key || `sku-${index + 1}`),
+      title: [color, size].filter(Boolean).join(' / ') || sku.sku_text || `Variant ${index + 1}`,
+      optionValues: {
+        ...(color ? { Color: color } : {}),
+        ...(size ? { Size: size } : {}),
+      },
+      imageUrl: base ? `${config.publicBaseUrl}${base}` : (sku.image_source_url || null),
+      sourcePrice: null,
+      stock: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock),
+      sortOrder: index,
+    };
+  });
+  let pricing = null;
+  try { pricing = payload.bulk_pricing ?? buildWearHongxiuPricing(detail); } catch { pricing = null; }
+  const pricingTiers = Array.isArray(pricing?.tiers) && pricing.tiers.length
+    ? pricing.tiers
+    : Array.isArray(detail.priceTiers) ? detail.priceTiers : [];
+  const priceTiers = pricingTiers.map((tier, index) => ({
+    label: String(tier.label || `${tier.min_quantity ?? tier.minQuantity ?? 1}+ pcs`),
+    minQuantity: Number(tier.min_quantity ?? tier.minQuantity ?? 1),
+    maxQuantity: tier.max_quantity ?? tier.maxQuantity ?? null,
+    price: Number(tier.price),
+    sortOrder: index,
+  })).filter((tier) => Number.isFinite(tier.price) && tier.minQuantity > 0);
+  const prices = priceTiers.map((tier) => tier.price);
+  const wpSwatches = (Array.isArray(payload.colors?.colors) ? payload.colors.colors : [])
+    .map((colour) => {
+      const value = String(colour?.label ?? colour?.value ?? '').trim();
+      if (!value) return null;
+      return {
+        value,
+        color: /^#[0-9a-f]{6}$/i.test(String(colour?.code || '')) ? colour.code : null,
+        imageUrl: colour?.image_source_url || colour?.image_url || null,
+      };
+    })
+    .filter(Boolean);
+  return {
+    styleNumber: String(publication?.style_no || detail.raw_data?.styleNo || detail.offer_id || '').trim(),
+    title: String(translation?.title || payload.title || detail.title || '').trim(),
+    description: String(translation?.description || payload.description || detail.description || ''),
+    category: payload.meta?.primary_category || detail.raw_data?.category || null,
+    tags: Array.isArray(payload.tags) ? payload.tags.filter((tag) => typeof tag === 'string') : [],
+    currency: String(pricing?.currency || 'USD').toUpperCase(),
+    priceMin: prices.length ? Math.min(...prices) : (detail.price_min === null ? null : Number(detail.price_min)),
+    priceMax: prices.length ? Math.max(...prices) : (detail.price_max === null ? null : Number(detail.price_max)),
+    moq: priceTiers[0]?.minQuantity ?? (detail.moq === null ? null : Number(detail.moq)),
+    priceTiers,
+    variants,
+    media,
+    swatches: wpSwatches,
+    sourceUrl: detail.canonical_url || detail.source_url || null,
+    source: {
+      productDetailId: id,
+      offerId: detail.offer_id ?? null,
+      wpPostId: publication?.wp_post_id ?? null,
+      wpUrl: publication?.wp_url ?? null,
+      capturedAt: detail.last_crawled_at ?? null,
+    },
+  };
+}
+
 /** Import one collector product into the portal catalog, optionally applying image order/selection. */
 async function publishProductToPortal(productDetailId, options = {}) {
   const target = options.target === 'production' ? 'production' : 'staging';
@@ -6891,6 +7009,10 @@ app.get('/api/sales/by-styles', { preHandler: requireApiKey }, async (request, r
 // Product selection shortlist page (published products with sales/colour/size
 // filters) for curating the portal catalog. Same HTTP Basic gate as /products.
 app.get('/selection', { preHandler: requireDashboardAuth }, async (_request, reply) => {
+  const html = await fs.readFile(new URL('../public/selection-drafts.html', import.meta.url), 'utf8');
+  return reply.type('text/html; charset=utf-8').send(html);
+});
+app.get('/selection-legacy', { preHandler: requireDashboardAuth }, async (_request, reply) => {
   const html = await fs.readFile(new URL('../public/selection.html', import.meta.url), 'utf8');
   return reply.type('text/html; charset=utf-8').send(html);
 });
@@ -7114,6 +7236,128 @@ app.get('/api/selection/products/:id/skus', { preHandler: requireDashboardOrApiK
   const data = await db.getSelectionProductSkus(request.params.id);
   if (!data) return reply.code(404).send({ error: 'not_found' });
   return data;
+});
+
+/* ---- Portal selection drafts (source/editable/published lifecycle) ---- */
+app.get('/api/selection/drafts', { preHandler: requireDashboardOrApiKey }, async (request) => {
+  return db.listSelectionDrafts({
+    q: request.query?.q, limit: request.query?.limit, offset: request.query?.offset,
+  });
+});
+
+app.post('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const source = await buildSelectionSourcePayload(id);
+  if (!source) return reply.code(404).send({ error: 'not_found' });
+  const existing = await db.getSelectionDraft(id);
+  const draft = existing ?? await db.addSelectionDraft(id, source, source);
+  return reply.code(existing ? 200 : 201).send({ draft });
+});
+
+app.delete('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const existing = await db.getSelectionDraft(id).catch(() => null);
+  if (!existing) return reply.code(404).send({ error: 'not_found' });
+  if (existing.portal_product_id && String(existing.status).toUpperCase() === 'PUBLISHED') {
+    return reply.code(409).send({ error: 'published_selection', message: 'Publish/archive it in Portal first or keep the selection record.' });
+  }
+  await db.removeSelectionDraft(id);
+  return { removed: true };
+});
+
+app.get('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const draft = await db.getSelectionDraft(id);
+  return draft ? { draft } : reply.code(404).send({ error: 'not_found' });
+});
+
+app.patch('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const draftPayload = request.body?.draft;
+  if (!draftPayload || typeof draftPayload !== 'object' || Array.isArray(draftPayload)) {
+    return reply.code(400).send({ error: 'draft_required' });
+  }
+  const updated = await db.updateSelectionDraft(id, draftPayload);
+  return updated ? { draft: updated } : reply.code(404).send({ error: 'not_found' });
+});
+
+app.post('/api/selection/drafts/:id/reset', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const updated = await db.resetSelectionDraft(id);
+  return updated ? { draft: updated } : reply.code(404).send({ error: 'not_found' });
+});
+
+app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const draftRow = await db.getSelectionDraft(id);
+  if (!draftRow) return reply.code(404).send({ error: 'not_found' });
+  const draft = draftRow.draft_payload ?? {};
+  if (!String(draft.title || '').trim() || !Array.isArray(draft.variants) || !draft.variants.length) {
+    return reply.code(400).send({ error: 'draft_incomplete', message: 'Title and at least one variant are required.' });
+  }
+  const target = request.body?.target === 'production' ? 'production' : 'staging';
+  const portal = target === 'production'
+    ? { name: 'production', url: config.portalApiUrl, secret: config.portalAdminSecret }
+    : { name: 'staging', url: config.portalStagingApiUrl, secret: config.portalStagingAdminSecret };
+  if (!portal.url || !portal.secret) return reply.code(503).send({ error: `${target}_portal_not_configured` });
+  const portalPayload = {
+    selectionKey: `selection:${id}`,
+    styleNumber: String(draft.styleNumber || `SEL-${id}`).trim(),
+    title: String(draft.title).trim(),
+    description: String(draft.description || ''),
+    category: draft.category || null,
+    currency: String(draft.currency || 'USD').toUpperCase(),
+    priceMin: draft.priceMin ?? null,
+    priceMax: draft.priceMax ?? null,
+    moq: draft.moq ?? null,
+    priceTiers: Array.isArray(draft.priceTiers) ? draft.priceTiers : [],
+    variants: draft.variants.map((variant, index) => ({
+      sourceRowKey: variant.sourceRowKey ?? null,
+      supplierSku: String(variant.supplierSku || `sku-${index + 1}`).trim(),
+      title: String(variant.title || variant.supplierSku || `Variant ${index + 1}`).trim(),
+      optionValues: variant.optionValues && typeof variant.optionValues === 'object' ? variant.optionValues : {},
+      imageUrl: variant.imageUrl || null,
+      sourcePrice: variant.sourcePrice ?? null,
+      stock: variant.stock ?? null,
+      sortOrder: Number(variant.sortOrder ?? index),
+    })),
+    media: (Array.isArray(draft.media) ? draft.media : []).filter((entry) => entry?.url).map((entry, index) => ({
+      url: entry.url, alt: entry.alt ?? null, visible: entry.visible !== false, sortOrder: Number(entry.sortOrder ?? index),
+    })),
+    swatches: Array.isArray(draft.swatches) ? draft.swatches : [],
+    sourceUrl: draft.sourceUrl || draft.source?.wpUrl || null,
+  };
+  try {
+    const response = await fetch(new URL('/api/v1/admin/catalog/import/selection', portal.url), {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${portal.secret}` },
+      body: JSON.stringify(portalPayload),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok || !body?.product?.id) {
+      throw new Error(body?.error?.message || body?.message || body?.error || `Portal returned HTTP ${response.status}`);
+    }
+    const portalProduct = body.product;
+    const saved = await db.markSelectionDraftPublished(id, {
+      portalProductId: portalProduct.id,
+      portalStatus: portalProduct.status || 'ACTIVE',
+    });
+    await db.savePortalPublication(id, {
+      wpPostId: draft.source?.wpPostId ?? null,
+      styleNo: portalPayload.styleNumber,
+      portalProductId: portalProduct.id,
+      portalStatus: portalProduct.status || 'ACTIVE',
+      sourceKey: `selection:${id}`,
+      portalUrl: `${portal.url}/admin/catalog`,
+      result: { target, selectionKey: `selection:${id}`, title: portalProduct.title, status: portalProduct.status },
+    }).catch(() => null);
+    return { draft: saved, portal: { productId: portalProduct.id, status: portalProduct.status || 'ACTIVE', target } };
+  } catch (error) {
+    await db.markSelectionDraftFailed(id, error?.message || error).catch(() => null);
+    return reply.code(502).send({ error: 'portal_publish_failed', message: String(error?.message || error).slice(0, 1000) });
+  }
 });
 
 // Publish (or refresh) one selection product into the portal catalog, applying
@@ -8711,6 +8955,8 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
       availability,
       shop,
       edited,
+      selection: ['selected', 'not_selected'].includes(String(request.query?.selection ?? '').trim())
+        ? String(request.query.selection).trim() : '',
     }),
     getPortalStagingActiveIds(),
   ]);
@@ -8723,6 +8969,9 @@ app.get('/api/product-catalog', { preHandler: requireDashboardOrApiKey }, async 
       ...toProductCatalogItem(row),
       portalState: catalogPortalState(row, liveIds),
       portalLive: row.portal_product_id && liveIds ? liveIds.has(String(row.portal_product_id)) : null,
+      selectionState: row.selection_status ?? null,
+      selectionPortalId: row.selection_portal_id ?? null,
+      selectionError: row.selection_error ?? null,
       lastEditAt: editTimes.lastEditAt,
       editsPending: Boolean(editTimes.lastContentEditAt
         && (!publicationUpdatedAt || Date.parse(editTimes.lastContentEditAt) > Date.parse(publicationUpdatedAt))),

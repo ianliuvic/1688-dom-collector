@@ -541,6 +541,27 @@ export function createDatabase(databaseUrl) {
       );
       CREATE INDEX IF NOT EXISTS product_portal_publications_post_idx
         ON product_portal_publications(wp_post_id);
+      -- Portal selection drafts. A product enters this table only after it is
+      -- explicitly added from the products page. The source snapshot is kept
+      -- separate from the editable draft so edits never mutate captures/WP.
+      CREATE TABLE IF NOT EXISTS product_selection_drafts (
+        product_detail_id bigint PRIMARY KEY REFERENCES product_details(id) ON DELETE CASCADE,
+        status text NOT NULL DEFAULT 'DRAFT',
+        source_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+        draft_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+        revision integer NOT NULL DEFAULT 1,
+        portal_product_id text,
+        portal_status text,
+        last_error text,
+        selected_at timestamptz NOT NULL DEFAULT now(),
+        last_published_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS product_selection_drafts_status_idx
+        ON product_selection_drafts(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS product_selection_drafts_portal_idx
+        ON product_selection_drafts(portal_product_id);
       -- Main-image perceptual hashes (dHash + pHash) used to skip capturing a
       -- new offer whose first image is exactly the same image as an existing
       -- product.  Rows are imported from the Wearhongxiu published catalog and
@@ -1183,7 +1204,7 @@ export function createDatabase(databaseUrl) {
    * main/gallery/sku image list, price range, WordPress publication state,
    * the source shop and 1688 listing status, and the colour-variant count. */
   async function listProductCatalog({ limit = 100, offset = 0, search = '', colors = 0, wp = '',
-    bundle = '', shop = '', availability = '', edited = false } = {}) {
+    bundle = '', shop = '', availability = '', edited = false, selection = '' } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
     const safeOffset = Math.max(Number(offset) || 0, 0);
     const colorBucket = [1, 2, 3, 4, 5].includes(Number(colors)) ? Number(colors)
@@ -1191,6 +1212,7 @@ export function createDatabase(databaseUrl) {
     const wpValues = ['publish', 'unpublished'].includes(String(wp)) ? String(wp) : '';
     const bundleValues = ['bundle', 'clear'].includes(String(bundle)) ? String(bundle) : '';
     const availabilityValues = ['active', 'delisted'].includes(String(availability)) ? String(availability) : '';
+    const selectionValue = ['selected', 'not_selected'].includes(String(selection)) ? String(selection) : '';
     const shopValues = String(shop || '').trim().slice(0, 24);
     const searchTerm = String(search || '').trim().slice(0, 120);
     const searchParam = searchTerm ? `%${searchTerm}%` : null;
@@ -1229,12 +1251,15 @@ export function createDatabase(databaseUrl) {
         rag.created_at AS rag_created_at, rag.completed_at AS rag_completed_at,
         portal.portal_product_id, portal.portal_status, portal.last_error AS portal_error,
         portal.result->>'target' AS portal_target, portal.last_synced_at AS portal_synced_at,
+        selection.status AS selection_status, selection.portal_product_id AS selection_portal_id,
+        selection.last_error AS selection_error,
         source.shop_id, source.shop_name, source.availability_status, source.delisted_at,
         EXISTS (SELECT 1 FROM product_split_plans plans WHERE plans.product_detail_id=details.id) AS has_split_plan,
         ${colorExpr} AS color_count
       FROM product_details details
       LEFT JOIN product_wordpress_publications publications ON publications.product_detail_id=details.id
       LEFT JOIN product_portal_publications portal ON portal.product_detail_id=details.id
+      LEFT JOIN product_selection_drafts selection ON selection.product_detail_id=details.id
       LEFT JOIN LATERAL (
         SELECT syncs.status, syncs.active, syncs.trigger_type, syncs.canonical_product_id,
           syncs.error, syncs.created_at, syncs.completed_at
@@ -1257,7 +1282,7 @@ export function createDatabase(databaseUrl) {
         ${editedClause})`;
     // Build a filter set with dynamically numbered placeholders. search ($1)
     // is always part of the base CTE, so extra values start at $2.
-    const filtersFor = ({ color, wp: useWp, bundle: useBundle, shop: useShop, availability: useAvailability }) => {
+    const filtersFor = ({ color, wp: useWp, bundle: useBundle, shop: useShop, availability: useAvailability, selection: useSelection }) => {
       const values = [searchParam];
       const parts = [];
       if (color) {
@@ -1294,16 +1319,23 @@ export function createDatabase(databaseUrl) {
           OR (${p}::text = 'active' AND availability_status = 'active')
           OR (${p}::text = 'delisted' AND availability_status = 'delisted'))`);
       }
+      if (useSelection) {
+        values.push(selectionValue);
+        const p = `$${values.length}`;
+        parts.push(`(${p}::text = ''
+          OR (${p}::text = 'selected' AND selection_status IS NOT NULL)
+          OR (${p}::text = 'not_selected' AND selection_status IS NULL))`);
+      }
       return { values, where: parts.length ? parts.join(' AND ') : 'true' };
     };
 
-    const main = filtersFor({ color: true, wp: true, bundle: true, shop: true, availability: true });
+    const main = filtersFor({ color: true, wp: true, bundle: true, shop: true, availability: true, selection: true });
     const col = filtersFor({ wp: true, bundle: true, shop: true, availability: true });
     const wpq = filtersFor({ color: true, bundle: true, shop: true, availability: true });
     const bq = filtersFor({ color: true, wp: true, shop: true, availability: true });
     const sq = filtersFor({ color: true, wp: true, bundle: true, availability: true });
     const aq = filtersFor({ color: true, wp: true, bundle: true, shop: true });
-    const itemsQ = filtersFor({ color: true, wp: true, bundle: true, shop: true, availability: true });
+    const itemsQ = filtersFor({ color: true, wp: true, bundle: true, shop: true, availability: true, selection: true });
     // These read-only queries are independent; running them concurrently
     // turns sequential round trips into one wait for the products page.
     const [counts, all, distribution, wpRows, bundleRows, shopRows, availRows, manual, result] = await Promise.all([
@@ -2794,6 +2826,111 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  async function getSelectionDraft(productDetailId) {
+    const result = await pool.query('SELECT * FROM product_selection_drafts WHERE product_detail_id=$1', [productDetailId]);
+    return result.rows[0] ?? null;
+  }
+
+  async function addSelectionDraft(productDetailId, sourcePayload, draftPayload) {
+    const inserted = await pool.query(`
+      INSERT INTO product_selection_drafts (product_detail_id, status, source_payload, draft_payload)
+      VALUES ($1, 'DRAFT', $2, $3)
+      ON CONFLICT (product_detail_id) DO NOTHING
+      RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), JSON.stringify(draftPayload ?? {})]);
+    if (inserted.rows[0]) return inserted.rows[0];
+    return getSelectionDraft(productDetailId);
+  }
+
+  async function updateSelectionDraft(productDetailId, draftPayload) {
+    const result = await pool.query(`
+      UPDATE product_selection_drafts
+      SET draft_payload=$2, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+      WHERE product_detail_id=$1
+      RETURNING *`, [productDetailId, JSON.stringify(draftPayload ?? {})]);
+    return result.rows[0] ?? null;
+  }
+
+  async function resetSelectionDraft(productDetailId) {
+    const result = await pool.query(`
+      UPDATE product_selection_drafts
+      SET draft_payload=source_payload, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+      WHERE product_detail_id=$1
+      RETURNING *`, [productDetailId]);
+    return result.rows[0] ?? null;
+  }
+
+  async function removeSelectionDraft(productDetailId) {
+    const result = await pool.query('DELETE FROM product_selection_drafts WHERE product_detail_id=$1 RETURNING *', [productDetailId]);
+    return result.rows[0] ?? null;
+  }
+
+  async function markSelectionDraftPublished(productDetailId, values = {}) {
+    const result = await pool.query(`
+      UPDATE product_selection_drafts
+      SET status='PUBLISHED', portal_product_id=$2, portal_status=$3, last_error=NULL,
+          last_published_at=now(), updated_at=now()
+      WHERE product_detail_id=$1
+      RETURNING *`, [productDetailId, values.portalProductId ?? null, values.portalStatus ?? null]);
+    return result.rows[0] ?? null;
+  }
+
+  async function markSelectionDraftFailed(productDetailId, error) {
+    const result = await pool.query(`
+      UPDATE product_selection_drafts
+      SET status='ERROR', last_error=$2, updated_at=now()
+      WHERE product_detail_id=$1
+      RETURNING *`, [productDetailId, String(error ?? 'Selection publish failed').slice(0, 2000)]);
+    return result.rows[0] ?? null;
+  }
+
+  async function listSelectionDrafts({ q = '', limit = 100, offset = 0 } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const values = [];
+    let search = '';
+    const term = String(q ?? '').trim().slice(0, 120);
+    if (term) {
+      values.push(`%${term.replace(/[\\%_]/g, '\\$&')}%`);
+      const p = `$${values.length}`;
+      search = `WHERE (coalesce(draft.draft_payload->>'styleNumber','') ILIKE ${p}
+        OR coalesce(draft.draft_payload->>'title','') ILIKE ${p}
+        OR coalesce(details.offer_id::text,'') ILIKE ${p}
+        OR coalesce(products.shop_name,'') ILIKE ${p})`;
+    }
+    values.push(safeLimit, safeOffset);
+    const result = await pool.query(`
+      SELECT draft.*, details.offer_id, details.title AS source_title,
+        details.currency AS source_currency, details.price_min, details.price_max,
+        details.raw_data, products.shop_id, products.shop_name, products.category AS shop_category
+      FROM product_selection_drafts draft
+      JOIN product_details details ON details.id=draft.product_detail_id
+      LEFT JOIN LATERAL (
+        SELECT src.shop_id, src.category,
+          coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name
+        FROM shop_products src
+        LEFT JOIN shop_profiles shops ON shops.id=src.shop_id
+        WHERE src.offer_id=details.offer_id
+        ORDER BY src.last_crawled_at DESC LIMIT 1
+      ) products ON true
+      ${search}
+      ORDER BY draft.updated_at DESC, draft.product_detail_id DESC
+      LIMIT $${values.length - 1} OFFSET $${values.length}`, values);
+    const count = await pool.query(`
+      SELECT count(*)::int AS total
+      FROM product_selection_drafts draft
+      JOIN product_details details ON details.id=draft.product_detail_id
+      LEFT JOIN LATERAL (
+        SELECT src.shop_id, src.category,
+          coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name
+        FROM shop_products src
+        LEFT JOIN shop_profiles shops ON shops.id=src.shop_id
+        WHERE src.offer_id=details.offer_id
+        ORDER BY src.last_crawled_at DESC LIMIT 1
+      ) products ON true
+      ${search}`, values.slice(0, -2));
+    return { items: result.rows, total: count.rows[0]?.total ?? 0, limit: safeLimit, offset: safeOffset };
+  }
+
   async function savePortalPublication(productDetailId, values) {
     const saved = await pool.query(`
       INSERT INTO product_portal_publications (
@@ -3654,6 +3791,8 @@ export function createDatabase(databaseUrl) {
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     summarizeWordPressPublications, listWordPressPublications, listProductSaleQuantities,
     listSelectionProducts, listSelectionFacets, getSelectionProductMedia, getSelectionProductSkus,
+    getSelectionDraft, addSelectionDraft, updateSelectionDraft, resetSelectionDraft,
+    removeSelectionDraft, markSelectionDraftPublished, markSelectionDraftFailed, listSelectionDrafts,
     listPortalDelistedProducts,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
     listNotAvailableButInStock,

@@ -262,6 +262,7 @@ let bundleFilter = '';
 let availabilityFilter = '';
 let shopFilter = '';
 let editedFilter = '';
+let selectionFilter = '';
 let keyword = '';
 let loading = false;
 let PICKS = new Set();
@@ -446,6 +447,7 @@ function row(it){
       ? '<div class="line"><button type="button" class="split-toggle" data-split-id="' + it.id + '">拆分 ▾'
         + (it.hasSplitPlan ? '（已保存）' : '') + '</button></div>'
       : '<div class="line"><button type="button" class="split-toggle" data-pp-id="' + it.id + '">发布预览 ▾</button></div>')
+    + '<div class="line"><button type="button" class="selection-btn" data-selection-id="' + it.id + '" title="' + (it.selectionState ? '打开 Portal selection 草稿' : '把该产品加入 Portal selection 候选') + '">' + (it.selectionState ? '管理 selection' : '加入 selection') + '</button></div>'
     + '<div class="line"><button type="button" class="purge-btn" data-purge-id="' + it.id + '" title="从采集器、WordPress 与 RAG 删除，并禁止后续采集">删除…</button></div>'
     + '</div></article>';
 }
@@ -513,6 +515,10 @@ function renderFilters(){
   parts.push('<button type="button" data-edited=""' + (editedFilter === '' ? ' class="on"' : '') + '>全部</button>');
   parts.push('<button type="button" data-edited="1"' + (editedFilter === '1' ? ' class="on"' : '')
     + ' title="只显示有过手动调整（规范化/发布图/翻译/拆分调整等）的产品">最近编辑过</button>');
+  parts.push('<span class="sep"></span><span class="label">Selection：</span>');
+  parts.push('<button type="button" data-selection-filter=""' + (selectionFilter === '' ? ' class="on"' : '') + '>全部</button>');
+  parts.push('<button type="button" data-selection-filter="selected"' + (selectionFilter === 'selected' ? ' class="on"' : '') + '>已加入 (' + DATA.filter((item) => item.selectionState).length + ')</button>');
+  parts.push('<button type="button" data-selection-filter="not_selected"' + (selectionFilter === 'not_selected' ? ' class="on"' : '') + '>未加入</button>');
   el.innerHTML = parts.join('');
 }
 function renderPager(){
@@ -566,6 +572,7 @@ async function loadPage(){
     if (availabilityFilter) params.set('availability', availabilityFilter);
     if (shopFilter) params.set('shop', shopFilter);
     if (editedFilter) params.set('edited', '1');
+    if (selectionFilter) params.set('selection', selectionFilter);
     const res = await fetch('/api/product-catalog?' + params.toString(), { headers: { accept: 'application/json' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const body = await res.json();
@@ -660,6 +667,15 @@ function wireFilters(){
       const next = String(editedBtn.dataset.edited || '');
       if (next === editedFilter) return;
       editedFilter = next;
+      offset = 0;
+      void loadPage();
+      return;
+    }
+    const selectionBtn = e.target.closest('button[data-selection-filter]');
+    if (selectionBtn) {
+      const next = String(selectionBtn.dataset.selectionFilter || '');
+      if (next === selectionFilter) return;
+      selectionFilter = next;
       offset = 0;
       void loadPage();
     }
@@ -3100,9 +3116,28 @@ function wireWpSync(){
       updatePickBar();
     }
   });
-  document.addEventListener('click', (e) => {
+  document.addEventListener('click', async (e) => {
     const img = e.target.closest('img.zoomable');
     if (img) { e.preventDefault(); openLightbox(img.getAttribute('src')); return; }
+    const selection = e.target.closest('button[data-selection-id]');
+    if (selection) {
+      const id = String(selection.dataset.selectionId);
+      const row = DATA.find((item) => String(item.id) === id);
+      if (row && row.selectionState) { window.location.href = '/selection?draft=' + encodeURIComponent(id); return; }
+      selection.disabled = true;
+      selection.textContent = '加入中…';
+      try {
+        const response = await fetch('/api/selection/drafts/' + encodeURIComponent(id), { method: 'POST', headers: { accept: 'application/json' } });
+        const body = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(body?.message || body?.error || ('HTTP ' + response.status));
+        window.location.href = '/selection?draft=' + encodeURIComponent(id);
+      } catch (error) {
+        selection.disabled = false;
+        selection.textContent = '加入 selection';
+        window.alert('加入 selection 失败：' + (error?.message || error));
+      }
+      return;
+    }
     const purge = e.target.closest('button[data-purge-id]');
     if (purge) { void openPurge(String(purge.dataset.purgeId)); }
   });
