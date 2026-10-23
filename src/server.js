@@ -1134,10 +1134,11 @@ async function applyPortalVariantImages(portal, product, assignments, productDet
 async function buildSelectionSourcePayload(productDetailId) {
   const id = Number(productDetailId);
   if (!Number.isInteger(id) || id <= 0) return null;
-  const [detail, publication, translation] = await Promise.all([
+  const [detail, publication, translation, normalization] = await Promise.all([
     db.getProductDetail(id),
     db.getWordPressPublication(id),
     db.getLatestProductTranslation(id, 'en'),
+    db.getVariantNormalization(id).catch(() => null),
   ]);
   if (!detail) return null;
   const payload = publication?.payload ?? {};
@@ -1167,7 +1168,33 @@ async function buildSelectionSourcePayload(productDetailId) {
     seenMedia.add(image.url);
     return true;
   });
-  const skuRows = Array.isArray(detail.skus) ? detail.skus : [];
+  const imageById = new Map((detail.images ?? []).map((image) => [String(image.id), image]));
+  const imageUrlFor = (image) => {
+    if (!image) return null;
+    const base = imagePublicPath(image.storage_path);
+    return base ? `${config.publicBaseUrl}${base}` : (image.source_url || null);
+  };
+  const normalizedColours = Array.isArray(normalization?.result?.colours) ? normalization.result.colours : [];
+  const normalizedSizes = Array.isArray(normalization?.result?.sizes) ? normalization.result.sizes : [];
+  const colourLabel = new Map(normalizedColours
+    .filter((colour) => colour?.source && colour?.text)
+    .map((colour) => [String(colour.source).trim().toLowerCase(), String(colour.text).trim()]));
+  const sizeLabel = new Map(normalizedSizes
+    .filter((size) => size?.source && size?.text)
+    .map((size) => [String(size.source).trim().toLowerCase(), String(size.text).trim()]));
+  const colourImage = new Map();
+  for (const colour of normalizedColours) {
+    const label = String(colour?.text || colour?.source || '').trim();
+    const image = imageById.get(String(colour?.imageId ?? colour?.image_id ?? ''));
+    const url = imageUrlFor(image);
+    if (label && url) colourImage.set(label.toLowerCase(), url);
+  }
+  for (const colour of (Array.isArray(payload.colors?.colors) ? payload.colors.colors : [])) {
+    const label = String(colour?.label || colour?.value || '').trim();
+    const image = imageById.get(String(colour?.image_id ?? colour?.image_source_id ?? ''));
+    const url = imageUrlFor(image) || colour?.image_source_url || colour?.image_url || null;
+    if (label && url && !colourImage.has(label.toLowerCase())) colourImage.set(label.toLowerCase(), url);
+  }
   const pickOption = (options, pattern) => {
     for (const [key, value] of Object.entries(options ?? {})) {
       if (pattern.test(String(key)) && value !== null && value !== undefined && String(value).trim()) {
@@ -1176,24 +1203,42 @@ async function buildSelectionSourcePayload(productDetailId) {
     }
     return '';
   };
-  const variants = skuRows.map((sku, index) => {
-    const color = pickOption(sku.option_data, /(^color$|colou?r|颜色)/i);
-    const size = pickOption(sku.option_data, /(^size$|尺码|尺寸|码数)/i);
+  const payloadRows = Array.isArray(payload.sku_matrix?.rows) ? payload.sku_matrix.rows : [];
+  const variants = (payloadRows.length ? payloadRows : (Array.isArray(detail.skus) ? detail.skus : [])).map((sku, index) => {
+    const rawColor = String(sku.color ?? pickOption(sku.option_data ?? sku.options, /(^color$|colou?r|颜色)/i) ?? '').trim();
+    const rawSize = String(sku.size ?? pickOption(sku.option_data ?? sku.options, /(^size$|尺码|尺寸|码数)/i) ?? '').trim();
+    const color = colourLabel.get(rawColor.toLowerCase()) || rawColor;
+    const size = sizeLabel.get(rawSize.toLowerCase()) || rawSize;
     const base = imagePublicPath(sku.image_storage_path);
+    const skuImage = base ? `${config.publicBaseUrl}${base}` : (sku.image_source_url || null);
     return {
-      sourceRowKey: sku.sku_key ?? null,
-      supplierSku: String(sku.variant_sku || sku.sku_key || `sku-${index + 1}`),
-      title: [color, size].filter(Boolean).join(' / ') || sku.sku_text || `Variant ${index + 1}`,
-      optionValues: {
+      sourceRowKey: sku.source_sku_key ?? sku.sku_key ?? null,
+      supplierSku: String(sku.supplier_sku || sku.variant_sku || sku.sku_key || `sku-${index + 1}`),
+      title: [color, size].filter(Boolean).join(' / ') || sku.label || sku.sku_text || `Variant ${index + 1}`,
+      optionValues: (sku.options && typeof sku.options === 'object' ? sku.options : {
         ...(color ? { Color: color } : {}),
         ...(size ? { Size: size } : {}),
-      },
-      imageUrl: base ? `${config.publicBaseUrl}${base}` : (sku.image_source_url || null),
+      }),
+      imageUrl: skuImage || colourImage.get(color.toLowerCase()) || null,
       sourcePrice: null,
-      stock: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock),
+      stock: sku.source_stock ?? sku.stock ?? null,
       sortOrder: index,
     };
   });
+  const swatchesByLabel = new Map();
+  for (const variant of variants) {
+    const color = String(variant.optionValues?.Color || '').trim();
+    if (!color) continue;
+    const key = color.toLowerCase();
+    if (!swatchesByLabel.has(key)) swatchesByLabel.set(key, {
+      value: color,
+      color: null,
+      imageUrl: colourImage.get(key) || variant.imageUrl || null,
+    });
+  }
+  for (const [label, url] of colourImage) {
+    if (!swatchesByLabel.has(label)) swatchesByLabel.set(label, { value: label, color: null, imageUrl: url });
+  }
   let pricing = null;
   try { pricing = payload.bulk_pricing ?? buildWearHongxiuPricing(detail); } catch { pricing = null; }
   const pricingTiers = Array.isArray(pricing?.tiers) && pricing.tiers.length
@@ -1207,17 +1252,7 @@ async function buildSelectionSourcePayload(productDetailId) {
     sortOrder: index,
   })).filter((tier) => Number.isFinite(tier.price) && tier.minQuantity > 0);
   const prices = priceTiers.map((tier) => tier.price);
-  const wpSwatches = (Array.isArray(payload.colors?.colors) ? payload.colors.colors : [])
-    .map((colour) => {
-      const value = String(colour?.label ?? colour?.value ?? '').trim();
-      if (!value) return null;
-      return {
-        value,
-        color: /^#[0-9a-f]{6}$/i.test(String(colour?.code || '')) ? colour.code : null,
-        imageUrl: colour?.image_source_url || colour?.image_url || null,
-      };
-    })
-    .filter(Boolean);
+  const wpSwatches = [...swatchesByLabel.values()];
   return {
     styleNumber: String(publication?.style_no || detail.raw_data?.styleNo || detail.offer_id || '').trim(),
     title: String(translation?.title || payload.title || detail.title || '').trim(),
