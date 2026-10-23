@@ -1145,6 +1145,7 @@ async function buildSelectionSourcePayload(productDetailId) {
   const wpImages = (Array.isArray(payload.images) ? payload.images : [])
     .map((image, index) => ({
       url: image?.url || image?.source_url || null,
+      sourceUrl: image?.source_url || null,
       alt: image?.alt || null,
       visible: true,
       sortOrder: index,
@@ -1156,6 +1157,7 @@ async function buildSelectionSourcePayload(productDetailId) {
       const base = imagePublicPath(image.storage_path);
       return {
         url: base ? `${config.publicBaseUrl}${base}` : (image.source_url || null),
+        sourceUrl: image.source_url || null,
         alt: null,
         visible: true,
         sortOrder: index,
@@ -1175,15 +1177,16 @@ async function buildSelectionSourcePayload(productDetailId) {
     return base ? `${config.publicBaseUrl}${base}` : (image.source_url || null);
   };
   const poolByUrl = new Map();
-  const addPoolImage = (url, kind, alt = null) => {
+  const addPoolImage = (url, kind, alt = null, sourceUrl = null) => {
     if (!url || poolByUrl.has(url)) return;
-    poolByUrl.set(url, { url, kind, alt });
+    poolByUrl.set(url, { url, kind, alt, sourceUrl });
   };
-  for (const image of wpImages) addPoolImage(image.url, 'wp', image.alt || null);
+  for (const image of wpImages) addPoolImage(image.url, 'wp', image.alt || null, image.sourceUrl || null);
   for (const image of (detail.images ?? [])) {
     const url = imageUrlFor(image);
+    const sourceUrl = image.source_url || null;
     const kind = image.image_type === 'description' ? 'detail' : (image.image_type === 'gallery' ? '1688 gallery' : '1688 image');
-    addPoolImage(url, kind, null);
+    addPoolImage(url, kind, null, sourceUrl);
   }
   const mediaPool = [...poolByUrl.values()];
   const normalizedColours = Array.isArray(normalization?.result?.colours) ? normalization.result.colours : [];
