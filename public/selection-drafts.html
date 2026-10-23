@@ -92,8 +92,7 @@ function renderEditor(){
   +'<label class="field"><span>Tags（逗号分隔）</span><input id="f-tags" value="'+esc((d.tags||[]).join(', '))+'"></label>'
   +'<label class="field wide"><span>Description</span><textarea id="f-description">'+esc(d.description||'')+'</textarea></label>'
   +'</div>'
-  +sourcePricingHtml(s)
-  +'<div class="section"><h3>Portal price tiers</h3><p class="hint">这些是当前 Portal 的采购价阶梯，可修改；上方只读显示源数据和计算依据。</p><table id="tiers"><thead><tr><th>Label</th><th>Min qty</th><th>Max qty</th><th>Unit price</th><th></th></tr></thead><tbody>'+tiers.map((tier,index)=>tierRow(tier,index)).join('')+'</tbody></table><button type="button" class="add-btn" data-add-tier>+ 添加阶梯</button></div>'
+  +pricingEditorHtml(s,d)
   +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 对应一张 swatch 图片，size 只是 color 下的变体，不再单独配置图片。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><button type="button" class="add-btn" data-add-color>+ 添加 color</button></div>'
   +'<div class="section"><h3>Selected media</h3><p class="hint">这些是准备发布到 Portal 的图片；勾选控制前台展示，用箭头调整顺序。</p><div class="media-grid" id="media">'+media.map((entry,index)=>mediaRow(entry,index)).join('')+'</div><button type="button" class="add-btn" data-add-media>+ 添加图片 URL</button></div>'
   +(mediaPool.length?'<div class="section media-pool"><h3>Original 1688 images not selected</h3><p class="hint">包含未选入的 1688 gallery、主图和详情图。点击图片下方按钮即可重新加入 selected media。</p><div class="media-grid" id="mediaPool">'+mediaPool.map((entry,index)=>poolCard(entry,index)).join('')+'</div></div>':'')
@@ -102,33 +101,31 @@ function renderEditor(){
   bindEditor();
 }
 function field(label,id,value){return '<label class="field"><span>'+esc(label)+'</span><input id="f-'+id+'" value="'+esc(value)+'"></label>';}
-function sourcePricingHtml(source){
+function pricingEditorHtml(source,draft){
   const currency=source?.sourceCurrency||'CNY';
   const symbol=currency==='CNY'?'¥':currency+' ';
   const min=source?.sourcePriceMin; const max=source?.sourcePriceMax;
   const sourcePrice=min==null&&max==null?'—':(min!=null&&max!=null&&Number(min)!==Number(max)?symbol+Number(min).toFixed(2)+' – '+symbol+Number(max).toFixed(2):symbol+Number(max??min).toFixed(2));
-  const rule=source?.pricingRule;
-  const tiers=(Array.isArray(rule?.tiers)?rule.tiers:[]).slice().sort((left,right)=>Number(left.minQuantity||0)-Number(right.minQuantity||0));
-  const formula=rule?.formula?String(rule.formula):'';
+  const rule=draft?.pricingRule||source?.pricingRule||{};
+  const sourceMax=Number(rule.sourceMaxPrice??source?.sourcePriceMax??0);
+  const rate=Number(rule.exchangeRate??6.5)||6.5;
+  const tiers=(Array.isArray(rule.tiers)&&rule.tiers.length?rule.tiers:(Array.isArray(draft?.priceTiers)?draft.priceTiers:[])).slice().sort((left,right)=>Number(left.minQuantity||0)-Number(right.minQuantity||0));
+  const sampleMarkup=Number(rule.sampleMarkupUsd??2.5);
   const first=tiers[0];
-  const sample=first&&Number(first.minQuantity)>1?(()=>{
-    const rampEnd=Math.min(50,Number(first.minQuantity));
-    const maxQuantity=Number(first.minQuantity)-1;
-    const progress=(maxQuantity-1)/Math.max(rampEnd-1,1);
-    const priceAtOne=Math.round((Number(first.price)+2.5)*100)/100;
-    const priceAtEnd=Math.round((Number(first.price)+2.5*Math.max(0,1-progress))*100)/100;
-    const markupAtEnd=Math.round(2.5*Math.max(0,1-progress)*100)/100;
-    return {minQuantity:1,maxQuantity,priceAtOne,priceAtEnd,markupAtEnd};
-  })():null;
-  return '<div class="section"><h3>1688 source price <span class="badge">read only</span></h3>'
+  const sampleMax=first?Math.max(1,Number(first.minQuantity)-1):49;
+  const formula=rule.formula?String(rule.formula):'(source maximum CNY price + tier markup) / exchange rate';
+  const calcPrice=(cnyMarkup)=>sourceMax>0&&Number.isFinite(Number(cnyMarkup))?Math.round(((sourceMax+Number(cnyMarkup))/rate+Number.EPSILON)*100)/100:null;
+  const firstPrice=first?calcPrice(first.cnyMarkup??0):null;
+  const sampleEnd=firstPrice!=null?Math.round((firstPrice+sampleMarkup/Math.max(1,Number(first.minQuantity)-1))*100)/100:null;
+  const sampleStart=firstPrice!=null?Math.round((firstPrice+sampleMarkup)*100)/100:null;
+  return '<div class="section pricing-editor" data-pricing-editor data-source-max="'+esc(sourceMax)+'" data-rate="'+esc(rate)+'"><h3>1688 source price <span class="badge">read only</span></h3>'
     +'<div class="source-price"><strong>'+esc(sourcePrice)+'</strong><span>'+esc(currency)+' · captured 1688 price</span></div>'
-    +'<div class="section" style="margin-top:12px;padding-top:0;border-top:0"><h3>Price calculation rule <span class="badge">read only</span></h3>'
-    +(formula?'<p class="hint">'+esc(formula)+'</p>':'<p class="hint">No stored formula for this source.</p>')
-    +(sample?'<p class="hint">1 pc = first tier + USD 2.50; '+sample.maxQuantity+' pcs = first tier + USD '+sample.markupAtEnd.toFixed(2)+'. Sample delta is USD; tier markups are CNY.</p>':'')
-    +(tiers.length?'<table class="rule-table"><thead><tr><th>Tier</th><th>Quantity</th><th>Source markup</th><th>Portal price</th></tr></thead><tbody>'
-      +(sample?'<tr><td>1–'+sample.maxQuantity+' pcs · sample</td><td>1–'+sample.maxQuantity+'</td><td>+USD 2.50 → +USD '+sample.markupAtEnd.toFixed(2)+'</td><td>USD '+sample.priceAtEnd.toFixed(2)+' – '+sample.priceAtOne.toFixed(2)+'</td></tr>':'')
-      +tiers.map((tier)=>'<tr><td>'+esc(tier.label||'')+'</td><td>'+esc(tier.minQuantity??'')+(tier.maxQuantity!=null?'–'+esc(tier.maxQuantity):'+')+'</td><td>'+(tier.cnyMarkup==null?'—':symbol+Number(tier.cnyMarkup).toFixed(2))+'</td><td>USD '+Number(tier.price||0).toFixed(2)+'</td></tr>').join('')
-      +'</tbody></table>':'')
+    +'<div class="section" style="margin-top:12px;padding-top:0;border-top:0"><h3>Price calculation rule <span class="badge">markups editable</span></h3>'
+    +'<p class="hint">'+esc(formula)+'</p><p class="hint">Sample delta is USD; tier markups are CNY. 49 pcs is calculated automatically from the 1 pc delta.</p>'
+    +(tiers.length?'<table class="rule-table"><thead><tr><th>Tier</th><th>Quantity</th><th>Markup</th><th>Portal price</th></tr></thead><tbody>'
+      +'<tr data-sample-row><td>1–'+sampleMax+' pcs · sample</td><td>1–'+sampleMax+'</td><td><input data-sample-markup type="number" min="0" step="0.01" value="'+esc(sampleMarkup)+'"> <small>USD at 1 pc</small></td><td data-sample-price>'+esc(sampleStart!=null?'USD '+sampleEnd.toFixed(2)+' – '+sampleStart.toFixed(2):'—')+'</td></tr>'
+      +tiers.map((tier,index)=>'<tr data-tier-row="'+index+'" data-tier-min="'+esc(tier.minQuantity??1)+'"><td>'+esc(tier.label||'')+'</td><td>'+esc(tier.minQuantity??'')+(tier.maxQuantity!=null?'–'+esc(tier.maxQuantity):'+')+'</td><td><input data-tier-markup="'+index+'" type="number" min="0" step="0.01" value="'+esc(tier.cnyMarkup??0)+'"> <small>CNY</small></td><td data-tier-price>'+esc(calcPrice(tier.cnyMarkup??0)!=null?'USD '+calcPrice(tier.cnyMarkup??0).toFixed(2):'—')+'</td></tr>').join('')
+      +'</tbody></table>':'<p class="hint">No price tiers available for this source.</p>')
     +'</div></div>';
 }
 function categoryField(value){
@@ -204,8 +201,15 @@ function readDraft(){
   d.category=(document.getElementById('f-category')?.value||'').trim()||null;
   d.description=document.getElementById('f-description').value;
   d.tags=document.getElementById('f-tags').value.split(',').map((v)=>v.trim()).filter(Boolean);
-  d.moq=current?.draft_payload?.moq??null; d.currency=current?.draft_payload?.currency||'USD';
-  d.priceTiers=[...document.querySelectorAll('#tiers tbody tr')].map((row)=>({label:row.querySelector('[data-tier-field=label]').value.trim(),minQuantity:Number(row.querySelector('[data-tier-field=minQuantity]').value),maxQuantity:num(row.querySelector('[data-tier-field=maxQuantity]').value),price:Number(row.querySelector('[data-tier-field=price]').value)}));
+  const baseRule=JSON.parse(JSON.stringify(current?.draft_payload?.pricingRule||current?.source_payload?.pricingRule||{}));
+  const sourceMax=Number(baseRule.sourceMaxPrice??current?.source_payload?.sourcePriceMax??0);
+  const exchangeRate=Number(baseRule.exchangeRate??6.5)||6.5;
+  const markupInputs=[...document.querySelectorAll('[data-tier-markup]')];
+  const sampleInput=document.querySelector('[data-sample-markup]');
+  d.pricingRule={...baseRule,sampleMarkupUsd:num(sampleInput?.value)??baseRule.sampleMarkupUsd??2.5,tiers:(Array.isArray(baseRule.tiers)?baseRule.tiers:[]).map((tier,index)=>({...tier,cnyMarkup:num(markupInputs[index]?.value)??tier.cnyMarkup??0}))};
+  d.priceTiers=d.pricingRule.tiers.map((tier)=>({label:tier.label,minQuantity:Number(tier.minQuantity),maxQuantity:tier.maxQuantity??null,price:(sourceMax>0?Math.round(((sourceMax+Number(tier.cnyMarkup||0))/exchangeRate+Number.EPSILON)*100)/100:Number(tier.price||0))}));
+  d.currency=current?.draft_payload?.currency||'USD';
+  d.moq=d.priceTiers[0]?.minQuantity??null;
   const tierPrices=d.priceTiers.map((tier)=>Number(tier.price)).filter((price)=>Number.isFinite(price));
   d.priceMin=tierPrices.length?Math.min(...tierPrices):(current?.draft_payload?.priceMin??null);
   d.priceMax=tierPrices.length?Math.max(...tierPrices):(current?.draft_payload?.priceMax??null);
@@ -231,12 +235,34 @@ function bindEditor(){
   editor.querySelector('[data-reset]').onclick=async()=>{if(!confirm('恢复为当前采集源/WP 数据？草稿编辑会丢失。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/reset',{method:'POST'});const body=await response.json();if(!response.ok)throw new Error(body?.message||body?.error);current=body.draft;const i=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(i>=0)drafts[i]=current;message='已恢复源数据。';error='';renderEditor();renderList();}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-remove]').onclick=async()=>{if(!confirm('从 selection 移除这个产品？如果已发布 Portal，会保留 Portal 产品。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{method:'DELETE'});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error);window.location.href='/selection';}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-publish]').onclick=async()=>{try{await saveDraft();const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/publish',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({target:'staging'})});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));current=body.draft;message='已发布到 Portal：'+(body.portal?.productId||'');error='';await load();}catch(e){error=String(e.message||e);message='';renderEditor();}};
-  editor.querySelectorAll('[data-add-tier]').forEach((b)=>b.onclick=()=>{const tbody=editor.querySelector('#tiers tbody');tbody.insertAdjacentHTML('beforeend',tierRow({label:'',minQuantity:1,maxQuantity:null,price:0},tbody.children.length));bindRemoval();});
   editor.querySelectorAll('[data-add-color]').forEach((b)=>b.onclick=()=>{const groups=editor.querySelector('#colorGroups');const index=groups.children.length;groups.insertAdjacentHTML('beforeend',colorGroupHtml({color:'New color',variants:[{supplierSku:'',title:'New color / S',optionValues:{Color:'New color',Size:'S'},sourcePrice:null,stock:null,imageUrl:''}],swatch:null},index));bindRemoval();});
   editor.querySelectorAll('[data-add-size]').forEach((button)=>{button.onclick=()=>{const group=button.closest('[data-color-group]');const tbody=group?.querySelector('tbody');if(!tbody)return;const color=group.querySelector('[data-color-name]')?.value||'New color';tbody.insertAdjacentHTML('beforeend',sizeRowHtml({supplierSku:'',title:color+' / S',optionValues:{Color:color,Size:'S'},sourcePrice:null,stock:null,imageUrl:''},Number(group.dataset.colorGroup)||0));bindRemoval();};});
   editor.querySelectorAll('[data-add-media]').forEach((b)=>b.onclick=()=>{const url=prompt('图片 URL');if(!url)return;const box=editor.querySelector('#media');box.insertAdjacentHTML('beforeend',mediaRow({url,visible:true},box.children.length));bindRemoval();});
   editor.querySelectorAll('[data-add-pool]').forEach((button)=>{button.onclick=()=>{const card=button.closest('[data-pool-card]');const url=card?.dataset.url;if(!url)return;const box=editor.querySelector('#media');box.insertAdjacentHTML('beforeend',mediaRow({url,visible:true},box.children.length));card.remove();bindRemoval();};});
+  bindPricingPreview();
   bindRemoval();
+}
+function bindPricingPreview(){
+  const editor=document.getElementById('editor');
+  const box=editor.querySelector('[data-pricing-editor]');
+  if(!box)return;
+  const sourceMax=Number(box.dataset.sourceMax||0);
+  const rate=Number(box.dataset.rate||6.5)||6.5;
+  const calc=(markup)=>sourceMax>0&&Number.isFinite(Number(markup))?Math.round(((sourceMax+Number(markup))/rate+Number.EPSILON)*100)/100:null;
+  const update=()=>{
+    const rows=[...box.querySelectorAll('[data-tier-row]')];
+    const prices=rows.map((row)=>{const input=row.querySelector('[data-tier-markup]');const price=calc(input?.value);row.querySelector('[data-tier-price]').textContent=price==null?'—':'USD '+price.toFixed(2);return price;});
+    const sampleInput=box.querySelector('[data-sample-markup]');
+    const sampleDelta=Number(sampleInput?.value||0);
+    const first=rows[0]; const firstMin=Number(first?.dataset.tierMin||50); const firstPrice=prices[0];
+    const sampleMax=Math.max(1,firstMin-1);
+    const sampleEnd=firstPrice==null?null:Math.round((firstPrice+sampleDelta/sampleMax+Number.EPSILON)*100)/100;
+    const sampleStart=firstPrice==null?null:Math.round((firstPrice+sampleDelta+Number.EPSILON)*100)/100;
+    const samplePrice=box.querySelector('[data-sample-price]');
+    if(samplePrice)samplePrice.textContent=sampleEnd==null?'—':'USD '+sampleEnd.toFixed(2)+' – '+sampleStart.toFixed(2);
+  };
+  box.querySelectorAll('[data-tier-markup],[data-sample-markup]').forEach((input)=>{input.oninput=update;});
+  update();
 }
 function bindRemoval(){
   const editor=document.getElementById('editor');
