@@ -1174,6 +1174,18 @@ async function buildSelectionSourcePayload(productDetailId) {
     const base = imagePublicPath(image.storage_path);
     return base ? `${config.publicBaseUrl}${base}` : (image.source_url || null);
   };
+  const poolByUrl = new Map();
+  const addPoolImage = (url, kind, alt = null) => {
+    if (!url || poolByUrl.has(url)) return;
+    poolByUrl.set(url, { url, kind, alt });
+  };
+  for (const image of wpImages) addPoolImage(image.url, 'wp', image.alt || null);
+  for (const image of (detail.images ?? [])) {
+    const url = imageUrlFor(image);
+    const kind = image.image_type === 'description' ? 'detail' : (image.image_type === 'gallery' ? '1688 gallery' : '1688 image');
+    addPoolImage(url, kind, null);
+  }
+  const mediaPool = [...poolByUrl.values()];
   const normalizedColours = Array.isArray(normalization?.result?.colours) ? normalization.result.colours : [];
   const normalizedSizes = Array.isArray(normalization?.result?.sizes) ? normalization.result.sizes : [];
   const colourLabel = new Map(normalizedColours
@@ -1281,6 +1293,7 @@ async function buildSelectionSourcePayload(productDetailId) {
     priceTiers,
     variants,
     media,
+    mediaPool,
     swatches: wpSwatches,
     sourceUrl: detail.canonical_url || detail.source_url || null,
     source: {
