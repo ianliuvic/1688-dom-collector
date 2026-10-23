@@ -495,6 +495,7 @@ function startNewSizeChart(){
 }
 function addSizeChartColumn(){
   const chart=readSizeChartEditor()||sizeChartState;if(!chart)return;
+  if(chart.columns.length>=8){alert('一张尺码表最多 8 列。');return;}
   const key='column_'+Date.now()+'_'+(chart.columns.length+1);
   chart.columns.push({key,label:'Column '+(chart.columns.length+1),unit:''});
   chart.rows.forEach((row)=>{row.values[key]='';});
@@ -508,6 +509,7 @@ function removeSizeChartColumn(index){
 }
 function addSizeChartRow(){
   const chart=readSizeChartEditor()||sizeChartState;if(!chart)return;
+  if(chart.rows.length>=50){alert('一张尺码表最多 50 行。');return;}
   chart.rows.push({size:'',values:{}});
   sizeChartState=normalizeClientChart(chart);sizeChartDirty=true;renderSizeChartEditor();
 }
