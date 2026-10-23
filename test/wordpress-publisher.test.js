@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildWordPressProductDraft, buildWearHongxiuPricing,
-  get1688ArrivalDate, isValidImagePayload, normalizePublicationDate,
+  buildSpanishProductPayload, get1688ArrivalDate, isValidImagePayload, normalizePublicationDate,
   refreshWordPressProductPricingPayload } from '../src/wordpress-publisher.js';
 
 const detail = {
@@ -227,4 +227,47 @@ test('accepts the LinkFox createDate as a real listing date source', () => {
     publication_date: '2023-05-22T17:15:49.000Z',
   }), '20230522');
   assert.equal(get1688ArrivalDate({ ...detail, publication_date_source: 'linkfox_create_date' }), '20251105');
+});
+
+test('uses translated normalized color labels in the Spanish overlay instead of source codes', () => {
+  const publicationPayload = {
+    external_id: '1688:1093462277009',
+    title: 'Black and White Zebra Print Bikini Set',
+    description: 'Black and white zebra print bikini set.',
+    catalog: {
+      colors: { colors: [{ value: 'color-1', label: 'Black White Zebra', source_label: 'BH26436D1', code: 'BWZEB' }] },
+      sku_matrix: { rows: [{ color: 'Black White Zebra', options: { Color: 'Black White Zebra', Size: 'S' } }] },
+    },
+  };
+  const english = { sku_options: [{ dimensionName: 'Color', text: 'BH26436D1' }] };
+  const spanish = {
+    title: 'Conjunto de bikini con estampado cebra',
+    description: 'Conjunto de bikini con estampado cebra en blanco y negro.',
+    skuOptions: [{ dimensionName: 'Color', text: 'BH26436D1' }],
+  };
+  const result = buildSpanishProductPayload({
+    publicationPayload, english, spanish, spanishColorLabels: ['Cebra en blanco y negro'],
+  });
+  assert.equal(result.catalog.colors.colors[0].label, 'Cebra en blanco y negro');
+  assert.equal(result.catalog.sku_matrix.rows[0].color, 'Cebra en blanco y negro');
+  assert.equal(result.catalog.sku_matrix.rows[0].options.Color, 'Cebra en blanco y negro');
+});
+
+test('never falls back to a supplier code for a normalized Spanish color label', () => {
+  const publicationPayload = {
+    external_id: '1688:1093462277009',
+    title: 'Black and White Zebra Print Bikini Set',
+    description: 'Black and white zebra print bikini set.',
+    catalog: {
+      colors: { colors: [{ value: 'color-1', label: 'Black White Zebra', source_label: 'BH26436D1', code: 'BWZEB' }] },
+    },
+  };
+  const english = { sku_options: [{ dimensionName: 'Color', text: 'BH26436D1' }] };
+  const spanish = {
+    title: 'Conjunto de bikini con estampado cebra',
+    description: 'Conjunto de bikini con estampado cebra en blanco y negro.',
+    skuOptions: [{ dimensionName: 'Color', text: 'BH26436D1' }],
+  };
+  const result = buildSpanishProductPayload({ publicationPayload, english, spanish });
+  assert.equal(result.catalog.colors.colors[0].label, 'Black White Zebra');
 });

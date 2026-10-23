@@ -12,6 +12,12 @@ function clean(value) {
   return value == null ? '' : String(value).trim();
 }
 
+function isCodeLikeColorLabel(value) {
+  const text = clean(value);
+  if (!text || /\s/.test(text)) return false;
+  return /^[A-Z0-9._-]{4,}$/.test(text) && (/\d/.test(text) || !/[AEIOU]/.test(text));
+}
+
 function unique(values) {
   return [...new Set(values.map(clean).filter(Boolean))];
 }
@@ -770,7 +776,7 @@ function spanishAttributeValue(spanish, pattern) {
  * English payload remains the source of prices, SKU identities, image IDs and
  * taxonomy IDs; this overlay changes only display copy and visible labels.
  */
-export function buildSpanishProductPayload({ publicationPayload, english, spanish }) {
+export function buildSpanishProductPayload({ publicationPayload, english, spanish, spanishColorLabels = [] }) {
   const esData = { ...(spanish ?? {}), ...((spanish?.translated_data && typeof spanish.translated_data === 'object')
     ? spanish.translated_data : {}) };
   if (!publicationPayload?.external_id || !clean(esData.title)) {
@@ -789,15 +795,23 @@ export function buildSpanishProductPayload({ publicationPayload, english, spanis
     bulk_pricing: payload.bulk_pricing,
   };
   const publicationColors = Array.isArray(catalog.colors?.colors) ? catalog.colors.colors : [];
+  const directColorLabels = Array.isArray(spanishColorLabels) ? spanishColorLabels : [];
   // Normalized storefront labels can be more specific than the source language
-  // ("Light Yellow" vs "Yellow"). Prefer source_label, then positional mapping,
-  // so the overlay never leaves a normalized English color label behind.
+  // ("Light Yellow" vs "Yellow"), while source_label is often just a supplier
+  // code (BH26436D1). Prefer a translation of the normalized label; never let
+  // a supplier code become the visible swatch label.
   publicationColors.forEach((color, index) => {
     const label = clean(color?.label);
-    if (!label || colorMap.has(label)) return;
+    if (!label) return;
+    const direct = clean(directColorLabels[index]);
+    if (direct && !isCodeLikeColorLabel(direct)) {
+      colorMap.set(label, direct);
+      return;
+    }
+    if (colorMap.has(label)) return;
     const source = clean(color?.source_label);
-    const translated = (source && colorMap.get(source)) || clean(spanishColors[index]?.text);
-    if (translated) colorMap.set(label, translated);
+    const translated = clean((source && colorMap.get(source)) || spanishColors[index]?.text);
+    colorMap.set(label, translated && !isCodeLikeColorLabel(translated) ? translated : label);
   });
 
   payload.title = title;
@@ -913,11 +927,11 @@ export function buildSpanishProductPayload({ publicationPayload, english, spanis
   return payload;
 }
 
-export async function saveSpanishProductToWordPress({ publication, english, spanish, config }) {
+export async function saveSpanishProductToWordPress({ publication, english, spanish, config, spanishColorLabels = [] }) {
   const publicationPayload = publication?.payload;
   const postId = Number(publication?.wp_post_id ?? publicationPayload?.post_id ?? 0);
   if (!postId) throw new Error('A published WordPress post ID is required for the Spanish payload.');
-  const payload = buildSpanishProductPayload({ publicationPayload, english, spanish });
+  const payload = buildSpanishProductPayload({ publicationPayload, english, spanish, spanishColorLabels });
   return saveSpanishOverlayPayload({ postId, payload, config });
 }
 

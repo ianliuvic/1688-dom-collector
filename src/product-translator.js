@@ -501,6 +501,46 @@ export async function translateProductToSpanish({ detail, english, config }) {
 }
 
 /**
+ * Translate normalized storefront color/print labels into concise Latin
+ * American Spanish. This is intentionally separate from SKU identity: the
+ * source option may be a supplier code such as BH26436D1 while the published
+ * English label is "Black White Zebra".
+ */
+export async function translateColorLabelsToSpanish({ labels, config }) {
+  const colors = (Array.isArray(labels) ? labels : [])
+    .map((label) => String(label ?? '').trim())
+    .filter(Boolean);
+  if (!colors.length) return [];
+  if (!config?.apiKey) throw new Error('DEEPSEEK_API_KEY is not configured.');
+  const model = config.complexModel || 'deepseek-flash';
+  const prompt = `你是专业的泳装B2B商品本地化编辑。把输入JSON中的英文颜色/印花名称翻译成简洁、自然的拉美西班牙语，适合颜色色板标签使用。保持数组数量和顺序不变；不要添加款号、尺码、解释或价格；不要保留纯英文代码。只返回严格JSON：{"colors":[""]}。
+输入JSON：${JSON.stringify({ colors })}`;
+
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(endpointFrom(config.baseUrl), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(applyReasoning({ model, messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' }, temperature: 0, max_tokens: DEFAULT_MAX_TOKENS },
+      config.reasoningEffort)),
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!response.ok) throw new Error(`DeepSeek Spanish color translation failed (${response.status}).`);
+    const payload = await response.json();
+    const parsed = parseJson(contentText(payload.choices?.[0]?.message?.content));
+    const translated = Array.isArray(parsed?.colors)
+      ? parsed.colors.map((label) => String(label ?? '').trim()) : [];
+    if (translated.length === colors.length
+        && translated.every((label) => label && !/[\u3400-\u9fff]/.test(label))) {
+      return translated;
+    }
+    lastError = new Error('Spanish color translation did not preserve the color labels.');
+  }
+  throw lastError;
+}
+
+/**
  * Translate a WordPress-resolved product that has no collector English
  * translation row (legacy/split products). This only needs the visible catalog
  * fields, not the 1688 source capture.

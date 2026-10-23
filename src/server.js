@@ -10,7 +10,7 @@ import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
 import { auditProductSkus } from './sku-auditor.js';
 import { translateProductDetail, translateProductToSpanish,
-  translateWordpressProductToSpanish } from './product-translator.js';
+  translateColorLabelsToSpanish, translateWordpressProductToSpanish } from './product-translator.js';
 import { prepareWordPressProductDraft, publishProductToWordPress,
   get1688ArrivalDate, setWordPressProductArrivalDate,
   setWordPressProductPublicationDate, setWordPressProductStatus,
@@ -163,11 +163,52 @@ async function ensureSpanishTranslation(detail, english) {
   return { translation: spanish, created: true };
 }
 
+function spanishColorOptionEntries(spanish) {
+  const translated = spanish?.translated_data && typeof spanish.translated_data === 'object'
+    ? spanish.translated_data : {};
+  const options = Array.isArray(spanish?.skuOptions) ? spanish.skuOptions
+    : (Array.isArray(translated.skuOptions) ? translated.skuOptions : []);
+  return options.filter((option) => /(color|colour|颜色)/i.test(String(option?.dimensionName ?? '')));
+}
+
+function spanishColorLabelLooksLikeCode(value) {
+  const text = String(value ?? '').trim();
+  if (!text || /\s/.test(text)) return false;
+  return /^[A-Z0-9._-]{4,}$/.test(text) && (/\d/.test(text) || !/[AEIOU]/.test(text));
+}
+
+async function spanishColorLabelsForPublication(publication, spanish) {
+  const payload = publication?.payload;
+  const catalog = payload?.catalog && typeof payload.catalog === 'object' ? payload.catalog : payload;
+  const colors = Array.isArray(catalog?.colors?.colors) ? catalog.colors.colors : [];
+  if (!colors.length) return [];
+  const spanishColors = spanishColorOptionEntries(spanish);
+  const needsTranslation = colors.some((color, index) => {
+    const label = String(color?.label ?? '').trim();
+    const source = String(color?.source_label ?? '').trim();
+    if (!label || !source || source === label) return false;
+    const translated = String(spanishColors[index]?.text ?? '').trim();
+    return !translated || translated === source || spanishColorLabelLooksLikeCode(translated);
+  });
+  if (!needsTranslation) return [];
+  try {
+    return await translateColorLabelsToSpanish({
+      labels: colors.map((color) => String(color?.label ?? '').trim()),
+      config: modelTranslationConfig(),
+    });
+  } catch {
+    // Keep the overlay generation non-fatal; buildSpanishProductPayload will
+    // fall back to the normalized English label rather than exposing a code.
+    return [];
+  }
+}
+
 async function saveSpanishPayloadForPublication(detail, english, spanish) {
   const publication = await db.getWordPressPublication(detail.id);
   if (!publication?.wp_post_id) return { saved: false, reason: 'wordpress_post_missing' };
+  const spanishColorLabels = await spanishColorLabelsForPublication(publication, spanish);
   const result = await saveSpanishProductToWordPress({
-    publication, english, spanish, config,
+    publication, english, spanish, config, spanishColorLabels,
   });
   return { saved: true, result };
 }
