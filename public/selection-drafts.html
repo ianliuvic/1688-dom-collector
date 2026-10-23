@@ -21,6 +21,9 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}.actions button,.add-btn{border:1px solid var(--line);background:#fff;border-radius:7px;padding:8px 13px;cursor:pointer;font:inherit}.actions .primary{background:var(--blue);border-color:var(--blue);color:#fff}.actions .publish{background:var(--green);border-color:var(--green);color:#fff}.actions button:disabled{opacity:.5;cursor:default}.msg{margin-top:10px;font-size:12px;white-space:pre-wrap}.msg.ok{color:var(--green)}.msg.err{color:var(--red)}.empty{padding:24px;color:var(--muted);text-align:center}
 .source-diff-modal{position:fixed;inset:0;z-index:50;background:rgba(16,22,30,.48);display:grid;place-items:center;padding:20px}.source-diff-modal[hidden]{display:none}.source-diff-card{width:min(900px,100%);max-height:85vh;overflow:auto;background:#fff;border-radius:10px;padding:18px;box-shadow:0 20px 60px rgba(0,0,0,.25)}.source-diff-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.source-diff-head h3{margin:0;font-size:18px}.source-diff-head button{border:0;background:transparent;font-size:22px;cursor:pointer}.source-diff-card table{margin-top:12px}.source-diff-card .conflict{background:#fff8ef}.source-diff-card .diff-badge{display:inline-block;background:#fff1e8;color:var(--orange);font-size:10px;border-radius:999px;padding:1px 6px;margin-left:5px}.source-diff-card .diff-summary{font-size:11px;color:var(--muted);max-width:260px;overflow-wrap:anywhere}.source-diff-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.source-diff-actions button{border:1px solid var(--line);background:#fff;border-radius:7px;padding:8px 14px;cursor:pointer}.source-diff-actions .primary{background:var(--blue);border-color:var(--blue);color:#fff}
 .image-lightbox{position:fixed;inset:0;z-index:70;display:grid;place-items:center;padding:30px;background:rgba(10,15,22,.86)}.image-lightbox[hidden]{display:none}.image-lightbox img{max-width:min(1200px,94vw);max-height:88vh;object-fit:contain;border-radius:8px;background:#fff;box-shadow:0 20px 60px rgba(0,0,0,.4)}.image-lightbox .close-lightbox{position:absolute;top:18px;right:18px;width:42px;height:42px;border:0;border-radius:9px;background:rgba(255,255,255,.16);color:#fff;font-size:26px;line-height:1;cursor:pointer}.media-card img,.color-preview{cursor:zoom-in}
+.media-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+.chart-kind{position:absolute;top:9px;right:9px;background:#101828;color:#fff;border-radius:4px;padding:1px 5px;font-size:9px;letter-spacing:.03em}
+.size-chart-modal{position:fixed;inset:0;z-index:78;background:rgba(16,22,30,.58);display:grid;place-items:center;padding:18px}.size-chart-modal[hidden]{display:none}.size-chart-card{width:min(1180px,100%);max-height:92vh;overflow:auto;background:#fff;border-radius:10px;padding:16px;box-shadow:0 20px 60px rgba(0,0,0,.28)}.size-chart-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.size-chart-head h3{margin:0;font-size:18px}.size-chart-head button{border:0;background:transparent;font-size:22px;cursor:pointer;line-height:1}.size-chart-presets{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-top:12px}.size-chart-preset{display:flex;align-items:flex-start;gap:8px;border:1px solid var(--line);border-radius:8px;padding:10px;cursor:pointer;background:#fff}.size-chart-preset:hover,.size-chart-preset.selected{border-color:var(--blue);box-shadow:0 0 0 2px rgba(23,92,211,.12)}.size-chart-preset input{margin-top:2px;accent-color:var(--blue)}.size-chart-preset strong{display:block;font-size:12.5px}.size-chart-preset small{display:block;color:var(--muted);font-size:11px;margin-top:3px}.size-chart-editor{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}.size-chart-name{display:grid;gap:4px;max-width:420px;font-size:11px;color:var(--muted)}.size-chart-name input{width:100%;border:1px solid #d8dce1;border-radius:6px;padding:7px 8px;font:inherit;color:var(--text)}.size-chart-table-wrap{margin-top:10px;overflow:auto;border:1px solid var(--line);border-radius:7px}.size-chart-table{min-width:620px;margin:0}.size-chart-table th,.size-chart-table td{padding:5px;border-bottom:1px solid var(--line);vertical-align:middle}.size-chart-table th{background:#fafbfc}.size-chart-table input{width:100%;border:1px solid #d8dce1;border-radius:4px;padding:5px;font:inherit;font-size:11.5px;min-width:72px}.size-chart-table .chart-size-input{min-width:64px}.size-chart-table .chart-unit-input{min-width:48px;margin-top:3px}.size-chart-table .chart-col-head{display:grid;gap:3px}.size-chart-table .chart-remove{border:0;background:transparent;color:var(--red);cursor:pointer;font-size:16px;line-height:1}.size-chart-edit-actions{display:flex;gap:8px;margin-top:8px}.size-chart-edit-actions button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 9px;font:inherit;font-size:11.5px;cursor:pointer}.size-chart-actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.size-chart-actions button{border:1px solid var(--line);background:#fff;border-radius:7px;padding:8px 13px;font:inherit;cursor:pointer}.size-chart-actions .primary{background:var(--blue);border-color:var(--blue);color:#fff}.size-chart-actions button:disabled{opacity:.5;cursor:default}.size-chart-msg{margin-top:8px;font-size:12px;color:var(--muted)}.size-chart-msg.err{color:var(--red)}
 @media(max-width:900px){.layout{grid-template-columns:1fr;padding:12px}.list{height:auto;position:static}.grid{grid-template-columns:1fr}.media-card{width:calc(50% - 5px)}.media-card img{width:100%;height:auto;aspect-ratio:1/1}}
 </style>
 </head>
@@ -52,6 +55,19 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px
     <div class="swatch-picker-grid" id="swatchPickerGrid"></div>
   </div>
 </div>
+<div class="size-chart-modal" id="sizeChartModal" hidden>
+  <div class="size-chart-card">
+    <div class="size-chart-head"><div><h3>Size chart image</h3><p class="hint">选择 WP 预设或新建尺码表；编辑只保存在当前 selection draft，不回写 WordPress。</p></div><button type="button" data-close-size-chart aria-label="Close">×</button></div>
+    <div class="size-chart-presets" id="sizeChartPresets"></div>
+    <div class="size-chart-editor" id="sizeChartEditor" hidden>
+      <label class="size-chart-name"><span>Chart name</span><input id="sizeChartName" maxlength="120"></label>
+      <div class="size-chart-table-wrap"><table class="size-chart-table"><thead id="sizeChartHead"></thead><tbody id="sizeChartBody"></tbody></table></div>
+      <div class="size-chart-edit-actions"><button type="button" data-add-chart-col>+ 添加列</button><button type="button" data-add-chart-row>+ 添加行</button></div>
+    </div>
+    <div class="size-chart-actions"><button type="button" data-new-size-chart>新建尺码表</button><button type="button" class="primary" data-create-size-chart disabled>生成图片</button></div>
+    <div class="size-chart-msg" id="sizeChartMessage"></div>
+  </div>
+</div>
 <script>
 let drafts = [];
 let wpCategories = [];
@@ -59,6 +75,10 @@ let activeId = new URLSearchParams(location.search).get('draft') || '';
 let current = null;
 let message = '';
 let error = '';
+let sizeChartPresets = [];
+let sizeChartState = null;
+let sizeChartDirty = false;
+let sizeChartBusy = false;
 
 function esc(value){return String(value ?? '').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function num(value){return value === '' || value === null || value === undefined ? null : Number(value);}
@@ -93,6 +113,7 @@ async function openDraft(id, push=true){
     const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{headers:{accept:'application/json'}});
     if(response.ok) current=(await response.json()).draft;
   }
+  syncSizeChartState();
   message=''; error='';
   renderEditor();
   renderList();
@@ -114,7 +135,7 @@ function renderEditor(){
   +'</div>'
   +pricingEditorHtml(s,d)
   +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 对应一张 swatch 图片，size 只是 color 下的变体，不再单独配置图片。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><button type="button" class="add-btn" data-add-color>+ 添加 color</button></div>'
-  +'<div class="section"><h3>Selected media</h3><p class="hint">这些是准备发布到 Portal 的图片；勾选控制前台展示，用箭头调整顺序。</p><div class="media-grid" id="media">'+media.map((entry,index)=>mediaRow(entry,index)).join('')+'</div><label class="add-btn upload-media-btn">+ 上传本地图片<input id="mediaUpload" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple></label></div>'
+  +'<div class="section"><h3>Selected media</h3><p class="hint">这些是准备发布到 Portal 的图片；勾选控制前台展示，用箭头调整顺序。</p><div class="media-grid" id="media">'+media.map((entry,index)=>mediaRow(entry,index)).join('')+'</div><div class="media-actions"><label class="add-btn upload-media-btn">+ 上传本地图片<input id="mediaUpload" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple></label><button type="button" class="add-btn" data-open-size-chart>+ 生成尺码表图片</button></div></div>'
   +(mediaPool.length?'<div class="section media-pool"><h3>Original 1688 images not selected</h3><p class="hint">包含未选入的 1688 gallery、主图和详情图。点击图片下方按钮即可重新加入 selected media。</p><div class="media-grid" id="mediaPool">'+mediaPool.map((entry,index)=>poolCard(entry,index)).join('')+'</div></div>':'')
   +'<div class="actions"><button type="button" class="primary" data-save>保存草稿</button><button type="button" class="publish" data-publish>发布 / 同步到 Portal</button><button type="button" data-refresh>检查源数据更新</button><button type="button" data-reset>恢复源数据</button><button type="button" class="danger" data-remove>从 selection 移除</button></div>'
   +'<div class="msg '+(error?'err':message?'ok':'')+'">'+esc(error||message||'')+'</div>';
@@ -202,7 +223,7 @@ function swatchFor(variant){
   return '<span class="swatch-empty"'+(hex?' style="background:'+esc(hex)+'"':'')+'>—</span>';
 }
 function variantRow(v,index){const option=v.optionValues||{};return '<tr data-variant="'+index+'" data-source-price="'+esc(v.sourcePrice??'')+'" data-stock="'+esc(v.stock??'')+'" data-image-url="'+esc(v.imageUrl||'')+'" data-source-row-key="'+esc(v.sourceRowKey||'')+'"><td>'+swatchFor(v)+'</td><td><input data-variant-field="title" value="'+esc(v.title||'')+'"></td><td><input data-variant-field="supplierSku" value="'+esc(v.supplierSku||'')+'"></td><td><input data-variant-option="Color" value="'+esc(option.Color||'')+'"></td><td><input data-variant-option="Size" value="'+esc(option.Size||'')+'"></td><td><button type="button" class="mini danger" data-remove-variant="'+index+'">删除</button></td></tr>';}
-function mediaRow(entry,index){return '<div class="media-card" draggable="true" data-media-row="'+index+'" data-url="'+esc(entry.url||'')+'" title="'+esc(entry.url||'')+'"><span class="order">'+(index+1)+'</span><img draggable="false" data-lightbox="'+esc(entry.url||'')+'" src="'+esc(entry.url||'')+'" alt="" title="View full size"><label class="show"><input type="checkbox" data-media-visible '+(entry.visible!==false?'checked':'')+'> 展示</label><div class="controls"><button type="button" class="mini" data-media-up="'+index+'">←</button><button type="button" class="mini" data-media-down="'+index+'">→</button><button type="button" class="mini danger" data-remove-media="'+index+'">×</button></div></div>';}
+function mediaRow(entry,index){const chart=entry.kind==='size-chart';return '<div class="media-card" draggable="true" data-media-row="'+index+'" data-url="'+esc(entry.url||'')+'" data-kind="'+esc(entry.kind||'')+'" title="'+esc(entry.url||'')+'"><span class="order">'+(index+1)+'</span>'+(chart?'<span class="chart-kind">SIZE CHART</span>':'')+'<img draggable="false" data-lightbox="'+esc(entry.url||'')+'" src="'+esc(entry.url||'')+'" alt="" title="View full size"><label class="show"><input type="checkbox" data-media-visible '+(entry.visible!==false?'checked':'')+'> 展示</label><div class="controls"><button type="button" class="mini" data-media-up="'+index+'">←</button><button type="button" class="mini" data-media-down="'+index+'">→</button><button type="button" class="mini danger" data-remove-media="'+index+'">×</button></div></div>';}
 function poolCard(entry,index){return '<div class="media-card is-pool" data-pool-card="'+index+'" data-url="'+esc(entry.url||'')+'" title="'+esc(entry.url||'')+'"><img data-lightbox="'+esc(entry.url||'')+'" src="'+esc(entry.url||'')+'" alt="" title="View full size"><span class="pool-kind">'+esc(entry.kind||'1688')+'</span><button type="button" class="add-pool" data-add-pool="'+index+'">+ 加入 media</button></div>';}
 function swatchRow(entry,index){
   const media=(current?.draft_payload?.media||[]).map((item)=>item.url).filter(Boolean);
@@ -248,15 +269,16 @@ function readDraft(){
       d.variants.push({sourceRowKey:row.dataset.sourceRowKey||null,supplierSku:get('supplierSku').trim(),title:get('title').trim(),optionValues:{Color:color,...(size?{Size:size}:{})},imageUrl:swatchUrl||row.dataset.imageUrl||null,sourcePrice:num(row.dataset.sourcePrice),stock:num(row.dataset.stock),sortOrder:groupIndex*1000+rowIndex});
     });
   });
-  d.media=[...document.querySelectorAll('[data-media-row]')].map((row,index)=>({url:row.dataset.url,visible:row.querySelector('[data-media-visible]').checked,alt:null,sortOrder:index})).filter((entry)=>entry.url);
+  d.media=[...document.querySelectorAll('[data-media-row]')].map((row,index)=>({url:row.dataset.url,visible:row.querySelector('[data-media-visible]').checked,alt:null,sortOrder:index,...(row.dataset.kind?{kind:row.dataset.kind}:{})})).filter((entry)=>entry.url);
+  if(sizeChartState)d.sizeChartDesign=sizeChartState;
   return d;
 }
-async function saveDraft(){current.draft_payload=readDraft();const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{method:'PATCH',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({draft:current.draft_payload})});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));current=body.draft;const index=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(index>=0)drafts[index]=current;message='草稿已保存。';error='';renderEditor();renderList();}
+async function saveDraft(successMessage='草稿已保存。'){current.draft_payload=readDraft();const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{method:'PATCH',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({draft:current.draft_payload})});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));current=body.draft;const index=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(index>=0)drafts[index]=current;message=successMessage;error='';renderEditor();renderList();}
 function bindEditor(){
   const editor=document.getElementById('editor');
   editor.querySelector('[data-save]').onclick=()=>{saveDraft().catch((e)=>{error=String(e.message||e);message='';renderEditor();});};
   editor.querySelector('[data-refresh]').onclick=()=>{void openSourceDiff();};
-  editor.querySelector('[data-reset]').onclick=async()=>{if(!confirm('恢复为当前采集源/WP 数据？草稿编辑会丢失。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/reset',{method:'POST'});const body=await response.json();if(!response.ok)throw new Error(body?.message||body?.error);current=body.draft;const i=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(i>=0)drafts[i]=current;message='已恢复源数据。';error='';renderEditor();renderList();}catch(e){error=String(e.message||e);renderEditor();}};
+  editor.querySelector('[data-reset]').onclick=async()=>{if(!confirm('恢复为当前采集源/WP 数据？草稿编辑会丢失。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/reset',{method:'POST'});const body=await response.json();if(!response.ok)throw new Error(body?.message||body?.error);current=body.draft;syncSizeChartState();const i=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(i>=0)drafts[i]=current;message='已恢复源数据。';error='';renderEditor();renderList();}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-remove]').onclick=async()=>{if(!confirm('从 selection 移除这个产品？如果已发布 Portal，会保留 Portal 产品。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{method:'DELETE'});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error);window.location.href='/selection';}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-publish]').onclick=async()=>{try{await saveDraft();const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/publish',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({target:'staging'})});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));current=body.draft;message='已发布到 Portal：'+(body.portal?.productId||'');error='';await load();}catch(e){error=String(e.message||e);message='';renderEditor();}};
   editor.querySelectorAll('[data-add-color]').forEach((b)=>b.onclick=()=>{const groups=editor.querySelector('#colorGroups');const index=groups.children.length;groups.insertAdjacentHTML('beforeend',colorGroupHtml({color:'New color',variants:[{supplierSku:'',title:'New color / S',optionValues:{Color:'New color',Size:'S'},sourcePrice:null,stock:null,imageUrl:''}],swatch:null},index));bindRemoval();});
@@ -280,6 +302,7 @@ function bindEditor(){
     finally{mediaUpload.disabled=false;}
   };
   editor.querySelectorAll('[data-add-pool]').forEach((button)=>{button.onclick=()=>addPoolToMedia(button);});
+  editor.querySelectorAll('[data-open-size-chart]').forEach((button)=>{button.onclick=()=>{void openSizeChartModal();};});
   bindPricingPreview();
   bindMediaDrag();
   bindRemoval();
@@ -387,12 +410,168 @@ function bindPricingPreview(){
 function bindRemoval(){
   const editor=document.getElementById('editor');
   editor.querySelectorAll('[data-remove-tier],[data-remove-size],[data-remove-swatch]').forEach((button)=>{button.onclick=()=>{const target=button.closest('tr,[data-swatch-card]');if(target)target.remove();};});
-  editor.querySelectorAll('[data-remove-media]').forEach((button)=>{button.onclick=()=>{const card=button.closest('[data-media-row]');if(!card)return;const url=card.dataset.url||'';const isUpload=/\/upload-[^/]+$/i.test(url);card.remove();renumberMedia();if(!isUpload)ensurePoolImage(url);bindRemoval();};});
+  editor.querySelectorAll('[data-remove-media]').forEach((button)=>{button.onclick=()=>{const card=button.closest('[data-media-row]');if(!card)return;const url=card.dataset.url||'';const isUpload=/\/upload-[^/]+$/i.test(url);const isGenerated=card.dataset.kind==='size-chart'||/\/size-chart-[^/]+$/i.test(url);card.remove();renumberMedia();if(!isUpload&&!isGenerated)ensurePoolImage(url);bindRemoval();};});
   editor.querySelectorAll('[data-remove-color]').forEach((button)=>{button.onclick=()=>{const groups=editor.querySelectorAll('[data-color-group]');if(groups.length<=1){alert('每个产品至少保留一个 color。');return;}const group=button.closest('[data-color-group]');if(!group)return;const name=group.querySelector('[data-color-name]')?.value||'这个 color';if(confirm('删除 '+name+' 及其下的所有 size？')){group.remove();updateColorDeleteState();}};});
   function updateColorDeleteState(){const groups=editor.querySelectorAll('[data-color-group]');groups.forEach((group)=>{const button=group.querySelector('[data-remove-color]');if(!button)return;button.disabled=groups.length<=1;button.title=groups.length<=1?'每个产品至少保留一个 color':'删除这个 color';});}
   updateColorDeleteState();
   editor.querySelectorAll('[data-media-up],[data-media-down]').forEach((button)=>{button.onclick=()=>{const up=button.hasAttribute('data-media-up');const index=Number(button.getAttribute(up?'data-media-up':'data-media-down'));const rows=[...editor.querySelectorAll('[data-media-row]')];const target=index+(up?-1:1);if(target<0||target>=rows.length)return;const parent=rows[index].parentElement;if(up)parent.insertBefore(rows[index],rows[target]);else parent.insertBefore(rows[target],rows[index]);renumberMedia();bindRemoval();};});
 }
+function normalizeClientChart(value){
+  if(!value||typeof value!=='object'||Array.isArray(value))return null;
+  const used=new Set();
+  const columns=(Array.isArray(value.columns)?value.columns:[]).map((entry,index)=>{
+    let key=String(entry?.key||('column_'+(index+1))).replace(/[^a-z0-9_-]/gi,'_')||('column_'+(index+1));
+    const base=key; let n=2; while(used.has(key))key=base+'_'+(n++); used.add(key);
+    return {key,label:String(entry?.label||('Column '+(index+1))).trim(),unit:String(entry?.unit||'').trim()};
+  });
+  const rows=(Array.isArray(value.rows)?value.rows:[]).map((entry,index)=>({
+    size:String(entry?.size||('Size '+(index+1))).trim(),
+    values:Object.fromEntries(columns.map((column)=>[column.key,String(entry?.values?.[column.key]??'').trim()])),
+  }));
+  if(!columns.length||!rows.length)return null;
+  return {presetId:value.presetId?String(value.presetId):null,name:String(value.name||'Size chart').trim()||'Size chart',columns,rows,updatedAt:value.updatedAt||null};
+}
+function syncSizeChartState(){sizeChartState=normalizeClientChart(current?.draft_payload?.sizeChartDesign);sizeChartDirty=false;}
+function sizeChartPreset(id){return sizeChartPresets.find((preset)=>String(preset.id)===String(id))||null;}
+async function loadSizeChartPresets(){
+  if(sizeChartPresets.length)return;
+  const response=await fetch('/api/selection/size-chart-presets',{headers:{accept:'application/json'}});
+  const body=await response.json().catch(()=>null);
+  if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));
+  sizeChartPresets=Array.isArray(body?.presets)?body.presets:[];
+}
+function updateSizeChartPresetSelection(){
+  document.querySelectorAll('#sizeChartPresets [data-preset-id]').forEach((card)=>card.classList.toggle('selected',String(card.dataset.presetId)===String(sizeChartState?.presetId||'')));
+}
+function renderSizeChartPresets(){
+  const box=document.getElementById('sizeChartPresets');
+  if(!sizeChartPresets.length){box.innerHTML='<div class="hint">没有可用的 WP 预设，可以直接新建尺码表。</div>';return;}
+  box.innerHTML=sizeChartPresets.map((preset)=>{
+    const labels=(preset.columns||[]).map((column)=>column.label+(column.unit?' ('+column.unit+')':'')).join(' · ');
+    return '<label class="size-chart-preset" data-preset-id="'+esc(preset.id)+'"><input type="radio" name="sizeChartPreset" value="'+esc(preset.id)+'" '+(String(sizeChartState?.presetId||'')===String(preset.id)?'checked':'')+'><span><strong>'+esc(preset.name)+'</strong><small>'+esc(labels)+' · '+((preset.rows||[]).length)+' 行</small></span></label>';
+  }).join('');
+  box.querySelectorAll('input[name="sizeChartPreset"]').forEach((input)=>{input.onchange=()=>selectSizeChartPreset(input.value);});
+  updateSizeChartPresetSelection();
+}
+function renderSizeChartEditor(){
+  const editor=document.getElementById('sizeChartEditor');
+  const create=document.querySelector('[data-create-size-chart]');
+  if(!sizeChartState){editor.hidden=true;if(create)create.disabled=true;return;}
+  editor.hidden=false;if(create)create.disabled=false;
+  const name=document.getElementById('sizeChartName');if(name)name.value=sizeChartState.name;
+  const head=document.getElementById('sizeChartHead');
+  head.innerHTML='<tr><th>Size</th>'+sizeChartState.columns.map((column,index)=>'<th><div class="chart-col-head"><input data-chart-col-label="'+index+'" value="'+esc(column.label)+'" placeholder="Column"><input class="chart-unit-input" data-chart-col-unit="'+index+'" value="'+esc(column.unit)+'" placeholder="unit"><button type="button" class="chart-remove" data-remove-chart-col="'+index+'" title="删除列">×</button></div></th>').join('')+'<th></th></tr>';
+  const body=document.getElementById('sizeChartBody');
+  body.innerHTML=sizeChartState.rows.map((row,rowIndex)=>'<tr data-chart-row="'+rowIndex+'"><td><input class="chart-size-input" data-chart-size="'+rowIndex+'" value="'+esc(row.size)+'" placeholder="Size"></td>'+sizeChartState.columns.map((column)=>'<td><input data-chart-value data-chart-key="'+esc(column.key)+'" value="'+esc(row.values?.[column.key]??'')+'"></td>').join('')+'<td><button type="button" class="chart-remove" data-remove-chart-row="'+rowIndex+'" title="删除行">×</button></td></tr>').join('');
+  document.querySelectorAll('#sizeChartEditor input').forEach((input)=>{input.oninput=()=>{sizeChartDirty=true;sizeChartState=readSizeChartEditor()||sizeChartState;};});
+  document.querySelectorAll('[data-remove-chart-col]').forEach((button)=>{button.onclick=()=>removeSizeChartColumn(Number(button.dataset.removeChartCol));});
+  document.querySelectorAll('[data-remove-chart-row]').forEach((button)=>{button.onclick=()=>removeSizeChartRow(Number(button.dataset.removeChartRow));});
+  updateSizeChartPresetSelection();
+}
+function readSizeChartEditor(){
+  if(!sizeChartState)return null;
+  const name=document.getElementById('sizeChartName')?.value.trim()||'Size chart';
+  const labelInputs=[...document.querySelectorAll('#sizeChartHead [data-chart-col-label]')];
+  const unitInputs=[...document.querySelectorAll('#sizeChartHead [data-chart-col-unit]')];
+  const columns=sizeChartState.columns.map((column,index)=>({...column,label:labelInputs[index]?.value.trim()||column.label,unit:unitInputs[index]?.value.trim()||''}));
+  const rows=[...document.querySelectorAll('#sizeChartBody [data-chart-row]')].map((row,index)=>{
+    const values={};
+    row.querySelectorAll('[data-chart-value]').forEach((input)=>{values[input.dataset.chartKey]=input.value.trim();});
+    return {size:row.querySelector('[data-chart-size]')?.value.trim()||('Size '+(index+1)),values};
+  });
+  return normalizeClientChart({...sizeChartState,name,columns,rows,updatedAt:new Date().toISOString()});
+}
+function selectSizeChartPreset(id){
+  const preset=sizeChartPreset(id);if(!preset)return;
+  if(sizeChartState?.presetId===String(id)){renderSizeChartEditor();return;}
+  if(sizeChartDirty&&sizeChartState&&!confirm('当前尺码表的修改还没有生成图片，切换预设会丢失这些修改。继续？')){renderSizeChartPresets();return;}
+  sizeChartState=normalizeClientChart({presetId:preset.id,name:preset.name,columns:preset.columns,rows:preset.rows});
+  sizeChartDirty=false;renderSizeChartPresets();renderSizeChartEditor();
+}
+function startNewSizeChart(){
+  if(sizeChartDirty&&sizeChartState&&!confirm('当前尺码表的修改还没有生成图片，新建会丢失这些修改。继续？'))return;
+  sizeChartState=normalizeClientChart({presetId:null,name:'New size chart',columns:[{key:'bust',label:'Bust',unit:'cm'},{key:'waist',label:'Waist',unit:'cm'},{key:'hip',label:'Hip',unit:'cm'}],rows:['S','M','L'].map((size)=>({size,values:{}}))});
+  sizeChartDirty=false;renderSizeChartPresets();renderSizeChartEditor();
+}
+function addSizeChartColumn(){
+  const chart=readSizeChartEditor()||sizeChartState;if(!chart)return;
+  const key='column_'+Date.now()+'_'+(chart.columns.length+1);
+  chart.columns.push({key,label:'Column '+(chart.columns.length+1),unit:''});
+  chart.rows.forEach((row)=>{row.values[key]='';});
+  sizeChartState=normalizeClientChart(chart);sizeChartDirty=true;renderSizeChartEditor();
+}
+function removeSizeChartColumn(index){
+  const chart=readSizeChartEditor()||sizeChartState;if(!chart||chart.columns.length<=1)return;
+  const [removed]=chart.columns.splice(index,1);
+  chart.rows.forEach((row)=>{delete row.values[removed.key];});
+  sizeChartState=normalizeClientChart(chart);sizeChartDirty=true;renderSizeChartEditor();
+}
+function addSizeChartRow(){
+  const chart=readSizeChartEditor()||sizeChartState;if(!chart)return;
+  chart.rows.push({size:'',values:{}});
+  sizeChartState=normalizeClientChart(chart);sizeChartDirty=true;renderSizeChartEditor();
+}
+function removeSizeChartRow(index){
+  const chart=readSizeChartEditor()||sizeChartState;if(!chart||chart.rows.length<=1)return;
+  chart.rows.splice(index,1);
+  sizeChartState=normalizeClientChart(chart);sizeChartDirty=true;renderSizeChartEditor();
+}
+function closeSizeChartModal(){document.getElementById('sizeChartModal').hidden=true;}
+async function openSizeChartModal(){
+  if(!current)return;
+  const modal=document.getElementById('sizeChartModal');
+  const messageBox=document.getElementById('sizeChartMessage');
+  messageBox.textContent='';messageBox.className='size-chart-msg';
+  modal.hidden=false;
+  try{
+    await loadSizeChartPresets();
+    renderSizeChartPresets();
+    renderSizeChartEditor();
+  }catch(e){
+    messageBox.textContent='加载 WP 预设失败：'+String(e.message||e);
+    messageBox.className='size-chart-msg err';
+    renderSizeChartEditor();
+  }
+}
+async function createSizeChartImage(){
+  if(sizeChartBusy)return;
+  const chart=readSizeChartEditor();
+  const messageBox=document.getElementById('sizeChartMessage');
+  if(!chart){messageBox.textContent='请先选择或创建一张尺码表。';messageBox.className='size-chart-msg err';return;}
+  const button=document.querySelector('[data-create-size-chart]');
+  sizeChartBusy=true;if(button)button.disabled=true;
+  messageBox.textContent='正在生成图片…';messageBox.className='size-chart-msg';
+  try{
+    const response=await fetch('/api/selection/products/'+encodeURIComponent(activeId)+'/size-chart',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({chart})});
+    const body=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));
+    sizeChartState=normalizeClientChart({...body.chart,presetId:chart.presetId});
+    current.draft_payload.sizeChartDesign=sizeChartState;
+    sizeChartDirty=false;
+    closeSizeChartModal();
+    const box=document.querySelector('#editor #media');
+    if(box){
+      box.insertAdjacentHTML('beforeend',mediaRow({url:body.url,visible:true,alt:'Size chart',kind:'size-chart'},box.children.length));
+      renumberMedia();bindRemoval();
+    }
+    await saveDraft('尺码表图片已生成，并已加入 media 最后一张。');
+  }catch(e){
+    const text='生成失败：'+String(e.message||e);
+    if(document.getElementById('sizeChartModal').hidden){error=text;message='';renderEditor();}
+    else{messageBox.textContent=text;messageBox.className='size-chart-msg err';}
+  }finally{
+    sizeChartBusy=false;if(button)button.disabled=!sizeChartState;
+  }
+}
+function bindSizeChartModal(){
+  document.querySelectorAll('[data-close-size-chart]').forEach((button)=>button.addEventListener('click',closeSizeChartModal));
+  document.getElementById('sizeChartModal').addEventListener('click',(event)=>{if(event.target.id==='sizeChartModal')closeSizeChartModal();});
+  document.querySelector('[data-new-size-chart]').addEventListener('click',startNewSizeChart);
+  document.querySelector('[data-create-size-chart]').addEventListener('click',()=>{void createSizeChartImage();});
+  document.querySelector('[data-add-chart-col]').addEventListener('click',addSizeChartColumn);
+  document.querySelector('[data-add-chart-row]').addEventListener('click',addSizeChartRow);
+}
+bindSizeChartModal();
 let sourceDiffFields=[];
 function closeSourceDiff(){document.getElementById('sourceDiff').hidden=true;}
 async function openSourceDiff(){
@@ -490,7 +669,7 @@ document.addEventListener('click',(event)=>{
   if(image){event.preventDefault();event.stopPropagation();void openImageLightbox(image.dataset.lightbox||image.src,image);return;}
   if(event.target.closest('[data-close-lightbox]')||event.target===lightbox){closeImageLightbox();}
 });
-document.addEventListener('keydown',(event)=>{if(event.key!=='Escape')return;if(!lightbox.hidden)closeImageLightbox();else if(!document.getElementById('sourceDiff').hidden)closeSourceDiff();});
+document.addEventListener('keydown',(event)=>{if(event.key!=='Escape')return;if(!document.getElementById('sizeChartModal').hidden)closeSizeChartModal();else if(!lightbox.hidden)closeImageLightbox();else if(!document.getElementById('sourceDiff').hidden)closeSourceDiff();});
 document.getElementById('draftList').addEventListener('click',(event)=>{const button=event.target.closest('[data-id]');if(button)void openDraft(button.dataset.id);});
 document.getElementById('search').addEventListener('input',renderList);
 load().catch((error)=>{document.getElementById('draftList').innerHTML='<div class="empty">加载失败：'+esc(error.message)+'</div>';});

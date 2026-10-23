@@ -40,6 +40,7 @@ import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
   linkfoxExtrasForMerge } from './linkfox-1688.js';
 import { MAX_OPTION_LABEL_LENGTH } from './option-overrides.js';
+import { SIZE_CHART_PRESETS, renderSizeChartPng } from './size-chart.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -7431,6 +7432,35 @@ app.post('/api/selection/products/:id/upload-image', { preHandler: requireDashbo
     byteSize: bytes.length,
   });
   return { url: `${config.publicBaseUrl}${imagePublicPath(filePath)}` };
+});
+
+app.get('/api/selection/size-chart-presets', { preHandler: requireDashboardOrApiKey }, async () => ({
+  presets: SIZE_CHART_PRESETS,
+}));
+
+app.post('/api/selection/products/:id/size-chart', { preHandler: requireDashboardOrApiKey, bodyLimit: 512 * 1024 }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  let rendered;
+  try {
+    rendered = await renderSizeChartPng(request.body?.chart);
+  } catch (error) {
+    return reply.code(400).send({ error: 'invalid_size_chart', message: String(error?.message || error).slice(0, 300) });
+  }
+  const root = path.resolve(config.storagePath, 'product-images');
+  const folder = path.resolve(root, String(detail.offer_id ?? 'unassigned'));
+  if (!folder.startsWith(`${root}${path.sep}`)) return reply.code(400).send({ error: 'invalid_storage_folder' });
+  await fs.mkdir(folder, { recursive: true });
+  const fileName = `size-chart-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.png`;
+  const filePath = path.join(folder, fileName);
+  await fs.writeFile(filePath, rendered.png);
+  return {
+    url: `${config.publicBaseUrl}${imagePublicPath(filePath)}`,
+    chart: rendered.chart,
+    fileName,
+  };
 });
 
 /* ---- Portal selection drafts (source/editable/published lifecycle) ---- */
