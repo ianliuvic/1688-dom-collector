@@ -19,6 +19,7 @@ nav a{color:var(--muted);margin-left:14px;text-decoration:none}nav a.on{color:va
 table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid var(--line);padding:6px;text-align:left;vertical-align:top}th{font-size:11px;color:var(--muted)}td input{width:100%;border:1px solid #d8dce1;border-radius:5px;padding:5px;font:inherit;min-width:55px}.mini{border:1px solid var(--line);background:#fff;border-radius:5px;padding:4px 7px;cursor:pointer}.danger{color:var(--red)}.media-grid{display:flex;flex-wrap:wrap;gap:10px}.media-card{position:relative;width:132px;border:1px solid var(--line);border-radius:8px;padding:5px;background:#fff}.media-card img{width:120px;height:120px;object-fit:cover;border-radius:5px;display:block;background:#f5f6f8}.media-card .order{position:absolute;top:10px;left:10px;background:var(--blue);color:#fff;border-radius:999px;font-size:10px;font-weight:700;padding:1px 6px}.media-card .controls{display:flex;justify-content:center;gap:4px;margin-top:5px}.media-card .show{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);margin-top:4px}.media-card.is-pool img{opacity:.82}.media-card .pool-kind{position:absolute;left:9px;top:9px;background:rgba(29,41,57,.8);color:#fff;border-radius:4px;padding:1px 5px;font-size:10px}.media-card .add-pool{width:100%;margin-top:6px;border:1px solid var(--blue);border-radius:5px;background:#fff;color:var(--blue);padding:4px;font-size:11px;cursor:pointer}.swatch-img{width:34px;height:34px;object-fit:cover;border-radius:5px;border:1px solid var(--line);background:#f5f6f8;display:block}.swatch-empty{width:34px;height:34px;border-radius:5px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted);font-size:10px}
 .color-groups{display:grid;gap:14px}.color-group{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}.color-head{display:flex;align-items:end;gap:10px;padding:10px;background:#fafbfc;border-bottom:1px solid var(--line);flex-wrap:wrap}.color-head .color-preview{width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:#f5f6f8;display:block}.color-head .color-empty{width:64px;height:64px;border-radius:6px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted);font-size:10px}.color-head label{display:grid;gap:3px;font-size:11px;color:var(--muted)}.color-head input,.color-head select{border:1px solid #d8dce1;border-radius:5px;padding:5px;font:inherit;font-size:12px;min-width:150px}.color-head .remove-color{margin-left:auto;align-self:center}.color-group table{width:100%}.color-group .add-size{margin:8px 10px 10px}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}.actions button,.add-btn{border:1px solid var(--line);background:#fff;border-radius:7px;padding:8px 13px;cursor:pointer;font:inherit}.actions .primary{background:var(--blue);border-color:var(--blue);color:#fff}.actions .publish{background:var(--green);border-color:var(--green);color:#fff}.actions button:disabled{opacity:.5;cursor:default}.msg{margin-top:10px;font-size:12px;white-space:pre-wrap}.msg.ok{color:var(--green)}.msg.err{color:var(--red)}.empty{padding:24px;color:var(--muted);text-align:center}
+.source-diff-modal{position:fixed;inset:0;z-index:50;background:rgba(16,22,30,.48);display:grid;place-items:center;padding:20px}.source-diff-modal[hidden]{display:none}.source-diff-card{width:min(900px,100%);max-height:85vh;overflow:auto;background:#fff;border-radius:10px;padding:18px;box-shadow:0 20px 60px rgba(0,0,0,.25)}.source-diff-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.source-diff-head h3{margin:0;font-size:18px}.source-diff-head button{border:0;background:transparent;font-size:22px;cursor:pointer}.source-diff-card table{margin-top:12px}.source-diff-card .conflict{background:#fff8ef}.source-diff-card .diff-badge{display:inline-block;background:#fff1e8;color:var(--orange);font-size:10px;border-radius:999px;padding:1px 6px;margin-left:5px}.source-diff-card .diff-summary{font-size:11px;color:var(--muted);max-width:260px;overflow-wrap:anywhere}.source-diff-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.source-diff-actions button{border:1px solid var(--line);background:#fff;border-radius:7px;padding:8px 14px;cursor:pointer}.source-diff-actions .primary{background:var(--blue);border-color:var(--blue);color:#fff}
 @media(max-width:900px){.layout{grid-template-columns:1fr;padding:12px}.list{height:auto;position:static}.grid{grid-template-columns:1fr}.media-card{width:calc(50% - 5px)}.media-card img{width:100%;height:auto;aspect-ratio:1/1}}
 </style>
 </head>
@@ -33,6 +34,14 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px
     <div id="draftList"><div class="empty">加载中…</div></div>
   </aside>
   <main class="card editor" id="editor"><div class="empty">从“全部产品”加入一个产品后开始编辑。</div></main>
+</div>
+<div class="source-diff-modal" id="sourceDiff" hidden>
+  <div class="source-diff-card">
+    <div class="source-diff-head"><h3>Source updates</h3><button type="button" data-close-diff aria-label="Close">×</button></div>
+    <p class="hint" id="sourceDiffNote">Compare current source data with this selection draft.</p>
+    <table><thead><tr><th>Apply</th><th>Field</th><th>Source</th><th>Current draft</th></tr></thead><tbody id="sourceDiffRows"></tbody></table>
+    <div class="source-diff-actions"><button type="button" data-close-diff>保留草稿</button><button type="button" class="primary" data-apply-diff>应用选中更新</button></div>
+  </div>
 </div>
 <script>
 let drafts = [];
@@ -96,7 +105,7 @@ function renderEditor(){
   +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 对应一张 swatch 图片，size 只是 color 下的变体，不再单独配置图片。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><button type="button" class="add-btn" data-add-color>+ 添加 color</button></div>'
   +'<div class="section"><h3>Selected media</h3><p class="hint">这些是准备发布到 Portal 的图片；勾选控制前台展示，用箭头调整顺序。</p><div class="media-grid" id="media">'+media.map((entry,index)=>mediaRow(entry,index)).join('')+'</div><button type="button" class="add-btn" data-add-media>+ 添加图片 URL</button></div>'
   +(mediaPool.length?'<div class="section media-pool"><h3>Original 1688 images not selected</h3><p class="hint">包含未选入的 1688 gallery、主图和详情图。点击图片下方按钮即可重新加入 selected media。</p><div class="media-grid" id="mediaPool">'+mediaPool.map((entry,index)=>poolCard(entry,index)).join('')+'</div></div>':'')
-  +'<div class="actions"><button type="button" class="primary" data-save>保存草稿</button><button type="button" class="publish" data-publish>发布 / 同步到 Portal</button><button type="button" data-refresh>刷新源数据</button><button type="button" data-reset>恢复源数据</button><button type="button" class="danger" data-remove>从 selection 移除</button></div>'
+  +'<div class="actions"><button type="button" class="primary" data-save>保存草稿</button><button type="button" class="publish" data-publish>发布 / 同步到 Portal</button><button type="button" data-refresh>检查源数据更新</button><button type="button" data-reset>恢复源数据</button><button type="button" class="danger" data-remove>从 selection 移除</button></div>'
   +'<div class="msg '+(error?'err':message?'ok':'')+'">'+esc(error||message||'')+'</div>';
   bindEditor();
 }
@@ -231,7 +240,7 @@ async function saveDraft(){current.draft_payload=readDraft();const response=awai
 function bindEditor(){
   const editor=document.getElementById('editor');
   editor.querySelector('[data-save]').onclick=()=>{saveDraft().catch((e)=>{error=String(e.message||e);message='';renderEditor();});};
-  editor.querySelector('[data-refresh]').onclick=async()=>{try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/refresh-source',{method:'POST',headers:{accept:'application/json'}});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error);current=body.draft;const i=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(i>=0)drafts[i]=current;message='已从源数据补全变体和 swatch，请检查后保存/发布。';error='';renderEditor();renderList();}catch(e){error=String(e.message||e);renderEditor();}};
+  editor.querySelector('[data-refresh]').onclick=()=>{void openSourceDiff();};
   editor.querySelector('[data-reset]').onclick=async()=>{if(!confirm('恢复为当前采集源/WP 数据？草稿编辑会丢失。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/reset',{method:'POST'});const body=await response.json();if(!response.ok)throw new Error(body?.message||body?.error);current=body.draft;const i=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(i>=0)drafts[i]=current;message='已恢复源数据。';error='';renderEditor();renderList();}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-remove]').onclick=async()=>{if(!confirm('从 selection 移除这个产品？如果已发布 Portal，会保留 Portal 产品。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{method:'DELETE'});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error);window.location.href='/selection';}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-publish]').onclick=async()=>{try{await saveDraft();const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/publish',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({target:'staging'})});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));current=body.draft;message='已发布到 Portal：'+(body.portal?.productId||'');error='';await load();}catch(e){error=String(e.message||e);message='';renderEditor();}};
@@ -272,6 +281,42 @@ function bindRemoval(){
   updateColorDeleteState();
   editor.querySelectorAll('[data-media-up],[data-media-down]').forEach((button)=>{button.onclick=()=>{const up=button.hasAttribute('data-media-up');const index=Number(button.getAttribute(up?'data-media-up':'data-media-down'));const rows=[...editor.querySelectorAll('[data-media-row]')];const target=index+(up?-1:1);if(target<0||target>=rows.length)return;const parent=rows[index].parentElement;if(up)parent.insertBefore(rows[index],rows[target]);else parent.insertBefore(rows[target],rows[index]);bindRemoval();};});
 }
+let sourceDiffFields=[];
+function closeSourceDiff(){document.getElementById('sourceDiff').hidden=true;}
+async function openSourceDiff(){
+  try{
+    const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/source-diff',{headers:{accept:'application/json'}});
+    const body=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));
+    if(!body.sourceChanged){message='源数据没有变化。';error='';renderEditor();return;}
+    sourceDiffFields=body.fields||[];
+    document.getElementById('sourceDiffNote').textContent=body.hasConflicts
+      ? '源数据有更新，其中部分字段你也在 selection 里编辑过（Conflict）。默认保留草稿，勾选表示改用最新源数据。'
+      : '源数据有更新。未冲突字段默认勾选，应用后会更新到 selection。';
+    document.getElementById('sourceDiffRows').innerHTML=sourceDiffFields.map((field)=>
+      '<tr class="'+(field.conflict?'conflict':'')+'"><td><input type="checkbox" data-diff-field="'+esc(field.key)+'" '+(field.conflict?'':'checked')+'></td>'
+      +'<td><strong>'+esc(field.label)+'</strong>'+(field.conflict?'<span class="diff-badge">Conflict</span>':'')+'</td>'
+      +'<td class="diff-summary">'+esc(field.sourceSummary)+'</td><td class="diff-summary">'+esc(field.draftSummary)+'</td></tr>').join('');
+    document.getElementById('sourceDiff').hidden=false;
+  }catch(e){error=String(e.message||e);message='';renderEditor();}
+}
+async function applySourceDiff(){
+  try{
+    const fields=[...document.querySelectorAll('[data-diff-field]:checked')].map((input)=>input.dataset.diffField);
+    const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/apply-source',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({fields})});
+    const body=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));
+    current=body.draft;
+    const index=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));
+    if(index>=0)drafts[index]=current;
+    closeSourceDiff();
+    message='源数据已按你的选择更新。请检查后保存/发布。';error='';renderEditor();renderList();
+  }catch(e){error=String(e.message||e);closeSourceDiff();renderEditor();}
+}
+document.querySelectorAll('[data-close-diff]').forEach((button)=>button.addEventListener('click',closeSourceDiff));
+document.querySelector('[data-apply-diff]').addEventListener('click',()=>{void applySourceDiff();});
+document.getElementById('sourceDiff').addEventListener('click',(event)=>{if(event.target.id==='sourceDiff')closeSourceDiff();});
+document.addEventListener('keydown',(event)=>{if(event.key==='Escape'&&!document.getElementById('sourceDiff').hidden)closeSourceDiff();});
 document.getElementById('draftList').addEventListener('click',(event)=>{const button=event.target.closest('[data-id]');if(button)void openDraft(button.dataset.id);});
 document.getElementById('search').addEventListener('input',renderList);
 load().catch((error)=>{document.getElementById('draftList').innerHTML='<div class="empty">加载失败：'+esc(error.message)+'</div>';});

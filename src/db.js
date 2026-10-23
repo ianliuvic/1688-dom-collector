@@ -562,6 +562,8 @@ export function createDatabase(databaseUrl) {
         ON product_selection_drafts(status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS product_selection_drafts_portal_idx
         ON product_selection_drafts(portal_product_id);
+      ALTER TABLE product_selection_drafts ADD COLUMN IF NOT EXISTS source_hash text;
+      ALTER TABLE product_selection_drafts ADD COLUMN IF NOT EXISTS source_checked_at timestamptz;
       -- Main-image perceptual hashes (dHash + pHash) used to skip capturing a
       -- new offer whose first image is exactly the same image as an existing
       -- product.  Rows are imported from the Wearhongxiu published catalog and
@@ -2831,12 +2833,12 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
-  async function addSelectionDraft(productDetailId, sourcePayload, draftPayload) {
+  async function addSelectionDraft(productDetailId, sourcePayload, draftPayload, sourceHash = null) {
     const inserted = await pool.query(`
-      INSERT INTO product_selection_drafts (product_detail_id, status, source_payload, draft_payload)
-      VALUES ($1, 'DRAFT', $2, $3)
+      INSERT INTO product_selection_drafts (product_detail_id, status, source_payload, draft_payload, source_hash, source_checked_at)
+      VALUES ($1, 'DRAFT', $2, $3, $4, now())
       ON CONFLICT (product_detail_id) DO NOTHING
-      RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), JSON.stringify(draftPayload ?? {})]);
+      RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), JSON.stringify(draftPayload ?? {}), sourceHash]);
     if (inserted.rows[0]) return inserted.rows[0];
     return getSelectionDraft(productDetailId);
   }
@@ -2850,12 +2852,12 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
-  async function updateSelectionDraftSource(productDetailId, sourcePayload, draftPayload) {
+  async function updateSelectionDraftSource(productDetailId, sourcePayload, draftPayload, sourceHash = null) {
     const result = await pool.query(`
       UPDATE product_selection_drafts
-      SET source_payload=$2, draft_payload=$3, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+      SET source_payload=$2, draft_payload=$3, source_hash=$4, source_checked_at=now(), status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
       WHERE product_detail_id=$1
-      RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), JSON.stringify(draftPayload ?? {})]);
+      RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), JSON.stringify(draftPayload ?? {}), sourceHash]);
     return result.rows[0] ?? null;
   }
 

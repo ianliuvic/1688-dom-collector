@@ -1309,6 +1309,37 @@ async function buildSelectionSourcePayload(productDetailId) {
   };
 }
 
+const SELECTION_FIELDS = [
+  { key: 'styleNumber', label: 'Style number' },
+  { key: 'title', label: 'Title' },
+  { key: 'description', label: 'Description' },
+  { key: 'category', label: 'Category' },
+  { key: 'tags', label: 'Tags' },
+  { key: 'media', label: 'Selected media' },
+  { key: 'mediaPool', label: 'Original image pool' },
+  { key: 'variants', label: 'Colors & variants' },
+  { key: 'swatches', label: 'Color swatches' },
+  { key: 'pricingRule', label: 'Price markups' },
+];
+const stableJson = (value) => {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value ?? null);
+};
+const sameJson = (left, right) => stableJson(left) === stableJson(right);
+const selectionSourceHash = (payload) => crypto.createHash('sha256').update(stableJson(payload)).digest('hex');
+const selectionFieldSummary = (key, value) => {
+  if (key === 'media' || key === 'mediaPool') return `${Array.isArray(value) ? value.length : 0} images`;
+  if (key === 'variants') return `${Array.isArray(value) ? value.length : 0} variants`;
+  if (key === 'swatches') return `${Array.isArray(value) ? value.length : 0} colors`;
+  if (key === 'tags') return Array.isArray(value) && value.length ? value.join(', ') : 'No tags';
+  if (key === 'pricingRule') {
+    const tiers = Array.isArray(value?.tiers) ? value.tiers : [];
+    return `${tiers.length} tiers · sample USD ${Number(value?.sampleMarkupUsd ?? 2.5).toFixed(2)}${tiers.length ? ' · '+tiers.map((tier) => `${tier.label || tier.minQuantity}=${tier.cnyMarkup ?? 0}`).join(', ') : ''}`;
+  }
+  return value === null || value === undefined || value === '' ? '—' : String(value).slice(0, 180);
+};
+
 /** Import one collector product into the portal catalog, optionally applying image order/selection. */
 async function publishProductToPortal(productDetailId, options = {}) {
   const target = options.target === 'production' ? 'production' : 'staging';
@@ -7317,7 +7348,7 @@ app.post('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, 
   const source = await buildSelectionSourcePayload(id);
   if (!source) return reply.code(404).send({ error: 'not_found' });
   const existing = await db.getSelectionDraft(id);
-  const draft = existing ?? await db.addSelectionDraft(id, source, source);
+  const draft = existing ?? await db.addSelectionDraft(id, source, source, selectionSourceHash(source));
   return reply.code(existing ? 200 : 201).send({ draft });
 });
 
@@ -7348,6 +7379,67 @@ app.patch('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey },
   return updated ? { draft: updated } : reply.code(404).send({ error: 'not_found' });
 });
 
+app.get('/api/selection/drafts/:id/source-diff', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const row = await db.getSelectionDraft(id);
+  if (!row) return reply.code(404).send({ error: 'not_found' });
+  const source = await buildSelectionSourcePayload(id);
+  if (!source) return reply.code(404).send({ error: 'source_not_found' });
+  const oldSource = row.source_payload ?? {};
+  const draft = row.draft_payload ?? {};
+  const fields = SELECTION_FIELDS.map((field) => {
+    const sourceChanged = !sameJson(oldSource[field.key], source[field.key]);
+    const draftValue = draft[field.key];
+    const draftEdited = field.key !== 'mediaPool' && draftValue !== undefined && !sameJson(draftValue, oldSource[field.key]);
+    return {
+      key: field.key,
+      label: field.label,
+      sourceChanged,
+      draftEdited,
+      conflict: sourceChanged && draftEdited,
+      sourceSummary: selectionFieldSummary(field.key, source[field.key]),
+      draftSummary: selectionFieldSummary(field.key, draftValue ?? oldSource[field.key]),
+    };
+  }).filter((field) => field.sourceChanged);
+  return {
+    sourceChanged: fields.length > 0,
+    sourceHash: selectionSourceHash(source),
+    sourceCheckedAt: row.source_checked_at ?? null,
+    fields,
+    hasConflicts: fields.some((field) => field.conflict),
+  };
+});
+
+app.post('/api/selection/drafts/:id/apply-source', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const row = await db.getSelectionDraft(id);
+  if (!row) return reply.code(404).send({ error: 'not_found' });
+  const source = await buildSelectionSourcePayload(id);
+  if (!source) return reply.code(404).send({ error: 'source_not_found' });
+  const allowed = new Set(SELECTION_FIELDS.map((field) => field.key));
+  const fields = [...new Set((Array.isArray(request.body?.fields) ? request.body.fields : []).map(String).filter((key) => allowed.has(key)))];
+  const merged = { ...(row.draft_payload ?? {}) };
+  for (const key of fields) {
+    if (key === 'mediaPool') continue;
+    merged[key] = source[key];
+  }
+  if (fields.includes('pricingRule')) {
+    const rule = source.pricingRule ?? {};
+    const sourceMax = Number(rule.sourceMaxPrice ?? source.sourcePriceMax ?? 0);
+    const rate = Number(rule.exchangeRate ?? 6.5) || 6.5;
+    merged.priceTiers = (Array.isArray(rule.tiers) ? rule.tiers : []).map((tier) => ({
+      label: tier.label,
+      minQuantity: Number(tier.minQuantity),
+      maxQuantity: tier.maxQuantity ?? null,
+      price: sourceMax > 0 ? Math.round(((sourceMax + Number(tier.cnyMarkup || 0)) / rate + Number.EPSILON) * 100) / 100 : Number(tier.price || 0),
+    }));
+    const prices = merged.priceTiers.map((tier) => Number(tier.price)).filter((price) => Number.isFinite(price));
+    if (prices.length) { merged.priceMin = Math.min(...prices); merged.priceMax = Math.max(...prices); merged.moq = merged.priceTiers[0]?.minQuantity ?? merged.moq; }
+  }
+  const saved = await db.updateSelectionDraftSource(id, source, merged, selectionSourceHash(source));
+  return { draft: saved, applied: fields };
+});
+
 app.post('/api/selection/drafts/:id/refresh-source', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
   const row = await db.getSelectionDraft(id);
@@ -7375,7 +7467,7 @@ app.post('/api/selection/drafts/:id/refresh-source', { preHandler: requireDashbo
     return { ...swatch, color: old?.color || swatch.color || null, imageUrl: old?.imageUrl || swatch.imageUrl || null };
   });
   const merged = { ...current, variants: variants.length ? variants : current.variants, swatches };
-  const saved = await db.updateSelectionDraftSource(id, source, merged);
+  const saved = await db.updateSelectionDraftSource(id, source, merged, selectionSourceHash(source));
   return { draft: saved };
 });
 
