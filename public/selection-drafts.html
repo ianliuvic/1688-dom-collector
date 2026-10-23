@@ -370,10 +370,24 @@ document.querySelector('[data-apply-diff]').addEventListener('click',()=>{void a
 document.getElementById('sourceDiff').addEventListener('click',(event)=>{if(event.target.id==='sourceDiff')closeSourceDiff();});
 const lightbox=document.getElementById('imageLightbox');
 function closeImageLightbox(){lightbox.hidden=true;document.getElementById('lightboxImage').removeAttribute('src');}
-function openImageLightbox(url){if(!url)return;const image=document.getElementById('lightboxImage');image.src=url;lightbox.hidden=false;}
+function isLocalSelectionImage(url){return /^https:\/\/collector\.yiswim\.cloud\/api\/product-images\//i.test(url)||String(url).startsWith('/api/product-images/');}
+async function openImageLightbox(url,element){
+  if(!url)return;
+  let full=url;
+  if(!isLocalSelectionImage(url)&&activeId){
+    try{
+      const response=await fetch('/api/selection/products/'+encodeURIComponent(activeId)+'/materialize-image',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({url})});
+      const body=await response.json().catch(()=>null);
+      if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));
+      full=body.url;
+      if(element){element.dataset.lightbox=full;element.src=full;}
+    }catch(e){error='图片下载失败：'+String(e.message||e);renderEditor();return;}
+  }
+  const image=document.getElementById('lightboxImage');image.src=full;lightbox.hidden=false;
+}
 document.addEventListener('click',(event)=>{
   const image=event.target.closest('[data-lightbox]');
-  if(image){event.preventDefault();event.stopPropagation();openImageLightbox(image.dataset.lightbox||image.src);return;}
+  if(image){event.preventDefault();event.stopPropagation();void openImageLightbox(image.dataset.lightbox||image.src,image);return;}
   if(event.target.closest('[data-close-lightbox]')||event.target===lightbox){closeImageLightbox();}
 });
 document.addEventListener('keydown',(event)=>{if(event.key!=='Escape')return;if(!lightbox.hidden)closeImageLightbox();else if(!document.getElementById('sourceDiff').hidden)closeSourceDiff();});

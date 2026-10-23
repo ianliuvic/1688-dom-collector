@@ -1309,6 +1309,37 @@ async function buildSelectionSourcePayload(productDetailId) {
   };
 }
 
+const selectionIsLocalImage = (url) => {
+  try {
+    const base = new URL(config.publicBaseUrl);
+    const target = new URL(url, base);
+    return target.origin === base.origin && target.pathname.startsWith('/api/product-images/');
+  } catch {
+    return false;
+  }
+};
+async function materializeSelectionImage(detail, url, { type = 'gallery', sortOrder = 800 } = {}) {
+  if (!url) return url;
+  if (selectionIsLocalImage(url)) return url;
+  const normalized = normalizedImageUrl(url);
+  const existing = (detail.images ?? []).find((image) => image.storage_path && normalizedImageUrl(image.source_url) === normalized);
+  if (existing) return `${config.publicBaseUrl}${imagePublicPath(existing.storage_path)}`;
+  if (!/^https:\/\//i.test(String(url))) throw new Error('Only HTTPS images can be downloaded');
+  const saved = await downloadImageUrlToDetail(detail, String(url), { type, sortOrder });
+  if (!saved?.storage_path) throw new Error('Image download did not create a stored file');
+  return `${config.publicBaseUrl}${imagePublicPath(saved.storage_path)}`;
+}
+async function materializeSelectionMedia(detail, media) {
+  const rows = Array.isArray(media) ? media : [];
+  const result = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const entry = rows[index];
+    if (!entry?.url) { result.push(entry); continue; }
+    result.push({ ...entry, url: await materializeSelectionImage(detail, entry.url, { type: 'gallery', sortOrder: 800 + index }) });
+  }
+  return result;
+}
+
 const SELECTION_FIELDS = [
   { key: 'styleNumber', label: 'Style number' },
   { key: 'title', label: 'Title' },
@@ -7335,6 +7366,21 @@ app.get('/api/selection/products/:id/skus', { preHandler: requireDashboardOrApiK
   return data;
 });
 
+app.post('/api/selection/products/:id/materialize-image', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const url = String(request.body?.url || '').trim();
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  if (!/^https:\/\//i.test(url) || url.length > 2000) return reply.code(400).send({ error: 'invalid_image_url' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  try {
+    const localUrl = await materializeSelectionImage(detail, url);
+    return { url: localUrl };
+  } catch (error) {
+    return reply.code(502).send({ error: 'image_download_failed', message: String(error?.message || error).slice(0, 500) });
+  }
+});
+
 /* ---- Portal selection drafts (source/editable/published lifecycle) ---- */
 app.get('/api/selection/drafts', { preHandler: requireDashboardOrApiKey }, async (request) => {
   return db.listSelectionDrafts({
@@ -7484,6 +7530,14 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
   const draft = draftRow.draft_payload ?? {};
   if (!String(draft.title || '').trim() || !Array.isArray(draft.variants) || !draft.variants.length) {
     return reply.code(400).send({ error: 'draft_incomplete', message: 'Title and at least one variant are required.' });
+  }
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  try {
+    draft.media = await materializeSelectionMedia(detail, draft.media);
+    await db.updateSelectionDraft(id, draft);
+  } catch (error) {
+    return reply.code(502).send({ error: 'image_download_failed', message: String(error?.message || error).slice(0, 1000) });
   }
   const target = request.body?.target === 'production' ? 'production' : 'staging';
   const portal = target === 'production'
