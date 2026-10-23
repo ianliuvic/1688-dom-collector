@@ -17,7 +17,7 @@ nav a{color:var(--muted);margin-left:14px;text-decoration:none}nav a.on{color:va
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wide{grid-column:1/-1}.field{display:grid;gap:5px}.field span{font-size:12px;color:var(--muted);font-weight:600}.field input,.field textarea,.field select{width:100%;border:1px solid #d8dce1;border-radius:7px;padding:8px 9px;background:#fff;color:var(--text);font:inherit}.field textarea{min-height:86px;resize:vertical}
 .section{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}.section h3{margin:0 0 4px;font-size:15px}.hint{font-size:11.5px;color:var(--muted);margin:0 0 10px}
 table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid var(--line);padding:6px;text-align:left;vertical-align:top}th{font-size:11px;color:var(--muted)}td input{width:100%;border:1px solid #d8dce1;border-radius:5px;padding:5px;font:inherit;min-width:55px}.mini{border:1px solid var(--line);background:#fff;border-radius:5px;padding:4px 7px;cursor:pointer}.danger{color:var(--red)}.media-grid{display:flex;flex-wrap:wrap;gap:10px}.media-card{position:relative;width:132px;border:1px solid var(--line);border-radius:8px;padding:5px;background:#fff}.media-card img{width:120px;height:120px;object-fit:cover;border-radius:5px;display:block;background:#f5f6f8}.media-card .order{position:absolute;top:10px;left:10px;background:var(--blue);color:#fff;border-radius:999px;font-size:10px;font-weight:700;padding:1px 6px}.media-card .controls{display:flex;justify-content:center;gap:4px;margin-top:5px}.media-card .show{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);margin-top:4px}.swatch-img{width:34px;height:34px;object-fit:cover;border-radius:5px;border:1px solid var(--line);background:#f5f6f8;display:block}.swatch-empty{width:34px;height:34px;border-radius:5px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted);font-size:10px}
-.swatch-grid{display:flex;flex-wrap:wrap;gap:10px}.swatch-card{width:180px;border:1px solid var(--line);border-radius:8px;padding:8px;display:grid;gap:6px;background:#fff}.swatch-card .swatch-preview{width:100%;height:100px;object-fit:cover;border-radius:6px;background:#f5f6f8;border:1px solid var(--line)}.swatch-card .swatch-empty-lg{width:100%;height:100px;border-radius:6px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted);font-size:11px}.swatch-card input,.swatch-card select{width:100%;border:1px solid #d8dce1;border-radius:5px;padding:5px;font:inherit;font-size:11px}
+.color-groups{display:grid;gap:14px}.color-group{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}.color-head{display:flex;align-items:end;gap:10px;padding:10px;background:#fafbfc;border-bottom:1px solid var(--line);flex-wrap:wrap}.color-head .color-preview{width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:#f5f6f8;display:block}.color-head .color-empty{width:64px;height:64px;border-radius:6px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted);font-size:10px}.color-head label{display:grid;gap:3px;font-size:11px;color:var(--muted)}.color-head input,.color-head select{border:1px solid #d8dce1;border-radius:5px;padding:5px;font:inherit;font-size:12px;min-width:150px}.color-group table{width:100%}.color-group .add-size{margin:8px 10px 10px}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}.actions button,.add-btn{border:1px solid var(--line);background:#fff;border-radius:7px;padding:8px 13px;cursor:pointer;font:inherit}.actions .primary{background:var(--blue);border-color:var(--blue);color:#fff}.actions .publish{background:var(--green);border-color:var(--green);color:#fff}.actions button:disabled{opacity:.5;cursor:default}.msg{margin-top:10px;font-size:12px;white-space:pre-wrap}.msg.ok{color:var(--green)}.msg.err{color:var(--red)}.empty{padding:24px;color:var(--muted);text-align:center}
 @media(max-width:900px){.layout{grid-template-columns:1fr;padding:12px}.list{height:auto;position:static}.grid{grid-template-columns:1fr}.media-card{width:calc(50% - 5px)}.media-card img{width:100%;height:auto;aspect-ratio:1/1}}
 </style>
@@ -75,7 +75,7 @@ async function openDraft(id, push=true){
 function renderEditor(){
   const editor=document.getElementById('editor');
   if(!current){editor.innerHTML='<div class="empty">从“全部产品”加入一个产品后开始编辑。</div>';return;}
-  const d=draftOf(current); const s=sourceOf(current); const media=Array.isArray(d.media)?d.media:[]; const variants=Array.isArray(d.variants)?d.variants:[]; const tiers=Array.isArray(d.priceTiers)?d.priceTiers:[]; const swatches=Array.isArray(d.swatches)?d.swatches:[];
+  const d=draftOf(current); const s=sourceOf(current); const media=Array.isArray(d.media)?d.media:[]; const variants=Array.isArray(d.variants)?d.variants:[]; const tiers=Array.isArray(d.priceTiers)?d.priceTiers:[]; const swatches=Array.isArray(d.swatches)?d.swatches:[]; const variantGroups=groupVariants(variants,swatches);
   editor.innerHTML='<div class="editor-head"><div><h2>'+esc(d.title||('产品 #'+current.product_detail_id))+'</h2><div class="hint">Portal draft · revision '+esc(current.revision??1)+'</div></div><div><span class="badge '+statusClass(current.status)+'">'+statusLabel(current.status)+'</span>'+(current.portal_product_id?' <span class="badge ok">Portal '+esc(current.portal_product_id)+'</span>':'')+'</div></div>'
   +'<div class="grid">'
   +field('Style number','styleNumber',d.styleNumber||'')
@@ -89,15 +89,47 @@ function renderEditor(){
   +field('Currency','currency',d.currency||'USD')
   +'</div>'
   +'<div class="section"><h3>Price tiers</h3><p class="hint">这些是 Portal 的采购价阶梯，发布后不会被 WP 同步覆盖。</p><table id="tiers"><thead><tr><th>Label</th><th>Min qty</th><th>Max qty</th><th>Unit price</th><th></th></tr></thead><tbody>'+tiers.map((tier,index)=>tierRow(tier,index)).join('')+'</tbody></table><button type="button" class="add-btn" data-add-tier>+ 添加阶梯</button></div>'
-  +'<div class="section"><h3>Variants</h3><p class="hint">编辑客户看到的变体名称、SKU 和 swatch。采源库存与采购价不会在这里展示。</p><table id="variants"><thead><tr><th>Swatch</th><th>Variant</th><th>SKU</th><th>Color</th><th>Size</th><th></th></tr></thead><tbody>'+variants.map((variant,index)=>variantRow(variant,index)).join('')+'</tbody></table><button type="button" class="add-btn" data-add-variant>+ 添加变体</button></div>'
+  +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 对应一张 swatch 图片，size 只是 color 下的变体，不再单独配置图片。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><button type="button" class="add-btn" data-add-color>+ 添加 color</button></div>'
   +'<div class="section"><h3>Media</h3><p class="hint">点击勾选控制 Portal 前台展示；用箭头调整顺序。</p><div class="media-grid" id="media">'+media.map((entry,index)=>mediaRow(entry,index)).join('')+'</div><button type="button" class="add-btn" data-add-media>+ 添加图片 URL</button></div>'
-  +'<div class="section"><h3>Color swatches</h3><p class="hint">每个颜色都可以指定一张 swatch 图片；优先从已选产品图片中选择。没有图片时才使用色块。</p><div class="swatch-grid" id="swatches">'+swatches.map((entry,index)=>swatchRow(entry,index)).join('')+'</div><button type="button" class="add-btn" data-add-swatch>+ 添加 color swatch</button></div>'
   +'<div class="actions"><button type="button" class="primary" data-save>保存草稿</button><button type="button" class="publish" data-publish>发布 / 同步到 Portal</button><button type="button" data-refresh>刷新源数据</button><button type="button" data-reset>恢复源数据</button><button type="button" class="danger" data-remove>从 selection 移除</button></div>'
   +'<div class="msg '+(error?'err':message?'ok':'')+'">'+esc(error||message||'')+'</div>';
   bindEditor();
 }
 function field(label,id,value){return '<label class="field"><span>'+esc(label)+'</span><input id="f-'+id+'" value="'+esc(value)+'"></label>';}
 function tierRow(tier,index){return '<tr data-tier="'+index+'"><td><input data-tier-field="label" value="'+esc(tier.label||'')+'"></td><td><input data-tier-field="minQuantity" type="number" min="1" value="'+esc(tier.minQuantity??1)+'"></td><td><input data-tier-field="maxQuantity" type="number" min="1" value="'+esc(tier.maxQuantity??'')+'"></td><td><input data-tier-field="price" type="number" min="0" step="0.01" value="'+esc(tier.price??'')+'"></td><td><button type="button" class="mini danger" data-remove-tier="'+index+'">删除</button></td></tr>';}
+function groupVariants(variants,swatches){
+  const groups=new Map();
+  for(const variant of variants){
+    const color=String(variant?.optionValues?.Color||'Default').trim()||'Default';
+    const key=color.toLowerCase();
+    const group=groups.get(key)||{color,variants:[],swatch:(swatches||[]).find((entry)=>String(entry.value||'').trim().toLowerCase()===key)||null};
+    group.variants.push(variant);
+    groups.set(key,group);
+  }
+  return [...groups.values()];
+}
+function mediaUrlOptions(selected){
+  const urls=[...new Set([...(current?.draft_payload?.media||[]).map((item)=>item.url).filter(Boolean), ...(selected?[selected]:[])])];
+  return '<option value="">No image</option>'+urls.map((url,index)=>'<option value="'+esc(url)+'" '+(url===selected?'selected':'')+'>Image '+(index+1)+'</option>').join('');
+}
+function colorGroupHtml(group,index){
+  const selected=group.swatch?.imageUrl||'';
+  const preview=selected?'<img class="color-preview" src="'+esc(selected)+'" alt="">':'<span class="color-empty">No image</span>';
+  return '<div class="color-group" data-color-group="'+index+'"><div class="color-head">'+preview
+    +'<label>Color<input data-color-name value="'+esc(group.color||'')+'"></label>'
+    +'<label>Swatch image<select data-color-swatch>'+mediaUrlOptions(selected)+'</select></label></div>'
+    +'<table><thead><tr><th>Variant</th><th>SKU</th><th>Size</th><th></th></tr></thead><tbody>'
+    +group.variants.map((variant)=>sizeRowHtml(variant,index)).join('')+'</tbody></table>'
+    +'<button type="button" class="add-btn add-size" data-add-size="'+index+'">+ 添加 size</button></div>';
+}
+function sizeRowHtml(variant,groupIndex){
+  const size=String(variant?.optionValues?.Size||'').trim();
+  return '<tr data-size-row data-source-price="'+esc(variant?.sourcePrice??'')+'" data-stock="'+esc(variant?.stock??'')+'" data-image-url="'+esc(variant?.imageUrl||'')+'" data-source-row-key="'+esc(variant?.sourceRowKey||'')+'">'
+    +'<td><input data-size-field="title" value="'+esc(variant?.title||'')+'"></td>'
+    +'<td><input data-size-field="supplierSku" value="'+esc(variant?.supplierSku||'')+'"></td>'
+    +'<td><input data-size-field="Size" value="'+esc(size)+'"></td>'
+    +'<td><button type="button" class="mini danger" data-remove-size>删除</button></td></tr>';
+}
 function swatchFor(variant){
   const color=String(variant?.optionValues?.Color||'').trim().toLowerCase();
   const swatch=(current?.draft_payload?.swatches||[]).find((entry)=>String(entry.value||'').trim().toLowerCase()===color);
@@ -128,9 +160,18 @@ function readDraft(){
   d.tags=document.getElementById('f-tags').value.split(',').map((v)=>v.trim()).filter(Boolean);
   d.priceMin=num(document.getElementById('f-priceMin').value); d.priceMax=num(document.getElementById('f-priceMax').value); d.moq=num(document.getElementById('f-moq').value); d.currency=document.getElementById('f-currency').value.trim().toUpperCase()||'USD';
   d.priceTiers=[...document.querySelectorAll('#tiers tbody tr')].map((row)=>({label:row.querySelector('[data-tier-field=label]').value.trim(),minQuantity:Number(row.querySelector('[data-tier-field=minQuantity]').value),maxQuantity:num(row.querySelector('[data-tier-field=maxQuantity]').value),price:Number(row.querySelector('[data-tier-field=price]').value)}));
-  d.variants=[...document.querySelectorAll('#variants tbody tr')].map((row)=>{const get=(name)=>row.querySelector('[data-variant-field='+name+']')?.value??'';const color=row.querySelector('[data-variant-option=Color]')?.value??'';const size=row.querySelector('[data-variant-option=Size]')?.value??'';return {sourceRowKey:row.dataset.sourceRowKey||null,supplierSku:get('supplierSku').trim(),title:get('title').trim(),optionValues:{...(color?{Color:color}:{}),...(size?{Size:size}:{})},imageUrl:row.dataset.imageUrl||null,sourcePrice:num(row.dataset.sourcePrice),stock:num(row.dataset.stock),sortOrder:Number(row.dataset.variant)||0};});
+  d.variants=[]; d.swatches=[];
+  [...document.querySelectorAll('[data-color-group]')].forEach((group,groupIndex)=>{
+    const color=group.querySelector('[data-color-name]').value.trim()||'Default';
+    const swatchUrl=group.querySelector('[data-color-swatch]').value||null;
+    if(swatchUrl||color)d.swatches.push({value:color,color:null,imageUrl:swatchUrl});
+    [...group.querySelectorAll('[data-size-row]')].forEach((row,rowIndex)=>{
+      const get=(name)=>row.querySelector('[data-size-field='+name+']')?.value??'';
+      const size=get('Size').trim();
+      d.variants.push({sourceRowKey:row.dataset.sourceRowKey||null,supplierSku:get('supplierSku').trim(),title:get('title').trim(),optionValues:{Color:color,...(size?{Size:size}:{})},imageUrl:swatchUrl||row.dataset.imageUrl||null,sourcePrice:num(row.dataset.sourcePrice),stock:num(row.dataset.stock),sortOrder:groupIndex*1000+rowIndex});
+    });
+  });
   d.media=[...document.querySelectorAll('[data-media-row]')].map((row,index)=>({url:row.dataset.url,visible:row.querySelector('[data-media-visible]').checked,alt:null,sortOrder:index})).filter((entry)=>entry.url);
-  d.swatches=[...document.querySelectorAll('[data-swatch-card]')].map((row)=>({value:row.querySelector('[data-swatch-field=value]').value.trim(),color:row.querySelector('[data-swatch-field=color]').value.trim()||null,imageUrl:row.querySelector('[data-swatch-field=imageUrl]').value||null})).filter((entry)=>entry.value);
   return d;
 }
 async function saveDraft(){current.draft_payload=readDraft();const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{method:'PATCH',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({draft:current.draft_payload})});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));current=body.draft;const index=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(index>=0)drafts[index]=current;message='草稿已保存。';error='';renderEditor();renderList();}
@@ -142,14 +183,14 @@ function bindEditor(){
   editor.querySelector('[data-remove]').onclick=async()=>{if(!confirm('从 selection 移除这个产品？如果已发布 Portal，会保留 Portal 产品。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{method:'DELETE'});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error);window.location.href='/selection';}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-publish]').onclick=async()=>{try{await saveDraft();const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/publish',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({target:'staging'})});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));current=body.draft;message='已发布到 Portal：'+(body.portal?.productId||'');error='';await load();}catch(e){error=String(e.message||e);message='';renderEditor();}};
   editor.querySelectorAll('[data-add-tier]').forEach((b)=>b.onclick=()=>{const tbody=editor.querySelector('#tiers tbody');tbody.insertAdjacentHTML('beforeend',tierRow({label:'',minQuantity:1,maxQuantity:null,price:0},tbody.children.length));bindRemoval();});
-  editor.querySelectorAll('[data-add-variant]').forEach((b)=>b.onclick=()=>{const tbody=editor.querySelector('#variants tbody');tbody.insertAdjacentHTML('beforeend',variantRow({supplierSku:'',title:'',optionValues:{},sourcePrice:null,stock:null,imageUrl:''},tbody.children.length));bindRemoval();});
+  editor.querySelectorAll('[data-add-color]').forEach((b)=>b.onclick=()=>{const groups=editor.querySelector('#colorGroups');const index=groups.children.length;groups.insertAdjacentHTML('beforeend',colorGroupHtml({color:'New color',variants:[{supplierSku:'',title:'New color / S',optionValues:{Color:'New color',Size:'S'},sourcePrice:null,stock:null,imageUrl:''}],swatch:null},index));bindRemoval();});
+  editor.querySelectorAll('[data-add-size]').forEach((button)=>{button.onclick=()=>{const group=button.closest('[data-color-group]');const tbody=group?.querySelector('tbody');if(!tbody)return;const color=group.querySelector('[data-color-name]')?.value||'New color';tbody.insertAdjacentHTML('beforeend',sizeRowHtml({supplierSku:'',title:color+' / S',optionValues:{Color:color,Size:'S'},sourcePrice:null,stock:null,imageUrl:''},Number(group.dataset.colorGroup)||0));bindRemoval();};});
   editor.querySelectorAll('[data-add-media]').forEach((b)=>b.onclick=()=>{const url=prompt('图片 URL');if(!url)return;const box=editor.querySelector('#media');box.insertAdjacentHTML('beforeend',mediaRow({url,visible:true},box.children.length));bindRemoval();});
-  editor.querySelectorAll('[data-add-swatch]').forEach((b)=>b.onclick=()=>{const grid=editor.querySelector('#swatches');grid.insertAdjacentHTML('beforeend',swatchRow({value:'',color:'',imageUrl:''},grid.children.length));bindRemoval();});
   bindRemoval();
 }
 function bindRemoval(){
   const editor=document.getElementById('editor');
-  editor.querySelectorAll('[data-remove-tier],[data-remove-variant],[data-remove-media],[data-remove-swatch]').forEach((button)=>{button.onclick=()=>{const attr=button.dataset.removeTier!==undefined?'remove-tier':button.dataset.removeVariant!==undefined?'remove-variant':button.dataset.removeMedia!==undefined?'remove-media':'remove-swatch';const index=button.getAttribute('data-'+attr);const selector=attr==='remove-tier'?'#tiers tbody tr':attr==='remove-variant'?'#variants tbody tr':attr==='remove-media'?'[data-media-row]':'[data-swatch-card]';const target=editor.querySelectorAll(selector)[Number(index)];if(target)target.remove();};});
+  editor.querySelectorAll('[data-remove-tier],[data-remove-size],[data-remove-media],[data-remove-swatch]').forEach((button)=>{button.onclick=()=>{const target=button.closest('tr,[data-media-row],[data-swatch-card]');if(target)target.remove();};});
   editor.querySelectorAll('[data-media-up],[data-media-down]').forEach((button)=>{button.onclick=()=>{const up=button.hasAttribute('data-media-up');const index=Number(button.getAttribute(up?'data-media-up':'data-media-down'));const rows=[...editor.querySelectorAll('[data-media-row]')];const target=index+(up?-1:1);if(target<0||target>=rows.length)return;const parent=rows[index].parentElement;if(up)parent.insertBefore(rows[index],rows[target]);else parent.insertBefore(rows[target],rows[index]);bindRemoval();};});
 }
 document.getElementById('draftList').addEventListener('click',(event)=>{const button=event.target.closest('[data-id]');if(button)void openDraft(button.dataset.id);});
