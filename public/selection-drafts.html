@@ -15,7 +15,7 @@ nav a{color:var(--muted);margin-left:14px;text-decoration:none}nav a.on{color:va
 .search{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:7px;margin-bottom:8px}.draft-item{width:100%;display:block;text-align:left;border:0;background:transparent;border-radius:7px;padding:9px;cursor:pointer;margin-bottom:3px}.draft-item:hover{background:#f2f8ff}.draft-item.on{background:#eaf3ff}.draft-item strong{display:block;font-size:12.5px}.draft-item small{display:block;color:var(--muted);font-size:11px;margin-top:3px}
 .editor{padding:18px;min-width:0}.editor-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:16px}.editor-head h2{margin:0;font-size:20px}.badge{display:inline-block;border-radius:999px;padding:2px 8px;font-size:11px;background:#eef2f6;color:#475467}.badge.ok{background:#e7f6ec;color:var(--green)}.badge.warn{background:#fff4e8;color:var(--orange)}.badge.err{background:#fef3f2;color:var(--red)}
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wide{grid-column:1/-1}.field{display:grid;gap:5px}.field span{font-size:12px;color:var(--muted);font-weight:600}.field input,.field textarea,.field select{width:100%;border:1px solid #d8dce1;border-radius:7px;padding:8px 9px;background:#fff;color:var(--text);font:inherit}.field textarea{min-height:86px;resize:vertical}
-.section{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}.section h3{margin:0 0 4px;font-size:15px}.hint{font-size:11.5px;color:var(--muted);margin:0 0 10px}
+.section{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}.section h3{margin:0 0 4px;font-size:15px}.hint{font-size:11.5px;color:var(--muted);margin:0 0 10px}.source-price{display:flex;align-items:baseline;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:7px;background:#fafbfc}.source-price strong{font-size:20px}.source-price span{font-size:11px;color:var(--muted)}.rule-table td{color:var(--text);font-size:12px}
 table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid var(--line);padding:6px;text-align:left;vertical-align:top}th{font-size:11px;color:var(--muted)}td input{width:100%;border:1px solid #d8dce1;border-radius:5px;padding:5px;font:inherit;min-width:55px}.mini{border:1px solid var(--line);background:#fff;border-radius:5px;padding:4px 7px;cursor:pointer}.danger{color:var(--red)}.media-grid{display:flex;flex-wrap:wrap;gap:10px}.media-card{position:relative;width:132px;border:1px solid var(--line);border-radius:8px;padding:5px;background:#fff}.media-card img{width:120px;height:120px;object-fit:cover;border-radius:5px;display:block;background:#f5f6f8}.media-card .order{position:absolute;top:10px;left:10px;background:var(--blue);color:#fff;border-radius:999px;font-size:10px;font-weight:700;padding:1px 6px}.media-card .controls{display:flex;justify-content:center;gap:4px;margin-top:5px}.media-card .show{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);margin-top:4px}.swatch-img{width:34px;height:34px;object-fit:cover;border-radius:5px;border:1px solid var(--line);background:#f5f6f8;display:block}.swatch-empty{width:34px;height:34px;border-radius:5px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted);font-size:10px}
 .color-groups{display:grid;gap:14px}.color-group{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}.color-head{display:flex;align-items:end;gap:10px;padding:10px;background:#fafbfc;border-bottom:1px solid var(--line);flex-wrap:wrap}.color-head .color-preview{width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:#f5f6f8;display:block}.color-head .color-empty{width:64px;height:64px;border-radius:6px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted);font-size:10px}.color-head label{display:grid;gap:3px;font-size:11px;color:var(--muted)}.color-head input,.color-head select{border:1px solid #d8dce1;border-radius:5px;padding:5px;font:inherit;font-size:12px;min-width:150px}.color-group table{width:100%}.color-group .add-size{margin:8px 10px 10px}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}.actions button,.add-btn{border:1px solid var(--line);background:#fff;border-radius:7px;padding:8px 13px;cursor:pointer;font:inherit}.actions .primary{background:var(--blue);border-color:var(--blue);color:#fff}.actions .publish{background:var(--green);border-color:var(--green);color:#fff}.actions button:disabled{opacity:.5;cursor:default}.msg{margin-top:10px;font-size:12px;white-space:pre-wrap}.msg.ok{color:var(--green)}.msg.err{color:var(--red)}.empty{padding:24px;color:var(--muted);text-align:center}
@@ -93,10 +93,9 @@ function renderEditor(){
   +'<label class="field wide"><span>Description</span><textarea id="f-description">'+esc(d.description||'')+'</textarea></label>'
   +field('Price min','priceMin',d.priceMin??'')
   +field('Price max','priceMax',d.priceMax??'')
-  +field('MOQ','moq',d.moq??'')
-  +field('Currency','currency',d.currency||'USD')
   +'</div>'
-  +'<div class="section"><h3>Price tiers</h3><p class="hint">这些是 Portal 的采购价阶梯，发布后不会被 WP 同步覆盖。</p><table id="tiers"><thead><tr><th>Label</th><th>Min qty</th><th>Max qty</th><th>Unit price</th><th></th></tr></thead><tbody>'+tiers.map((tier,index)=>tierRow(tier,index)).join('')+'</tbody></table><button type="button" class="add-btn" data-add-tier>+ 添加阶梯</button></div>'
+  +sourcePricingHtml(s)
+  +'<div class="section"><h3>Portal price tiers</h3><p class="hint">这些是当前 Portal 的采购价阶梯，可修改；上方只读显示源数据和计算依据。</p><table id="tiers"><thead><tr><th>Label</th><th>Min qty</th><th>Max qty</th><th>Unit price</th><th></th></tr></thead><tbody>'+tiers.map((tier,index)=>tierRow(tier,index)).join('')+'</tbody></table><button type="button" class="add-btn" data-add-tier>+ 添加阶梯</button></div>'
   +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 对应一张 swatch 图片，size 只是 color 下的变体，不再单独配置图片。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><button type="button" class="add-btn" data-add-color>+ 添加 color</button></div>'
   +'<div class="section"><h3>Media</h3><p class="hint">点击勾选控制 Portal 前台展示；用箭头调整顺序。</p><div class="media-grid" id="media">'+media.map((entry,index)=>mediaRow(entry,index)).join('')+'</div><button type="button" class="add-btn" data-add-media>+ 添加图片 URL</button></div>'
   +'<div class="actions"><button type="button" class="primary" data-save>保存草稿</button><button type="button" class="publish" data-publish>发布 / 同步到 Portal</button><button type="button" data-refresh>刷新源数据</button><button type="button" data-reset>恢复源数据</button><button type="button" class="danger" data-remove>从 selection 移除</button></div>'
@@ -104,6 +103,23 @@ function renderEditor(){
   bindEditor();
 }
 function field(label,id,value){return '<label class="field"><span>'+esc(label)+'</span><input id="f-'+id+'" value="'+esc(value)+'"></label>';}
+function sourcePricingHtml(source){
+  const currency=source?.sourceCurrency||'CNY';
+  const symbol=currency==='CNY'?'¥':currency+' ';
+  const min=source?.sourcePriceMin; const max=source?.sourcePriceMax;
+  const sourcePrice=min==null&&max==null?'—':(min!=null&&max!=null&&Number(min)!==Number(max)?symbol+Number(min).toFixed(2)+' – '+symbol+Number(max).toFixed(2):symbol+Number(max??min).toFixed(2));
+  const rule=source?.pricingRule;
+  const tiers=Array.isArray(rule?.tiers)?rule.tiers:[];
+  const formula=rule?.formula?String(rule.formula):'';
+  return '<div class="section"><h3>1688 source price <span class="badge">read only</span></h3>'
+    +'<div class="source-price"><strong>'+esc(sourcePrice)+'</strong><span>'+esc(currency)+' · captured 1688 price</span></div>'
+    +'<div class="section" style="margin-top:12px;padding-top:0;border-top:0"><h3>Price calculation rule <span class="badge">read only</span></h3>'
+    +(formula?'<p class="hint">'+esc(formula)+'</p>':'<p class="hint">No stored formula for this source.</p>')
+    +(tiers.length?'<table class="rule-table"><thead><tr><th>Tier</th><th>Quantity</th><th>Source markup</th><th>Portal price</th></tr></thead><tbody>'
+      +tiers.map((tier)=>'<tr><td>'+esc(tier.label||'')+'</td><td>'+esc(tier.minQuantity??'')+(tier.maxQuantity!=null?'–'+esc(tier.maxQuantity):'+')+'</td><td>'+(tier.cnyMarkup==null?'—':symbol+Number(tier.cnyMarkup).toFixed(2))+'</td><td>USD '+Number(tier.price||0).toFixed(2)+'</td></tr>').join('')
+      +'</tbody></table>':'')
+    +'</div></div>';
+}
 function categoryField(value){
   const categories=wpCategories.slice().sort((left,right)=>String(left.name).localeCompare(String(right.name)));
   if(!categories.length)return field('Category','category',value);
@@ -175,7 +191,7 @@ function readDraft(){
   d.category=(document.getElementById('f-category')?.value||'').trim()||null;
   d.description=document.getElementById('f-description').value;
   d.tags=document.getElementById('f-tags').value.split(',').map((v)=>v.trim()).filter(Boolean);
-  d.priceMin=num(document.getElementById('f-priceMin').value); d.priceMax=num(document.getElementById('f-priceMax').value); d.moq=num(document.getElementById('f-moq').value); d.currency=document.getElementById('f-currency').value.trim().toUpperCase()||'USD';
+  d.priceMin=num(document.getElementById('f-priceMin').value); d.priceMax=num(document.getElementById('f-priceMax').value); d.moq=current?.draft_payload?.moq??null; d.currency=current?.draft_payload?.currency||'USD';
   d.priceTiers=[...document.querySelectorAll('#tiers tbody tr')].map((row)=>({label:row.querySelector('[data-tier-field=label]').value.trim(),minQuantity:Number(row.querySelector('[data-tier-field=minQuantity]').value),maxQuantity:num(row.querySelector('[data-tier-field=maxQuantity]').value),price:Number(row.querySelector('[data-tier-field=price]').value)}));
   d.variants=[]; d.swatches=[];
   [...document.querySelectorAll('[data-color-group]')].forEach((group,groupIndex)=>{
