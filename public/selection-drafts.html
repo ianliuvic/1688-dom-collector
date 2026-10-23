@@ -91,8 +91,6 @@ function renderEditor(){
   +categoryField(d.category||'')
   +'<label class="field"><span>Tags（逗号分隔）</span><input id="f-tags" value="'+esc((d.tags||[]).join(', '))+'"></label>'
   +'<label class="field wide"><span>Description</span><textarea id="f-description">'+esc(d.description||'')+'</textarea></label>'
-  +field('Price min','priceMin',d.priceMin??'')
-  +field('Price max','priceMax',d.priceMax??'')
   +'</div>'
   +sourcePricingHtml(s)
   +'<div class="section"><h3>Portal price tiers</h3><p class="hint">这些是当前 Portal 的采购价阶梯，可修改；上方只读显示源数据和计算依据。</p><table id="tiers"><thead><tr><th>Label</th><th>Min qty</th><th>Max qty</th><th>Unit price</th><th></th></tr></thead><tbody>'+tiers.map((tier,index)=>tierRow(tier,index)).join('')+'</tbody></table><button type="button" class="add-btn" data-add-tier>+ 添加阶梯</button></div>'
@@ -206,8 +204,11 @@ function readDraft(){
   d.category=(document.getElementById('f-category')?.value||'').trim()||null;
   d.description=document.getElementById('f-description').value;
   d.tags=document.getElementById('f-tags').value.split(',').map((v)=>v.trim()).filter(Boolean);
-  d.priceMin=num(document.getElementById('f-priceMin').value); d.priceMax=num(document.getElementById('f-priceMax').value); d.moq=current?.draft_payload?.moq??null; d.currency=current?.draft_payload?.currency||'USD';
+  d.moq=current?.draft_payload?.moq??null; d.currency=current?.draft_payload?.currency||'USD';
   d.priceTiers=[...document.querySelectorAll('#tiers tbody tr')].map((row)=>({label:row.querySelector('[data-tier-field=label]').value.trim(),minQuantity:Number(row.querySelector('[data-tier-field=minQuantity]').value),maxQuantity:num(row.querySelector('[data-tier-field=maxQuantity]').value),price:Number(row.querySelector('[data-tier-field=price]').value)}));
+  const tierPrices=d.priceTiers.map((tier)=>Number(tier.price)).filter((price)=>Number.isFinite(price));
+  d.priceMin=tierPrices.length?Math.min(...tierPrices):(current?.draft_payload?.priceMin??null);
+  d.priceMax=tierPrices.length?Math.max(...tierPrices):(current?.draft_payload?.priceMax??null);
   d.variants=[]; d.swatches=[];
   [...document.querySelectorAll('[data-color-group]')].forEach((group,groupIndex)=>{
     const color=group.querySelector('[data-color-name]').value.trim()||'Default';
