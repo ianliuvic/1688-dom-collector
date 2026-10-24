@@ -153,6 +153,45 @@ const escapeXml = (value) => String(value ?? '')
     "'": '&apos;',
   }[character]));
 
+const hasInchUnit = (value) => /(^|[^a-z])(in|inch|inches)([^a-z]|$)/i.test(String(value ?? ''));
+const hasCentimeterUnit = (value) => /(^|[^a-z])(cm|centimeter|centimeters)([^a-z]|$)/i.test(String(value ?? ''));
+
+function measurementUnit(value) {
+  const inch = hasInchUnit(value);
+  const centimeter = hasCentimeterUnit(value);
+  if (inch && !centimeter) return 'in';
+  if (centimeter && !inch) return 'cm';
+  return '';
+}
+
+function formatNumber(value) {
+  return String(Number(value.toFixed(1)));
+}
+
+export function formatMeasurement(value, unit) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const sourceUnit = measurementUnit(unit);
+  if (!sourceUnit) return text;
+  const valueHasInch = hasInchUnit(text);
+  const valueHasCentimeter = hasCentimeterUnit(text);
+  if (valueHasInch && valueHasCentimeter) return text;
+  const targetUnit = sourceUnit === 'in' ? 'cm' : 'in';
+  const numbers = text.match(/\d+(?:\.\d+)?/g);
+  if (!numbers?.length) return text;
+  const converted = text.replace(/\d+(?:\.\d+)?/g, (number) => {
+    const amount = Number(number);
+    return formatNumber(sourceUnit === 'in' ? amount * 2.54 : amount / 2.54);
+  });
+  return `${text} ${valueHasInch || valueHasCentimeter ? '' : sourceUnit} / ${converted} ${targetUnit}`.replace(/\s+/g, ' ').trim();
+}
+
+function measurementHeader(column) {
+  const unit = measurementUnit(column.unit);
+  if (unit) return `${column.label} (in / cm)`;
+  return column.unit ? `${column.label} (${column.unit})` : column.label;
+}
+
 const textWidthLimit = (text, fontSize, maxWidth) => {
   const estimated = String(text ?? '').length * fontSize * 0.56;
   if (estimated <= maxWidth) return '';
@@ -197,7 +236,7 @@ function renderSizeChartSvg(chart) {
   const headerCells = [
     centeredText('Size', margin + sizeColumnWidth / 2, headerY, headerFontSize, sizeColumnWidth - 20),
     ...chart.columns.map((column, index) => {
-      const label = column.unit ? `${column.label} (${column.unit})` : column.label;
+      const label = measurementHeader(column);
       return centeredText(
         label,
         margin + sizeColumnWidth + dataColumnWidth * index + dataColumnWidth / 2,
@@ -213,7 +252,7 @@ function renderSizeChartSvg(chart) {
     return [
       centeredText(row.size, margin + sizeColumnWidth / 2, y, cellFontSize, sizeColumnWidth - 20),
       ...chart.columns.map((column, columnIndex) => centeredText(
-        row.values[column.key] ?? '',
+        formatMeasurement(row.values[column.key] ?? '', column.unit),
         margin + sizeColumnWidth + dataColumnWidth * columnIndex + dataColumnWidth / 2,
         y,
         cellFontSize,

@@ -491,12 +491,12 @@ function selectSizeChartPreset(id){
   const preset=sizeChartPreset(id);if(!preset)return;
   if(sizeChartState?.presetId===String(id)){renderSizeChartEditor();return;}
   if(sizeChartDirty&&sizeChartState&&!confirm('当前尺码表的修改还没有生成图片，切换预设会丢失这些修改。继续？')){renderSizeChartPresets();return;}
-  sizeChartState=normalizeClientChart({presetId:preset.id,name:preset.name,columns:preset.columns,rows:preset.rows});
+  sizeChartState=normalizeClientChart({presetId:preset.id,name:'Size chart',columns:preset.columns,rows:preset.rows});
   sizeChartDirty=false;renderSizeChartPresets();renderSizeChartEditor();
 }
 function startNewSizeChart(){
   if(sizeChartDirty&&sizeChartState&&!confirm('当前尺码表的修改还没有生成图片，新建会丢失这些修改。继续？'))return;
-  sizeChartState=normalizeClientChart({presetId:null,name:'New size chart',columns:[{key:'bust',label:'Bust',unit:'cm'},{key:'waist',label:'Waist',unit:'cm'},{key:'hip',label:'Hip',unit:'cm'}],rows:['S','M','L'].map((size)=>({size,values:{}}))});
+  sizeChartState=normalizeClientChart({presetId:null,name:'Size chart',columns:[{key:'bust',label:'Bust',unit:'cm'},{key:'waist',label:'Waist',unit:'cm'},{key:'hip',label:'Hip',unit:'cm'}],rows:['S','M','L'].map((size)=>({size,values:{}}))});
   sizeChartDirty=false;renderSizeChartPresets();renderSizeChartEditor();
 }
 function addSizeChartColumn(){
