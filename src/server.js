@@ -1164,12 +1164,20 @@ async function enrichSelectionDraftImageSources(draft, detail) {
     const sourceUrl = normalizedImageUrl(image.source_url);
     if (sourceUrl) byLocalUrl.set(sourceUrl, image);
   }
+  const sourceByMediaUrl = new Map();
+  for (const entry of (Array.isArray(draft.mediaPool) ? draft.mediaPool : [])) {
+    const mediaUrl = normalizedImageUrl(entry?.url);
+    const sourceUrl = normalizedImageUrl(entry?.sourceUrl);
+    if (mediaUrl && sourceUrl) sourceByMediaUrl.set(mediaUrl, sourceUrl);
+  }
   const dataUrlCache = new Map();
   const enrich = async (entry) => {
     if (!entry?.url && !entry?.imageUrl) return entry;
     const current = entry.url || entry.imageUrl;
     if (!current) return entry;
-    const image = byLocalUrl.get(normalizedImageUrl(current));
+    const currentKey = normalizedImageUrl(current);
+    const sourceKey = sourceByMediaUrl.get(currentKey);
+    const image = byLocalUrl.get(currentKey) || (sourceKey ? byLocalUrl.get(sourceKey) : null);
     if (!image) return entry;
     const key = normalizedImageUrl(current);
     if (!dataUrlCache.has(key)) dataUrlCache.set(key, await selectionImageDataUrl(image).catch(() => null));
