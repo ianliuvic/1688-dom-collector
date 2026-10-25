@@ -90,8 +90,11 @@ async function askModel({ title, media, colours, config, publicBaseUrl }) {
   // Prefer the supplier source URL for model download. Collector-hosted image
   // URLs are public in a browser but are sometimes unreachable from the model
   // provider's fetcher; the WordPress/supplier source URL avoids that failure.
+  // The provider requires an image it can read directly; inline JPEG previews
+  // are the reliable transport. Skip derived media such as generated size
+  // charts that have no local source image.
   const modelMedia = media
-    .map((image) => ({ image, modelUrl: image.dataUrl || absoluteUrl(image.sourceUrl, publicBaseUrl) || absoluteUrl(image.url, publicBaseUrl) }))
+    .map((image) => ({ image, modelUrl: image.dataUrl || null }))
     .filter((entry) => entry.modelUrl);
   if (!modelMedia.length) return null;
   const mediaLines = modelMedia.map((entry, index) => imagePromptLine(entry, index)).join('\n');
