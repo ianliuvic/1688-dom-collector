@@ -1133,6 +1133,31 @@ async function applyPortalVariantImages(portal, product, assignments, productDet
  * 1688 detail and its English translation are used, so unpublished products
  * can still become Portal candidates.
  */
+/** Restore supplier source URLs on an existing selection draft's media/swatches. */
+function enrichSelectionDraftImageSources(draft, detail) {
+  if (!draft || typeof draft !== 'object') return draft;
+  const byLocalUrl = new Map();
+  for (const image of (detail?.images ?? [])) {
+    if (!image?.storage_path) continue;
+    const local = normalizedImageUrl(`${config.publicBaseUrl}${imagePublicPath(image.storage_path)}`);
+    if (!local) continue;
+    byLocalUrl.set(local, image.source_url || null);
+  }
+  const enrich = (entry) => {
+    if (!entry?.url && !entry?.imageUrl) return entry;
+    const current = entry.url || entry.imageUrl;
+    if (!current || entry.sourceUrl) return entry;
+    const sourceUrl = byLocalUrl.get(normalizedImageUrl(current));
+    return sourceUrl ? { ...entry, sourceUrl } : entry;
+  };
+  return {
+    ...draft,
+    media: Array.isArray(draft.media) ? draft.media.map(enrich) : draft.media,
+    swatches: Array.isArray(draft.swatches) ? draft.swatches.map(enrich) : draft.swatches,
+    variants: Array.isArray(draft.variants) ? draft.variants.map(enrich) : draft.variants,
+  };
+}
+
 async function buildSelectionSourcePayload(productDetailId) {
   const id = Number(productDetailId);
   if (!Number.isInteger(id) || id <= 0) return null;
@@ -7514,7 +7539,9 @@ app.post('/api/selection/drafts/:id/resolve-variant-images', { preHandler: requi
   const row = await db.getSelectionDraft(id);
   if (!row) return reply.code(404).send({ error: 'not_found' });
   try {
-    const resolved = await resolveSelectionVariantImages({ draft: row.draft_payload ?? {}, config });
+    const detail = await db.getProductDetail(id);
+    const draft = enrichSelectionDraftImageSources(row.draft_payload ?? {}, detail);
+    const resolved = await resolveSelectionVariantImages({ draft, config });
     const saved = await db.updateSelectionDraft(id, resolved.draft);
     return {
       draft: saved,
@@ -7635,10 +7662,13 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
   const id = Number(request.params.id);
   const draftRow = await db.getSelectionDraft(id);
   if (!draftRow) return reply.code(404).send({ error: 'not_found' });
-  const draft = draftRow.draft_payload ?? {};
+  let draft = draftRow.draft_payload ?? {};
   if (!String(draft.title || '').trim() || !Array.isArray(draft.variants) || !draft.variants.length) {
     return reply.code(400).send({ error: 'draft_incomplete', message: 'Title and at least one variant are required.' });
   }
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  draft = enrichSelectionDraftImageSources(draft, detail);
   // Resolve variant images from the selected gallery before sending the product
   // to Portal. Swatch images remain colour identifiers and are never published.
   try {
@@ -7647,8 +7677,6 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
   } catch (error) {
     request.log.warn({ err: error, selectionId: id }, 'selection variant image resolution failed');
   }
-  const detail = await db.getProductDetail(id);
-  if (!detail) return reply.code(404).send({ error: 'not_found' });
   try {
     draft.media = await materializeSelectionMedia(detail, draft.media);
     await db.updateSelectionDraft(id, draft);

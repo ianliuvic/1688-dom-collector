@@ -160,7 +160,10 @@ export async function resolveSelectionVariantImages({ draft, config = {}, modelC
   const unresolved = [];
   for (const colour of colours) {
     const variant = (Array.isArray(payload.variants) ? payload.variants : []).find((entry) => colourOf(entry).toLowerCase() === colour.key);
-    const exact = mediaForValue(media, colour.swatch?.imageUrl) || mediaForValue(media, variant?.imageUrl);
+    const exact = mediaForValue(media, colour.swatch?.imageUrl)
+      || mediaForValue(media, colour.swatch?.sourceUrl)
+      || mediaForValue(media, variant?.imageUrl)
+      || mediaForValue(media, variant?.sourceUrl);
     if (exact) {
       matches.set(colour.key, { colour: colour.label, url: exact.url, media: exact, confidence: 1, matchedBy: 'exact' });
     } else {
