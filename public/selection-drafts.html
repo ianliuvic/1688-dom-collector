@@ -180,8 +180,8 @@ async function batchPublishSelected(){
 }
 async function batchArchiveSelected(){
   if(batchBusy)return;
-  const rows=drafts.filter((row)=>selectedDraftIds.has(String(row.product_detail_id))&&row.portal_product_id);
-  if(!rows.length){alert('所选产品中没有已发布到 Portal 的产品');return;}
+  const rows=drafts.filter((row)=>selectedDraftIds.has(String(row.product_detail_id))&&row.portal_product_id&&String(row.status).toUpperCase()!=='ARCHIVED');
+  if(!rows.length){alert('所选产品中没有可归档的已发布 Portal 产品');return;}
   if(!confirm('批量归档 '+rows.length+' 款 Portal 产品？归档后店铺商品会按 portal 归档规则下架。'))return;
   batchBusy=true;updateBatchControls();
   const status=document.getElementById('batchStatus');
