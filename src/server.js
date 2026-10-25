@@ -34,6 +34,7 @@ import { buildReviewQueue } from './review-queue.js';
 import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetection } from './bundle-classifier.js';
 import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy, applyRemovedSkus, classifyNonProductImages, regenerateSplitCopy } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
+import { resolveSelectionVariantImages } from './selection-variant-images.js';
 import { dedupeImagesByHash, dedupeImagesWithLlm, normalizedSourceImageKey } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
@@ -7507,6 +7508,31 @@ app.patch('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey },
   return updated ? { draft: updated } : reply.code(404).send({ error: 'not_found' });
 });
 
+/** Match colour variants to the selected gallery media without adding swatches to the gallery. */
+app.post('/api/selection/drafts/:id/resolve-variant-images', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const row = await db.getSelectionDraft(id);
+  if (!row) return reply.code(404).send({ error: 'not_found' });
+  try {
+    const resolved = await resolveSelectionVariantImages({ draft: row.draft_payload ?? {}, config });
+    const saved = await db.updateSelectionDraft(id, resolved.draft);
+    return {
+      draft: saved,
+      resolution: {
+        matches: resolved.matches,
+        modelUsed: resolved.modelUsed,
+        unresolved: resolved.unresolved,
+        mediaCount: resolved.mediaCount,
+      },
+    };
+  } catch (error) {
+    return reply.code(502).send({
+      error: 'variant_image_resolution_failed',
+      message: String(error?.message || error).slice(0, 1000),
+    });
+  }
+});
+
 app.get('/api/selection/drafts/:id/source-diff', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
   const row = await db.getSelectionDraft(id);
@@ -7612,6 +7638,14 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
   const draft = draftRow.draft_payload ?? {};
   if (!String(draft.title || '').trim() || !Array.isArray(draft.variants) || !draft.variants.length) {
     return reply.code(400).send({ error: 'draft_incomplete', message: 'Title and at least one variant are required.' });
+  }
+  // Resolve variant images from the selected gallery before sending the product
+  // to Portal. Swatch images remain colour identifiers and are never published.
+  try {
+    const resolved = await resolveSelectionVariantImages({ draft, config });
+    draft.variants = resolved.draft.variants;
+  } catch (error) {
+    request.log.warn({ err: error, selectionId: id }, 'selection variant image resolution failed');
   }
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });

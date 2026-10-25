@@ -1,0 +1,236 @@
+// Resolve a selection draft's colour/print variant images against its selected
+// media. Swatch images stay independent: they are only visual evidence, never
+// added to the gallery. The model is used only for colours whose swatch cannot
+// be matched exactly, and it must choose one of the already-selected media URLs.
+
+import { applyReasoning, DEFAULT_MAX_TOKENS } from './model-request.js';
+
+const FALLBACK_BASE_URL = 'https://api.deepseek.com';
+const MAX_IMAGES = 600;
+
+function cleanText(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function endpointFrom(baseUrl) {
+  const base = String(baseUrl || FALLBACK_BASE_URL).replace(/\/+$/, '');
+  if (base.endsWith('/chat/completions')) return base;
+  return `${base}${base.endsWith('/v1') ? '' : '/v1'}/chat/completions`;
+}
+
+function contentText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => (typeof part === 'string' ? part : part?.text ?? '')).join('');
+  }
+  return '';
+}
+
+function absoluteUrl(value, baseUrl) {
+  const url = cleanText(value);
+  if (!url) return null;
+  if (/^https:\/\//i.test(url)) return url;
+  if (/^\/\//.test(url)) return `https:${url}`;
+  if (url.startsWith('/') && baseUrl) return `${String(baseUrl).replace(/\/+$/, '')}${url}`;
+  return null;
+}
+
+/** URL comparison key tolerant of protocol, query strings and image-size suffixes. */
+function imageKey(value) {
+  let url = cleanText(value);
+  if (!url) return '';
+  try { url = new URL(url, 'https://placeholder.invalid').toString(); } catch { /* keep raw */ }
+  return url
+    .replace(/^http:/i, 'https:')
+    .replace(/[?#].*$/, '')
+    .replace(/_\d+x\d+([^/]*)$/i, '')
+    .replace(/_\.webp$/i, '')
+    .toLowerCase();
+}
+
+function colourOf(variant) {
+  const options = variant?.optionValues && typeof variant.optionValues === 'object'
+    ? variant.optionValues : {};
+  for (const [key, value] of Object.entries(options)) {
+    if (/(颜色|色|color|colour)/i.test(String(key)) && cleanText(value)) return cleanText(value);
+  }
+  return '';
+}
+
+function mediaForValue(media, value) {
+  const key = imageKey(value);
+  if (!key) return null;
+  return media.find((entry) => imageKey(entry.url) === key || imageKey(entry.sourceUrl) === key) ?? null;
+}
+
+function buildColourList(draft) {
+  const colours = [];
+  const seen = new Set();
+  const add = (value) => {
+    const label = cleanText(value);
+    const key = label.toLowerCase();
+    if (!label || seen.has(key)) return;
+    seen.add(key);
+    const swatch = (draft.swatches ?? []).find((entry) => cleanText(entry?.value).toLowerCase() === key) ?? null;
+    colours.push({ label, key, swatch });
+  };
+  for (const variant of Array.isArray(draft.variants) ? draft.variants : []) add(colourOf(variant));
+  for (const swatch of Array.isArray(draft.swatches) ? draft.swatches : []) add(swatch?.value);
+  return colours;
+}
+
+function imagePromptLine(image, index) {
+  const alt = cleanText(image.alt);
+  return `${index + 1}. ${alt || 'product image'} (${absoluteUrl(image.url, '') || image.url})`;
+}
+
+async function askModel({ title, media, colours, config, publicBaseUrl }) {
+  if (!config?.apiKey) return null;
+  const mediaImages = media.map((image) => ({ ...image, url: absoluteUrl(image.url, publicBaseUrl) })).filter((image) => image.url);
+  if (!mediaImages.length) return null;
+  const unresolved = colours.filter((colour) => !colour.exact && colour.swatch?.imageUrl);
+  const swatchImages = [];
+  for (const colour of unresolved) {
+    const url = absoluteUrl(colour.swatch.imageUrl, publicBaseUrl);
+    if (url && swatchImages.length + mediaImages.length < MAX_IMAGES) swatchImages.push({ colour, url });
+  }
+  const mediaLines = mediaImages.map((image, index) => imagePromptLine(image, index)).join('\n');
+  const colourLines = colours.map((colour) => {
+    const swatchIndex = swatchImages.findIndex((entry) => entry.colour.key === colour.key);
+    return `- ${colour.label}${swatchIndex >= 0 ? `（色卡图：第 ${mediaImages.length + swatchIndex + 1} 张）` : ''}`;
+  }).join('\n') || '（无颜色）';
+  const model = config.visionModel || config.complexModel || 'deepseek-flash';
+  const prompt = `你是电商商品变体图片匹配助手，只输出严格 JSON。
+下面有商品标题、已选中的商品媒体图片（编号 1..${mediaImages.length}），以及若干颜色/花色及其色卡图片。色卡图片只用于判断，不是商品媒体。
+请为每个颜色从商品媒体图片中选择一张最能代表该颜色的图片，要求：
+- 必须从 1..${mediaImages.length} 中选择，不能选择色卡图片，不能选择不存在的编号。
+- 如果色卡图和某张媒体图片明显是同一张图，优先选它。
+- 如果没有足够把握，mediaNumber 设为 null，confidence 低于 0.5。
+- 不同颜色可以指向同一张图，但不要为了凑数强行选图。
+输出格式：{"matches":[{"color":"颜色原文","mediaNumber":1,"confidence":0.9,"reason":"简短理由"}]}
+颜色必须逐个覆盖，不要省略。
+
+商品标题：${JSON.stringify(title || '')}
+颜色：
+${colourLines}
+商品媒体图片：
+${mediaLines}`;
+  const content = [{ type: 'text', text: prompt }];
+  for (const image of mediaImages) content.push({ type: 'image_url', image_url: { url: image.url } });
+  for (const swatch of swatchImages) content.push({ type: 'image_url', image_url: { url: swatch.url } });
+  const response = await fetch(endpointFrom(config.baseUrl), {
+    method: 'POST',
+    headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify(applyReasoning({
+      model,
+      messages: [{ role: 'user', content }],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: DEFAULT_MAX_TOKENS,
+    }, config.reasoningEffort)),
+    signal: AbortSignal.timeout(90_000),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Variant image matching failed (${response.status}): ${String(detail).slice(0, 240)}`);
+  }
+  const payload = await response.json();
+  const text = contentText(payload.choices?.[0]?.message?.content);
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { parsed = null; }
+  if (!parsed) {
+    const match = String(text || '').match(/\{[\s\S]*\}/);
+    if (match) { try { parsed = JSON.parse(match[0]); } catch { parsed = null; } }
+  }
+  return Array.isArray(parsed?.matches) ? parsed.matches : null;
+}
+
+/**
+ * Update variant images in a selection draft without adding swatch images to
+ * the gallery. Every returned variant image is a selected media URL, so the
+ * Portal publish path can pass it through to Shopify.
+ */
+export async function resolveSelectionVariantImages({ draft, config = {}, modelConfig = null }) {
+  const payload = draft && typeof draft === 'object' ? structuredClone(draft) : {};
+  const media = (Array.isArray(payload.media) ? payload.media : [])
+    .filter((entry) => entry?.url && entry.visible !== false)
+    .map((entry) => ({ ...entry, url: absoluteUrl(entry.url, config.publicBaseUrl) || entry.url }));
+  const colours = buildColourList(payload);
+  const matches = new Map();
+  const unresolved = [];
+  for (const colour of colours) {
+    const variant = (Array.isArray(payload.variants) ? payload.variants : []).find((entry) => colourOf(entry).toLowerCase() === colour.key);
+    const exact = mediaForValue(media, colour.swatch?.imageUrl) || mediaForValue(media, variant?.imageUrl);
+    if (exact) {
+      matches.set(colour.key, { colour: colour.label, url: exact.url, media: exact, confidence: 1, matchedBy: 'exact' });
+    } else {
+      unresolved.push({ ...colour, exact: false });
+    }
+  }
+  let modelUsed = false;
+  if (unresolved.length) {
+    try {
+      const result = await askModel({
+        title: payload.title,
+        media,
+        colours: unresolved,
+        publicBaseUrl: modelConfig?.publicBaseUrl ?? config.publicBaseUrl,
+        config: {
+          ...(modelConfig || {}),
+          apiKey: modelConfig?.apiKey ?? config.modelApiKey,
+          baseUrl: modelConfig?.baseUrl ?? config.modelBaseUrl,
+          visionModel: modelConfig?.visionModel ?? config.visionModel,
+          complexModel: modelConfig?.complexModel ?? config.complexModel,
+          reasoningEffort: modelConfig?.reasoningEffort ?? config.reasoningEffort,
+        },
+      });
+      modelUsed = Boolean(result);
+      for (const proposal of result ?? []) {
+        const colour = unresolved.find((entry) => entry.key === cleanText(proposal?.color).toLowerCase());
+        const number = Number(proposal?.mediaNumber);
+        if (!colour || !Number.isInteger(number) || number < 1 || number > media.length) continue;
+        const chosen = media[number - 1];
+        if (!chosen?.url) continue;
+        const confidence = Number(proposal?.confidence);
+        matches.set(colour.key, {
+          colour: colour.label,
+          url: chosen.url,
+          media: chosen,
+          confidence: Number.isFinite(confidence) ? confidence : null,
+          matchedBy: 'model',
+          reason: cleanText(proposal?.reason).slice(0, 240),
+        });
+      }
+    } catch (error) {
+      payload.variantImageError = String(error?.message || error).slice(0, 500);
+    }
+  }
+  const mediaUrls = new Set(media.map((entry) => imageKey(entry.url)));
+  payload.variants = (Array.isArray(payload.variants) ? payload.variants : []).map((variant) => {
+    const colour = colourOf(variant);
+    const chosen = matches.get(colour.toLowerCase());
+    if (chosen?.url) return { ...variant, imageUrl: chosen.url };
+    if (!colour) {
+      const current = mediaForValue(media, variant?.imageUrl);
+      return { ...variant, imageUrl: current?.url ?? null };
+    }
+    const current = mediaForValue(media, variant?.imageUrl);
+    return { ...variant, imageUrl: current?.url ?? null };
+  });
+  // Keep the original swatch URL as the colour identifier; it was never added
+  // to media and is not used as variant media.
+  return {
+    draft: payload,
+    matches: [...matches.values()].map((entry) => ({
+      color: entry.colour,
+      imageUrl: entry.url,
+      confidence: entry.confidence,
+      matchedBy: entry.matchedBy,
+      reason: entry.reason ?? null,
+    })),
+    modelUsed,
+    unresolved: colours.filter((colour) => !matches.has(colour.key)).map((colour) => colour.label),
+    mediaCount: media.length,
+    mediaUrlCount: mediaUrls.size,
+  };
+}

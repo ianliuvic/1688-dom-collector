@@ -140,7 +140,7 @@ function renderEditor(){
   +'<label class="field wide"><span>Description</span><textarea id="f-description">'+esc(d.description||'')+'</textarea></label>'
   +'</div>'
   +pricingEditorHtml(s,d)
-  +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 对应一张 swatch 图片，size 只是 color 下的变体，不再单独配置图片。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><button type="button" class="add-btn" data-add-color>+ 添加 color</button></div>'
+  +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 对应一张 swatch 图片；size 只是 color 下的变体。发布时会自动从已选 media 中匹配该颜色的变体图片，swatch 不会加入 gallery。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><button type="button" class="add-btn" data-add-color>+ 添加 color</button></div>'
   +'<div class="section"><h3>Selected media</h3><p class="hint">这些是准备发布到 Portal 的图片；勾选控制前台展示，用箭头调整顺序。</p><div class="media-grid" id="media">'+media.map((entry,index)=>mediaRow(entry,index)).join('')+'</div><div class="media-actions"><label class="add-btn upload-media-btn">+ 上传本地图片<input id="mediaUpload" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple></label><button type="button" class="add-btn" data-open-size-chart>+ 生成尺码表图片</button></div></div>'
   +(mediaPool.length?'<div class="section media-pool"><h3>Original 1688 images not selected</h3><p class="hint">包含未选入的 1688 gallery、主图和详情图。点击图片下方按钮即可重新加入 selected media。</p><div class="media-grid" id="mediaPool">'+mediaPool.map((entry,index)=>poolCard(entry,index)).join('')+'</div></div>':'')
   +'<div class="actions"><button type="button" class="primary" data-save>保存草稿</button><button type="button" class="publish" data-publish>发布 / 同步到 Portal</button><button type="button" data-refresh>检查源数据更新</button><button type="button" data-reset>恢复源数据</button><button type="button" class="danger" data-remove>从 selection 移除</button></div>'
@@ -276,6 +276,16 @@ function readDraft(){
     });
   });
   d.media=[...document.querySelectorAll('[data-media-row]')].map((row,index)=>({url:row.dataset.url,visible:row.querySelector('[data-media-visible]').checked,alt:null,sortOrder:index,...(row.dataset.kind?{kind:row.dataset.kind}:{})})).filter((entry)=>entry.url);
+  // A variant image must be one of the selected gallery images. Preserve an
+  // already-resolved image; otherwise drop a swatch that is not in media and
+  // let the server resolve it from the selected gallery on publish.
+  const selectedMediaUrls=new Set(d.media.map((entry)=>entry.url));
+  d.variants=d.variants.map((variant)=>{
+    if(variant.imageUrl&&selectedMediaUrls.has(variant.imageUrl))return variant;
+    const swatch=d.swatches.find((entry)=>String(entry.value||'').trim().toLowerCase()===String(variant.optionValues?.Color||'').trim().toLowerCase());
+    const swatchUrl=swatch?.imageUrl||null;
+    return {...variant,imageUrl:swatchUrl&&selectedMediaUrls.has(swatchUrl)?swatchUrl:null};
+  });
   if(sizeChartState)d.sizeChartDesign=sizeChartState;
   return d;
 }
