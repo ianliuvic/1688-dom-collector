@@ -1448,12 +1448,12 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
-  async function listWeeklyMarketingProducts({ from, to, limit = 24 } = {}) {
-    const safeLimit = Math.min(Math.max(Number(limit) || 24, 1), 50);
+  async function listWeeklyMarketingProducts({ from, to, limit = 30 } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 30, 1), 30);
     const result = await pool.query(`SELECT details.id AS product_detail_id,
       details.offer_id, source.listing_time, source.category AS source_category,
       source.shop_name, publications.style_no, publications.wp_post_id,
-      publications.wp_url,
+      publications.wp_url, publications.first_published_at AS wp_published_at,
       COALESCE(translations.title, publications.payload->>'title', details.title) AS title,
       COALESCE(translations.description, publications.payload->>'description', details.description) AS description,
       COALESCE(publications.payload->'images'->0->>'url', source.image_url) AS image_url
@@ -1463,14 +1463,15 @@ export function createDatabase(databaseUrl) {
        AND publications.wp_status='publish'
        AND publications.wp_post_id IS NOT NULL
        AND publications.wp_url IS NOT NULL
+       AND publications.first_published_at IS NOT NULL
+       AND publications.first_published_at >= $1::timestamptz
+       AND publications.first_published_at < $2::timestamptz
       JOIN LATERAL (
         SELECT products.listing_time, products.category, products.image_url,
           shops.shop_name
         FROM shop_products products
         JOIN shop_profiles shops ON shops.id=products.shop_id
         WHERE products.offer_id=details.offer_id
-          AND products.listing_time >= $1::timestamptz
-          AND products.listing_time < $2::timestamptz
           AND products.availability_status='active'
           AND products.ingestion_eligible=true
         ORDER BY products.last_crawled_at DESC
@@ -1483,7 +1484,7 @@ export function createDatabase(databaseUrl) {
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 1
       ) translations ON true
-      ORDER BY source.listing_time DESC, details.id DESC
+      ORDER BY publications.first_published_at DESC, details.id DESC
       LIMIT $3`, [from, to, safeLimit]);
     return result.rows;
   }
