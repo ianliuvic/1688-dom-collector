@@ -2896,6 +2896,15 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  async function markSelectionDraftArchived(productDetailId) {
+    const result = await pool.query(`
+      UPDATE product_selection_drafts
+      SET status='ARCHIVED', portal_status='ARCHIVED', last_error=NULL, updated_at=now()
+      WHERE product_detail_id=$1
+      RETURNING *`, [productDetailId]);
+    return result.rows[0] ?? null;
+  }
+
   async function markSelectionDraftFailed(productDetailId, error) {
     const result = await pool.query(`
       UPDATE product_selection_drafts
@@ -3814,7 +3823,7 @@ export function createDatabase(databaseUrl) {
     summarizeWordPressPublications, listWordPressPublications, listProductSaleQuantities,
     listSelectionProducts, listSelectionFacets, getSelectionProductMedia, getSelectionProductSkus,
     getSelectionDraft, addSelectionDraft, updateSelectionDraft, updateSelectionDraftContent, updateSelectionDraftSource, resetSelectionDraft,
-    removeSelectionDraft, markSelectionDraftPublished, markSelectionDraftFailed, listSelectionDrafts,
+    removeSelectionDraft, markSelectionDraftPublished, markSelectionDraftArchived, markSelectionDraftFailed, listSelectionDrafts,
     listPortalDelistedProducts,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
     listNotAvailableButInStock,

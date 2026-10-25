@@ -7914,6 +7914,7 @@ app.post('/api/selection/products/:id/portal-unpublish', { preHandler: requireDa
       return reply.code(502).send({ error: 'portal_unpublish_failed', message: String(message) });
     }
     await db.markPortalPublicationArchived(productDetailId);
+    await db.markSelectionDraftArchived(productDetailId);
     portalStagingActiveCache = { at: 0, ids: null, warning: null };
     return {
       status: 'archived',
