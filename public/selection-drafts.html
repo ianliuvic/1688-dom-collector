@@ -202,7 +202,8 @@ function mediaUrlOptions(selected){
 }
 function colorGroupHtml(group,index){
   const selected=group.swatch?.imageUrl||'';
-  const variantImage=(group.variants||[]).find((variant)=>variant.imageUrl)?.imageUrl||'';
+  const mediaUrls=new Set((current?.draft_payload?.media||[]).map((entry)=>entry.url).filter(Boolean));
+  const variantImage=(group.variants||[]).find((variant)=>variant.imageUrl&&mediaUrls.has(variant.imageUrl))?.imageUrl||'';
   const preview=selected?'<img class="color-preview" data-swatch-preview data-lightbox="'+esc(selected)+'" src="'+esc(selected)+'" alt="" title="View full size">':'<span class="color-empty" data-swatch-preview>No image</span>';
   const choosePreview=selected?'<img class="choose-img" src="'+esc(selected)+'" alt="">':'<span class="choose-empty">—</span>';
   const variantChoosePreview=variantImage?'<img class="choose-img" src="'+esc(pickerThumb(variantImage))+'" alt="">':'<span class="choose-empty">—</span>';
