@@ -7752,21 +7752,27 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
     }
     const portalProduct = body.product;
     // Import preserves existing manual variant defaults. A selection publish is
-    // authoritative for colour-to-gallery mapping, so apply the resolved
-    // variant images explicitly as well.
-    const assignmentByColor = new Map();
+    // authoritative for variant-to-gallery mapping, so apply the resolved
+    // images by supplier SKU as well. SKUs are stable across localized colours.
+    const portalVariantBySku = new Map(
+      (Array.isArray(portalProduct.variants) ? portalProduct.variants : [])
+        .map((variant) => [String(variant?.supplierSku || '').trim().toLowerCase(), variant?.id])
+        .filter(([sku, id]) => sku && id),
+    );
+    const variantImagePatch = [];
     for (const variant of (Array.isArray(draft.variants) ? draft.variants : [])) {
-      const color = String(variant?.optionValues?.Color || '').trim();
+      const id = portalVariantBySku.get(String(variant?.supplierSku || '').trim().toLowerCase());
       const url = String(variant?.imageUrl || '').trim();
-      if (color && url && !assignmentByColor.has(color.toLowerCase())) {
-        assignmentByColor.set(color.toLowerCase(), { color, url });
-      }
+      if (id && url) variantImagePatch.push({ id, imageUrl: url });
     }
-    let variantMatch = null;
+    let variantMatch = { variants: variantImagePatch.length, updated: 0 };
     try {
-      variantMatch = await applyPortalVariantImages(portal, portalProduct, [...assignmentByColor.values()], id);
+      if (variantImagePatch.length) {
+        const updated = await updatePortalCatalogVariants(portal, portalProduct.id, variantImagePatch);
+        variantMatch = { variants: variantImagePatch.length, updated: updated?.updated ?? 0 };
+      }
     } catch (error) {
-      variantMatch = { error: String(error?.message || error).slice(0, 500) };
+      variantMatch = { variants: variantImagePatch.length, error: String(error?.message || error).slice(0, 500) };
       request.log.warn({ err: error, selectionId: id }, 'portal variant image update failed');
     }
     const saved = await db.markSelectionDraftPublished(id, {
