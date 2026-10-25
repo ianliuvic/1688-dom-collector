@@ -1181,7 +1181,12 @@ async function enrichSelectionDraftImageSources(draft, detail) {
     if (!image) return entry;
     const key = normalizedImageUrl(current);
     if (!dataUrlCache.has(key)) dataUrlCache.set(key, await selectionImageDataUrl(image).catch(() => null));
-    return { ...entry, sourceUrl: entry.sourceUrl || image.source_url || null, dataUrl: dataUrlCache.get(key) || undefined };
+    return {
+      ...entry,
+      sourceUrl: entry.sourceUrl || image.source_url || null,
+      contentHash: entry.contentHash || image.content_sha256 || null,
+      dataUrl: dataUrlCache.get(key) || undefined,
+    };
   };
   return {
     ...draft,
@@ -7542,7 +7547,8 @@ app.post('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, 
     // review/edit stage, not the later Portal publish step.
     const detail = await db.getProductDetail(id);
     const draft = await enrichSelectionDraftImageSources(created.draft_payload ?? {}, detail);
-    const resolved = await resolveSelectionVariantImages({ draft, config });
+    const sourceSwatches = (await enrichSelectionDraftImageSources({ swatches: source.swatches ?? [] }, detail)).swatches;
+    const resolved = await resolveSelectionVariantImages({ draft, sourceSwatches, config });
     const saved = await db.updateSelectionDraftContent(id, resolved.draft);
     return reply.code(201).send({ draft: saved ?? created });
   } catch (error) {
@@ -7586,7 +7592,8 @@ app.post('/api/selection/drafts/:id/resolve-variant-images', { preHandler: requi
   try {
     const detail = await db.getProductDetail(id);
     const draft = await enrichSelectionDraftImageSources(row.draft_payload ?? {}, detail);
-    const resolved = await resolveSelectionVariantImages({ draft, config });
+    const sourceSwatches = (await enrichSelectionDraftImageSources({ swatches: row.source_payload?.swatches ?? [] }, detail)).swatches;
+    const resolved = await resolveSelectionVariantImages({ draft, sourceSwatches, config });
     const saved = await db.updateSelectionDraftContent(id, resolved.draft);
     return {
       draft: saved,

@@ -64,6 +64,16 @@ function mediaForValue(media, value) {
   return media.find((entry) => imageKey(entry.url) === key || imageKey(entry.sourceUrl) === key) ?? null;
 }
 
+function mediaForSwatch(media, swatch) {
+  if (!swatch) return null;
+  const direct = mediaForValue(media, swatch.imageUrl) || mediaForValue(media, swatch.sourceUrl);
+  if (direct) return direct;
+  if (swatch.contentHash) {
+    return media.find((entry) => entry.contentHash && entry.contentHash === swatch.contentHash) ?? null;
+  }
+  return null;
+}
+
 function buildColourList(draft) {
   const colours = [];
   const seen = new Set();
@@ -152,19 +162,22 @@ ${mediaLines}`;
  * the gallery. Every returned variant image is a selected media URL, so the
  * Portal publish path can pass it through to Shopify.
  */
-export async function resolveSelectionVariantImages({ draft, config = {}, modelConfig = null }) {
+export async function resolveSelectionVariantImages({ draft, sourceSwatches = [], config = {}, modelConfig = null }) {
   const payload = draft && typeof draft === 'object' ? structuredClone(draft) : {};
   delete payload.variantImageError;
   const media = (Array.isArray(payload.media) ? payload.media : [])
     .filter((entry) => entry?.url && entry.visible !== false)
     .map((entry) => ({ ...entry, url: absoluteUrl(entry.url, config.publicBaseUrl) || entry.url }));
+  const sourceByColour = new Map((Array.isArray(sourceSwatches) ? sourceSwatches : [])
+    .map((swatch) => [cleanText(swatch?.value).toLowerCase(), swatch])
+    .filter(([key]) => key));
   const colours = buildColourList(payload);
   const matches = new Map();
   const unresolved = [];
   for (const colour of colours) {
     const variant = (Array.isArray(payload.variants) ? payload.variants : []).find((entry) => colourOf(entry).toLowerCase() === colour.key);
-    const exact = mediaForValue(media, colour.swatch?.imageUrl)
-      || mediaForValue(media, colour.swatch?.sourceUrl)
+    const exact = mediaForSwatch(media, sourceByColour.get(colour.key))
+      || mediaForSwatch(media, colour.swatch)
       || mediaForValue(media, variant?.imageUrl)
       || mediaForValue(media, variant?.sourceUrl);
     if (exact) {
