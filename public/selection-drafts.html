@@ -140,7 +140,7 @@ function renderEditor(){
   +'<label class="field wide"><span>Description</span><textarea id="f-description">'+esc(d.description||'')+'</textarea></label>'
   +'</div>'
   +pricingEditorHtml(s,d)
-  +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 对应一张 swatch 图片；size 只是 color 下的变体。发布时会自动从已选 media 中匹配该颜色的变体图片，swatch 不会加入 gallery。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><button type="button" class="add-btn" data-add-color>+ 添加 color</button></div>'
+  +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 对应一张 swatch 图片；size 只是 color 下的变体。Variant image 从已选 media 中匹配，可在这里检查和修改；swatch 不会加入 gallery。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><div class="media-actions"><button type="button" class="add-btn" data-add-color>+ 添加 color</button><button type="button" class="add-btn" data-auto-match-variant-images>Auto match variant images</button></div></div>'
   +'<div class="section"><h3>Selected media</h3><p class="hint">这些是准备发布到 Portal 的图片；勾选控制前台展示，用箭头调整顺序。</p><div class="media-grid" id="media">'+media.map((entry,index)=>mediaRow(entry,index)).join('')+'</div><div class="media-actions"><label class="add-btn upload-media-btn">+ 上传本地图片<input id="mediaUpload" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple></label><button type="button" class="add-btn" data-open-size-chart>+ 生成尺码表图片</button></div></div>'
   +(mediaPool.length?'<div class="section media-pool"><h3>Original 1688 images not selected</h3><p class="hint">包含未选入的 1688 gallery、主图和详情图。点击图片下方按钮即可重新加入 selected media。</p><div class="media-grid" id="mediaPool">'+mediaPool.map((entry,index)=>poolCard(entry,index)).join('')+'</div></div>':'')
   +'<div class="actions"><button type="button" class="primary" data-save>保存草稿</button><button type="button" class="publish" data-publish>发布 / 同步到 Portal</button><button type="button" data-refresh>检查源数据更新</button><button type="button" data-reset>恢复源数据</button><button type="button" class="danger" data-remove>从 selection 移除</button></div>'
@@ -202,11 +202,14 @@ function mediaUrlOptions(selected){
 }
 function colorGroupHtml(group,index){
   const selected=group.swatch?.imageUrl||'';
+  const variantImage=(group.variants||[]).find((variant)=>variant.imageUrl)?.imageUrl||'';
   const preview=selected?'<img class="color-preview" data-swatch-preview data-lightbox="'+esc(selected)+'" src="'+esc(selected)+'" alt="" title="View full size">':'<span class="color-empty" data-swatch-preview>No image</span>';
   const choosePreview=selected?'<img class="choose-img" src="'+esc(selected)+'" alt="">':'<span class="choose-empty">—</span>';
+  const variantChoosePreview=variantImage?'<img class="choose-img" src="'+esc(variantImage)+'" alt="">':'<span class="choose-empty">—</span>';
   return '<div class="color-group" data-color-group="'+index+'"><div class="color-head">'+preview
     +'<label>Color<input data-color-name value="'+esc(group.color||'')+'"></label>'
     +'<label>Swatch image<button type="button" class="swatch-choose" data-open-swatch>'+choosePreview+'<span>Choose image</span></button><input type="hidden" data-color-swatch value="'+esc(selected)+'"></label>'
+    +'<label>Variant image<button type="button" class="swatch-choose" data-open-variant-image>'+variantChoosePreview+'<span>Choose from media</span></button><input type="hidden" data-color-variant-image value="'+esc(variantImage)+'"></label>'
     +'<button type="button" class="mini danger remove-color" data-remove-color="'+index+'">删除 color</button></div>'
     +'<table><thead><tr><th>Variant</th><th>SKU</th><th>Size</th><th></th></tr></thead><tbody>'
     +group.variants.map((variant)=>sizeRowHtml(variant,index)).join('')+'</tbody></table>'
@@ -268,24 +271,19 @@ function readDraft(){
   [...document.querySelectorAll('[data-color-group]')].forEach((group,groupIndex)=>{
     const color=group.querySelector('[data-color-name]').value.trim()||'Default';
     const swatchUrl=group.querySelector('[data-color-swatch]').value||null;
+    const variantImageUrl=group.querySelector('[data-color-variant-image]')?.value||null;
     if(swatchUrl||color)d.swatches.push({value:color,color:null,imageUrl:swatchUrl});
     [...group.querySelectorAll('[data-size-row]')].forEach((row,rowIndex)=>{
       const get=(name)=>row.querySelector('[data-size-field='+name+']')?.value??'';
       const size=get('Size').trim();
-      d.variants.push({sourceRowKey:row.dataset.sourceRowKey||null,supplierSku:get('supplierSku').trim(),title:get('title').trim(),optionValues:{Color:color,...(size?{Size:size}:{})},imageUrl:swatchUrl||row.dataset.imageUrl||null,sourcePrice:num(row.dataset.sourcePrice),stock:num(row.dataset.stock),sortOrder:groupIndex*1000+rowIndex});
+      d.variants.push({sourceRowKey:row.dataset.sourceRowKey||null,supplierSku:get('supplierSku').trim(),title:get('title').trim(),optionValues:{Color:color,...(size?{Size:size}:{})},imageUrl:variantImageUrl||null,sourcePrice:num(row.dataset.sourcePrice),stock:num(row.dataset.stock),sortOrder:groupIndex*1000+rowIndex});
     });
   });
   d.media=[...document.querySelectorAll('[data-media-row]')].map((row,index)=>({url:row.dataset.url,visible:row.querySelector('[data-media-visible]').checked,alt:null,sortOrder:index,...(row.dataset.kind?{kind:row.dataset.kind}:{})})).filter((entry)=>entry.url);
-  // A variant image must be one of the selected gallery images. Preserve an
-  // already-resolved image; otherwise drop a swatch that is not in media and
-  // let the server resolve it from the selected gallery on publish.
+  // A variant image must be one of the selected gallery images. The per-colour
+  // Variant image control is authoritative; never fall back to the swatch.
   const selectedMediaUrls=new Set(d.media.map((entry)=>entry.url));
-  d.variants=d.variants.map((variant)=>{
-    if(variant.imageUrl&&selectedMediaUrls.has(variant.imageUrl))return variant;
-    const swatch=d.swatches.find((entry)=>String(entry.value||'').trim().toLowerCase()===String(variant.optionValues?.Color||'').trim().toLowerCase());
-    const swatchUrl=swatch?.imageUrl||null;
-    return {...variant,imageUrl:swatchUrl&&selectedMediaUrls.has(swatchUrl)?swatchUrl:null};
-  });
+  d.variants=d.variants.map((variant)=>selectedMediaUrls.has(variant.imageUrl)?variant:{...variant,imageUrl:null});
   if(sizeChartState)d.sizeChartDesign=sizeChartState;
   return d;
 }
@@ -297,6 +295,23 @@ function bindEditor(){
   editor.querySelector('[data-reset]').onclick=async()=>{if(!confirm('恢复为当前采集源/WP 数据？草稿编辑会丢失。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/reset',{method:'POST'});const body=await response.json();if(!response.ok)throw new Error(body?.message||body?.error);current=body.draft;syncSizeChartState();const i=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(i>=0)drafts[i]=current;message='已恢复源数据。';error='';renderEditor();renderList();}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-remove]').onclick=async()=>{if(!confirm('从 selection 移除这个产品？如果已发布 Portal，会保留 Portal 产品。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{method:'DELETE'});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error);window.location.href='/selection';}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-publish]').onclick=async()=>{try{await saveDraft();const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/publish',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({target:'staging'})});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));current=body.draft;message='已发布到 Portal：'+(body.portal?.productId||'');error='';await load();}catch(e){error=String(e.message||e);message='';renderEditor();}};
+  const autoMatchVariantImages=editor.querySelector('[data-auto-match-variant-images]');
+  if(autoMatchVariantImages)autoMatchVariantImages.onclick=async()=>{
+    try{
+      await saveDraft('当前编辑已保存，正在匹配变体图片…');
+      const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/resolve-variant-images',{method:'POST',headers:{accept:'application/json'}});
+      const body=await response.json().catch(()=>null);
+      if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));
+      current=body.draft;
+      const i=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));
+      if(i>=0)drafts[i]=current;
+      const resolution=body.resolution||{};
+      const matched=Array.isArray(resolution.matches)?resolution.matches.length:0;
+      const unresolved=Array.isArray(resolution.unresolved)?resolution.unresolved:[];
+      message='Variant image match: '+matched+' 个颜色已匹配'+(unresolved.length?'，未匹配：'+unresolved.join(', '):'')+'。可继续手动调整。';
+      error='';renderEditor();renderList();
+    }catch(e){error=String(e.message||e);message='';renderEditor();}
+  };
   editor.querySelectorAll('[data-add-color]').forEach((b)=>b.onclick=()=>{const groups=editor.querySelector('#colorGroups');const index=groups.children.length;groups.insertAdjacentHTML('beforeend',colorGroupHtml({color:'New color',variants:[{supplierSku:'',title:'New color / S',optionValues:{Color:'New color',Size:'S'},sourcePrice:null,stock:null,imageUrl:''}],swatch:null},index));bindRemoval();});
   editor.querySelectorAll('[data-add-size]').forEach((button)=>{button.onclick=()=>{const group=button.closest('[data-color-group]');const tbody=group?.querySelector('tbody');if(!tbody)return;const color=group.querySelector('[data-color-name]')?.value||'New color';tbody.insertAdjacentHTML('beforeend',sizeRowHtml({supplierSku:'',title:color+' / S',optionValues:{Color:color,Size:'S'},sourcePrice:null,stock:null,imageUrl:''},Number(group.dataset.colorGroup)||0));bindRemoval();};});
   const mediaUpload=editor.querySelector('#mediaUpload');
@@ -625,7 +640,7 @@ async function applySourceDiff(){
 document.querySelectorAll('[data-close-diff]').forEach((button)=>button.addEventListener('click',closeSourceDiff));
 document.querySelector('[data-apply-diff]').addEventListener('click',()=>{void applySourceDiff();});
 document.getElementById('sourceDiff').addEventListener('click',(event)=>{if(event.target.id==='sourceDiff')closeSourceDiff();});
-let activeSwatchGroup=null;
+let activeImagePicker=null;
 function setSwatchPreview(group,url){
   const current=group.querySelector('[data-swatch-preview]');
   if(!current)return;
@@ -637,29 +652,40 @@ function setSwatchPreview(group,url){
   const choose=group.querySelector('[data-open-swatch]');
   if(choose)choose.innerHTML=(url?'<img class="choose-img" src="'+esc(url)+'" alt="">':'<span class="choose-empty">—</span>')+'<span>Choose image</span>';
 }
-function closeSwatchPicker(){document.getElementById('swatchPicker').hidden=true;activeSwatchGroup=null;}
-function openSwatchPicker(group){
-  activeSwatchGroup=group;
-  const hidden=group.querySelector('[data-color-swatch]');
+function setVariantImagePreview(group,url){
+  const choose=group.querySelector('[data-open-variant-image]');
+  if(choose)choose.innerHTML=(url?'<img class="choose-img" src="'+esc(url)+'" alt="">':'<span class="choose-empty">—</span>')+'<span>Choose from media</span>';
+}
+function closeSwatchPicker(){document.getElementById('swatchPicker').hidden=true;activeImagePicker=null;}
+function openSwatchPicker(group,kind='swatch'){
+  activeImagePicker={group,kind};
+  const hidden=group.querySelector(kind==='variant'?'[data-color-variant-image]':'[data-color-swatch]');
   const selected=hidden?.value||'';
   const media=[...document.querySelectorAll('#media [data-media-row]')].map((card)=>card.dataset.url).filter(Boolean);
-  const urls=[...new Set([...media,...(selected?[selected]:[])])];
+  const urls=[...new Set(kind==='variant'?media:[...media,...(selected?[selected]:[])])];
+  const title=document.querySelector('#swatchPicker .swatch-picker-head h3');
+  const hint=document.querySelector('#swatchPicker .hint');
+  if(title)title.textContent=kind==='variant'?'Choose variant image':'Choose swatch image';
+  if(hint)hint.textContent=kind==='variant'?'从已选 media 中选择这个颜色的变体图片；只会使用 gallery 中已有的图片。':'选择一张产品图片作为这个 color 的 swatch；size 变体共用这张图。';
   const grid=document.getElementById('swatchPickerGrid');
   grid.innerHTML='<button type="button" class="swatch-choice empty '+(selected?'':'selected')+'" data-pick-swatch="">No image</button>'
     +urls.map((url,index)=>'<button type="button" class="swatch-choice '+(url===selected?'selected':'')+'" data-pick-swatch="'+esc(url)+'"><img src="'+esc(url)+'" alt=""><span>Image '+(index+1)+'</span></button>').join('');
   document.getElementById('swatchPicker').hidden=false;
 }
 function chooseSwatch(url){
-  if(activeSwatchGroup){
-    const hidden=activeSwatchGroup.querySelector('[data-color-swatch]');
+  if(activeImagePicker){
+    const {group,kind}=activeImagePicker;
+    const hidden=group.querySelector(kind==='variant'?'[data-color-variant-image]':'[data-color-swatch]');
     if(hidden)hidden.value=url;
-    setSwatchPreview(activeSwatchGroup,url);
+    if(kind==='variant')setVariantImagePreview(group,url);else setSwatchPreview(group,url);
   }
   closeSwatchPicker();
 }
 document.addEventListener('click',(event)=>{
   const open=event.target.closest('[data-open-swatch]');
-  if(open){event.preventDefault();const group=open.closest('[data-color-group]');if(group)openSwatchPicker(group);return;}
+  if(open){event.preventDefault();const group=open.closest('[data-color-group]');if(group)openSwatchPicker(group,'swatch');return;}
+  const openVariant=event.target.closest('[data-open-variant-image]');
+  if(openVariant){event.preventDefault();const group=openVariant.closest('[data-color-group]');if(group)openSwatchPicker(group,'variant');return;}
   const pick=event.target.closest('[data-pick-swatch]');
   if(pick){event.preventDefault();chooseSwatch(pick.dataset.pickSwatch||'');return;}
   if(event.target.closest('[data-close-swatch]')||event.target.id==='swatchPicker')closeSwatchPicker();

@@ -7524,8 +7524,20 @@ app.post('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, 
   const source = await buildSelectionSourcePayload(id);
   if (!source) return reply.code(404).send({ error: 'not_found' });
   const existing = await db.getSelectionDraft(id);
-  const draft = existing ?? await db.addSelectionDraft(id, source, source, selectionSourceHash(source));
-  return reply.code(existing ? 200 : 201).send({ draft });
+  if (existing) return reply.code(200).send({ draft: existing });
+  const created = await db.addSelectionDraft(id, source, source, selectionSourceHash(source));
+  try {
+    // Resolve colour variants when the product enters Selection. This is the
+    // review/edit stage, not the later Portal publish step.
+    const detail = await db.getProductDetail(id);
+    const draft = await enrichSelectionDraftImageSources(created.draft_payload ?? {}, detail);
+    const resolved = await resolveSelectionVariantImages({ draft, config });
+    const saved = await db.updateSelectionDraftContent(id, resolved.draft);
+    return reply.code(201).send({ draft: saved ?? created });
+  } catch (error) {
+    request.log.warn({ err: error, selectionId: id }, 'selection variant image setup failed');
+    return reply.code(201).send({ draft: created });
+  }
 });
 
 app.delete('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
@@ -7551,7 +7563,7 @@ app.patch('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey },
   if (!draftPayload || typeof draftPayload !== 'object' || Array.isArray(draftPayload)) {
     return reply.code(400).send({ error: 'draft_required' });
   }
-  const updated = await db.updateSelectionDraft(id, draftPayload);
+  const updated = await db.updateSelectionDraftContent(id, draftPayload);
   return updated ? { draft: updated } : reply.code(404).send({ error: 'not_found' });
 });
 
@@ -7690,14 +7702,19 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
   }
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
-  draft = await enrichSelectionDraftImageSources(draft, detail);
-  // Resolve variant images from the selected gallery before sending the product
-  // to Portal. Swatch images remain colour identifiers and are never published.
-  try {
-    const resolved = await resolveSelectionVariantImages({ draft, config });
-    draft = resolved.draft;
-  } catch (error) {
-    request.log.warn({ err: error, selectionId: id }, 'selection variant image resolution failed');
+  // Variant images are resolved and reviewed in Selection. Publishing only
+  // validates the saved mapping so it never silently changes the customer's
+  // selection. Missing or stale mappings send the user back to the draft.
+  const mediaUrls = new Set((Array.isArray(draft.media) ? draft.media : []).map((entry) => entry?.url).filter(Boolean));
+  const invalidVariantImages = (Array.isArray(draft.variants) ? draft.variants : [])
+    .filter((variant) => variant?.optionValues?.Color)
+    .filter((variant) => !variant.imageUrl || !mediaUrls.has(variant.imageUrl));
+  if (invalidVariantImages.length) {
+    return reply.code(409).send({
+      error: 'variant_images_unresolved',
+      message: 'Some colour variants do not have a gallery image yet. Open the Selection draft, set Variant image for each colour, then publish again.',
+      colours: [...new Set(invalidVariantImages.map((variant) => variant.optionValues.Color))],
+    });
   }
   try {
     draft.media = await materializeSelectionMedia(detail, draft.media);
