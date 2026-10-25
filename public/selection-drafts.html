@@ -205,7 +205,7 @@ function colorGroupHtml(group,index){
   const variantImage=(group.variants||[]).find((variant)=>variant.imageUrl)?.imageUrl||'';
   const preview=selected?'<img class="color-preview" data-swatch-preview data-lightbox="'+esc(selected)+'" src="'+esc(selected)+'" alt="" title="View full size">':'<span class="color-empty" data-swatch-preview>No image</span>';
   const choosePreview=selected?'<img class="choose-img" src="'+esc(selected)+'" alt="">':'<span class="choose-empty">—</span>';
-  const variantChoosePreview=variantImage?'<img class="choose-img" src="'+esc(variantImage)+'" alt="">':'<span class="choose-empty">—</span>';
+  const variantChoosePreview=variantImage?'<img class="choose-img" src="'+esc(pickerThumb(variantImage))+'" alt="">':'<span class="choose-empty">—</span>';
   return '<div class="color-group" data-color-group="'+index+'"><div class="color-head">'+preview
     +'<label>Color<input data-color-name value="'+esc(group.color||'')+'"></label>'
     +'<label>Swatch image<button type="button" class="swatch-choose" data-open-swatch>'+choosePreview+'<span>Choose image</span></button><input type="hidden" data-color-swatch value="'+esc(selected)+'"></label>'
@@ -641,6 +641,16 @@ document.querySelectorAll('[data-close-diff]').forEach((button)=>button.addEvent
 document.querySelector('[data-apply-diff]').addEventListener('click',()=>{void applySourceDiff();});
 document.getElementById('sourceDiff').addEventListener('click',(event)=>{if(event.target.id==='sourceDiff')closeSourceDiff();});
 let activeImagePicker=null;
+function pickerThumb(url){
+  try{
+    const parsed=new URL(url);
+    if(parsed.hostname==='collector.yiswim.cloud'&&parsed.pathname.startsWith('/api/product-images/')){
+      parsed.searchParams.set('w','240');
+      return parsed.toString();
+    }
+  }catch{}
+  return url;
+}
 function setSwatchPreview(group,url){
   const current=group.querySelector('[data-swatch-preview]');
   if(!current)return;
@@ -654,7 +664,7 @@ function setSwatchPreview(group,url){
 }
 function setVariantImagePreview(group,url){
   const choose=group.querySelector('[data-open-variant-image]');
-  if(choose)choose.innerHTML=(url?'<img class="choose-img" src="'+esc(url)+'" alt="">':'<span class="choose-empty">—</span>')+'<span>Choose from media</span>';
+  if(choose)choose.innerHTML=(url?'<img class="choose-img" src="'+esc(pickerThumb(url))+'" alt="">':'<span class="choose-empty">—</span>')+'<span>Choose from media</span>';
 }
 function closeSwatchPicker(){document.getElementById('swatchPicker').hidden=true;activeImagePicker=null;}
 function openSwatchPicker(group,kind='swatch'){
@@ -669,7 +679,7 @@ function openSwatchPicker(group,kind='swatch'){
   if(hint)hint.textContent=kind==='variant'?'从已选 media 中选择这个颜色的变体图片；只会使用 gallery 中已有的图片。':'选择一张产品图片作为这个 color 的 swatch；size 变体共用这张图。';
   const grid=document.getElementById('swatchPickerGrid');
   grid.innerHTML='<button type="button" class="swatch-choice empty '+(selected?'':'selected')+'" data-pick-swatch="">No image</button>'
-    +urls.map((url,index)=>'<button type="button" class="swatch-choice '+(url===selected?'selected':'')+'" data-pick-swatch="'+esc(url)+'"><img src="'+esc(url)+'" alt=""><span>Image '+(index+1)+'</span></button>').join('');
+    +urls.map((url,index)=>'<button type="button" class="swatch-choice '+(url===selected?'selected':'')+'" data-pick-swatch="'+esc(url)+'"><img src="'+esc(pickerThumb(url))+'" alt="" loading="eager" decoding="async"><span>Image '+(index+1)+'</span></button>').join('');
   document.getElementById('swatchPicker').hidden=false;
 }
 function chooseSwatch(url){
