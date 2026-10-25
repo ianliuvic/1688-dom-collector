@@ -1421,6 +1421,23 @@ async function materializeSelectionMedia(detail, media) {
   return result;
 }
 
+/** Keep swatch/variant image URLs pointing at the same media after materialization. */
+function remapDraftImageUrls(draft, previousMedia, nextMedia) {
+  const byUrl = new Map();
+  for (let index = 0; index < previousMedia.length; index += 1) {
+    const previous = previousMedia[index];
+    const next = nextMedia[index];
+    if (!previous?.url || !next?.url) continue;
+    byUrl.set(normalizedImageUrl(previous.url), next.url);
+    if (previous.sourceUrl) byUrl.set(normalizedImageUrl(previous.sourceUrl), next.url);
+  }
+  const remap = (value) => (value ? byUrl.get(normalizedImageUrl(value)) ?? value : value);
+  draft.media = nextMedia;
+  draft.variants = (Array.isArray(draft.variants) ? draft.variants : []).map((variant) => ({ ...variant, imageUrl: remap(variant.imageUrl) }));
+  draft.swatches = (Array.isArray(draft.swatches) ? draft.swatches : []).map((swatch) => ({ ...swatch, imageUrl: remap(swatch.imageUrl) }));
+  return draft;
+}
+
 const SELECTION_FIELDS = [
   { key: 'styleNumber', label: 'Style number' },
   { key: 'title', label: 'Title' },
@@ -7735,7 +7752,9 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
     });
   }
   try {
-    draft.media = await materializeSelectionMedia(detail, draft.media);
+    const previousMedia = (Array.isArray(draft.media) ? draft.media : []).map((entry) => ({ ...entry }));
+    const nextMedia = await materializeSelectionMedia(detail, draft.media);
+    remapDraftImageUrls(draft, previousMedia, nextMedia);
     await db.updateSelectionDraft(id, draft);
   } catch (error) {
     return reply.code(502).send({ error: 'image_download_failed', message: String(error?.message || error).slice(0, 1000) });
