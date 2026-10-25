@@ -2852,6 +2852,16 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  /** Persist a resolved draft without downgrading an already-published selection. */
+  async function updateSelectionDraftContent(productDetailId, draftPayload) {
+    const result = await pool.query(`
+      UPDATE product_selection_drafts
+      SET draft_payload=$2, last_error=NULL, revision=revision+1, updated_at=now()
+      WHERE product_detail_id=$1
+      RETURNING *`, [productDetailId, JSON.stringify(draftPayload ?? {})]);
+    return result.rows[0] ?? null;
+  }
+
   async function updateSelectionDraftSource(productDetailId, sourcePayload, draftPayload, sourceHash = null) {
     const result = await pool.query(`
       UPDATE product_selection_drafts
@@ -3802,7 +3812,7 @@ export function createDatabase(databaseUrl) {
     listPortalPublishCandidates, listPortalRepairCandidates, updateProductSkusFromMatrix,
     summarizeWordPressPublications, listWordPressPublications, listProductSaleQuantities,
     listSelectionProducts, listSelectionFacets, getSelectionProductMedia, getSelectionProductSkus,
-    getSelectionDraft, addSelectionDraft, updateSelectionDraft, updateSelectionDraftSource, resetSelectionDraft,
+    getSelectionDraft, addSelectionDraft, updateSelectionDraft, updateSelectionDraftContent, updateSelectionDraftSource, resetSelectionDraft,
     removeSelectionDraft, markSelectionDraftPublished, markSelectionDraftFailed, listSelectionDrafts,
     listPortalDelistedProducts,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,

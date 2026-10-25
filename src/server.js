@@ -7564,7 +7564,7 @@ app.post('/api/selection/drafts/:id/resolve-variant-images', { preHandler: requi
     const detail = await db.getProductDetail(id);
     const draft = await enrichSelectionDraftImageSources(row.draft_payload ?? {}, detail);
     const resolved = await resolveSelectionVariantImages({ draft, config });
-    const saved = await db.updateSelectionDraft(id, resolved.draft);
+    const saved = await db.updateSelectionDraftContent(id, resolved.draft);
     return {
       draft: saved,
       resolution: {
