@@ -1158,8 +1158,11 @@ async function enrichSelectionDraftImageSources(draft, detail) {
   for (const image of (detail?.images ?? [])) {
     if (!image?.storage_path) continue;
     const local = normalizedImageUrl(`${config.publicBaseUrl}${imagePublicPath(image.storage_path)}`);
-    if (!local) continue;
-    byLocalUrl.set(local, image);
+    if (local) byLocalUrl.set(local, image);
+    // A WordPress-backed selection draft uses the WP media URL, while a
+    // collector-backed draft uses the local endpoint. Match both.
+    const sourceUrl = normalizedImageUrl(image.source_url);
+    if (sourceUrl) byLocalUrl.set(sourceUrl, image);
   }
   const dataUrlCache = new Map();
   const enrich = async (entry) => {
