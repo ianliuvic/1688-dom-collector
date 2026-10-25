@@ -212,6 +212,20 @@ export async function resolveSelectionVariantImages({ draft, config = {}, modelC
     }
   }
   const mediaUrls = new Set(media.map((entry) => imageKey(entry.url)));
+  const swatchByColour = new Map();
+  payload.swatches = (Array.isArray(payload.swatches) ? payload.swatches : []).map((swatch) => {
+    const colour = cleanText(swatch?.value);
+    const chosen = matches.get(colour.toLowerCase());
+    if (!chosen?.url) return swatch;
+    swatchByColour.set(colour.toLowerCase(), { ...swatch, imageUrl: chosen.url });
+    return { ...swatch, imageUrl: chosen.url };
+  });
+  for (const [key, match] of matches) {
+    if (swatchByColour.has(key)) continue;
+    const swatch = { value: match.colour, color: null, imageUrl: match.url };
+    payload.swatches.push(swatch);
+    swatchByColour.set(key, swatch);
+  }
   payload.variants = (Array.isArray(payload.variants) ? payload.variants : []).map((variant) => {
     const colour = colourOf(variant);
     const chosen = matches.get(colour.toLowerCase());

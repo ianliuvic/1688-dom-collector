@@ -21,6 +21,7 @@ test('uses the selected media image when a swatch already exists in the gallery'
   const result = await resolveSelectionVariantImages({ draft, config: { publicBaseUrl: 'https://collector.example.com' } });
   assert.equal(result.draft.variants[0].imageUrl, 'https://cdn.example.com/yellow.jpg');
   assert.equal(result.draft.variants[1].imageUrl, null);
+  assert.equal(result.draft.swatches.find((entry) => entry.value === 'Yellow')?.imageUrl, 'https://cdn.example.com/yellow.jpg');
   assert.equal(result.matches.find((entry) => entry.color === 'Yellow')?.matchedBy, 'exact');
   assert.deepEqual(result.unresolved, ['Black']);
 });
