@@ -7751,6 +7751,24 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
       throw new Error(body?.error?.message || body?.message || body?.error || `Portal returned HTTP ${response.status}`);
     }
     const portalProduct = body.product;
+    // Import preserves existing manual variant defaults. A selection publish is
+    // authoritative for colour-to-gallery mapping, so apply the resolved
+    // variant images explicitly as well.
+    const assignmentByColor = new Map();
+    for (const variant of (Array.isArray(draft.variants) ? draft.variants : [])) {
+      const color = String(variant?.optionValues?.Color || '').trim();
+      const url = String(variant?.imageUrl || '').trim();
+      if (color && url && !assignmentByColor.has(color.toLowerCase())) {
+        assignmentByColor.set(color.toLowerCase(), { color, url });
+      }
+    }
+    let variantMatch = null;
+    try {
+      variantMatch = await applyPortalVariantImages(portal, portalProduct, [...assignmentByColor.values()], id);
+    } catch (error) {
+      variantMatch = { error: String(error?.message || error).slice(0, 500) };
+      request.log.warn({ err: error, selectionId: id }, 'portal variant image update failed');
+    }
     const saved = await db.markSelectionDraftPublished(id, {
       portalProductId: portalProduct.id,
       portalStatus: portalProduct.status || 'ACTIVE',
@@ -7762,9 +7780,9 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
       portalStatus: portalProduct.status || 'ACTIVE',
       sourceKey: `selection:${id}`,
       portalUrl: `${portal.url}/admin/catalog`,
-      result: { target, selectionKey: `selection:${id}`, title: portalProduct.title, status: portalProduct.status },
+      result: { target, selectionKey: `selection:${id}`, title: portalProduct.title, status: portalProduct.status, variantMatch },
     }).catch(() => null);
-    return { draft: saved, portal: { productId: portalProduct.id, status: portalProduct.status || 'ACTIVE', target } };
+    return { draft: saved, variantMatch, portal: { productId: portalProduct.id, status: portalProduct.status || 'ACTIVE', target } };
   } catch (error) {
     await db.markSelectionDraftFailed(id, error?.message || error).catch(() => null);
     return reply.code(502).send({ error: 'portal_publish_failed', message: String(error?.message || error).slice(0, 1000) });
