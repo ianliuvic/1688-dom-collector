@@ -3130,7 +3130,12 @@ function wireWpSync(){
         const response = await fetch('/api/selection/drafts/' + encodeURIComponent(id), { method: 'POST', headers: { accept: 'application/json' } });
         const body = await response.json().catch(() => null);
         if (!response.ok) throw new Error(body?.message || body?.error || ('HTTP ' + response.status));
-        window.location.href = '/selection?draft=' + encodeURIComponent(id);
+        // Stay on the product page. The row becomes manageable; clicking it
+        // again is an explicit action to open the Selection draft.
+        if (row) row.selectionState = row.selectionState || { productDetailId: id, status: body?.draft?.status || 'DRAFT' };
+        selection.disabled = false;
+        selection.textContent = '管理 selection';
+        selection.title = '已加入 Portal selection；点击打开草稿';
       } catch (error) {
         selection.disabled = false;
         selection.textContent = '加入 selection';
