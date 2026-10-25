@@ -30,6 +30,7 @@ function absoluteUrl(value, baseUrl) {
   const url = cleanText(value);
   if (!url) return null;
   if (/^https:\/\//i.test(url)) return url;
+  if (/^http:\/\//i.test(url)) return `https://${url.slice(7)}`;
   if (/^\/\//.test(url)) return `https:${url}`;
   if (url.startsWith('/') && baseUrl) return `${String(baseUrl).replace(/\/+$/, '')}${url}`;
   return null;
@@ -81,30 +82,26 @@ function buildColourList(draft) {
 
 function imagePromptLine(image, index) {
   const alt = cleanText(image.alt);
-  return `${index + 1}. ${alt || 'product image'} (${absoluteUrl(image.url, '') || image.url})`;
+  return `${index + 1}. ${alt || 'product image'} (${image.modelUrl})`;
 }
 
 async function askModel({ title, media, colours, config, publicBaseUrl }) {
   if (!config?.apiKey) return null;
-  const mediaImages = media.map((image) => ({ ...image, url: absoluteUrl(image.url, publicBaseUrl) })).filter((image) => image.url);
-  if (!mediaImages.length) return null;
-  const unresolved = colours.filter((colour) => !colour.exact && colour.swatch?.imageUrl);
-  const swatchImages = [];
-  for (const colour of unresolved) {
-    const url = absoluteUrl(colour.swatch.imageUrl, publicBaseUrl);
-    if (url && swatchImages.length + mediaImages.length < MAX_IMAGES) swatchImages.push({ colour, url });
-  }
-  const mediaLines = mediaImages.map((image, index) => imagePromptLine(image, index)).join('\n');
-  const colourLines = colours.map((colour) => {
-    const swatchIndex = swatchImages.findIndex((entry) => entry.colour.key === colour.key);
-    return `- ${colour.label}${swatchIndex >= 0 ? `（色卡图：第 ${mediaImages.length + swatchIndex + 1} 张）` : ''}`;
-  }).join('\n') || '（无颜色）';
+  // Prefer the supplier source URL for model download. Collector-hosted image
+  // URLs are public in a browser but are sometimes unreachable from the model
+  // provider's fetcher; the WordPress/supplier source URL avoids that failure.
+  const modelMedia = media
+    .map((image) => ({ image, modelUrl: absoluteUrl(image.sourceUrl, publicBaseUrl) || absoluteUrl(image.url, publicBaseUrl) }))
+    .filter((entry) => entry.modelUrl);
+  if (!modelMedia.length) return null;
+  const mediaLines = modelMedia.map((entry, index) => imagePromptLine(entry, index)).join('\n');
+  const colourLines = colours.map((colour) => `- ${colour.label}`).join('\n') || '（无颜色）';
   const model = config.visionModel || config.complexModel || 'deepseek-flash';
   const prompt = `你是电商商品变体图片匹配助手，只输出严格 JSON。
-下面有商品标题、已选中的商品媒体图片（编号 1..${mediaImages.length}），以及若干颜色/花色及其色卡图片。色卡图片只用于判断，不是商品媒体。
+下面有商品标题、已选中的商品媒体图片（编号 1..${modelMedia.length}），以及需要匹配的颜色/花色名称。颜色名称可能来自色卡或卖家选项文本。
 请为每个颜色从商品媒体图片中选择一张最能代表该颜色的图片，要求：
-- 必须从 1..${mediaImages.length} 中选择，不能选择色卡图片，不能选择不存在的编号。
-- 如果色卡图和某张媒体图片明显是同一张图，优先选它。
+- 必须从 1..${modelMedia.length} 中选择，不能选择不存在的编号。
+- 根据颜色名称和图片中商品的实际颜色/印花判断；不要优先选择与颜色明显不符的图片。
 - 如果没有足够把握，mediaNumber 设为 null，confidence 低于 0.5。
 - 不同颜色可以指向同一张图，但不要为了凑数强行选图。
 输出格式：{"matches":[{"color":"颜色原文","mediaNumber":1,"confidence":0.9,"reason":"简短理由"}]}
@@ -116,8 +113,7 @@ ${colourLines}
 商品媒体图片：
 ${mediaLines}`;
   const content = [{ type: 'text', text: prompt }];
-  for (const image of mediaImages) content.push({ type: 'image_url', image_url: { url: image.url } });
-  for (const swatch of swatchImages) content.push({ type: 'image_url', image_url: { url: swatch.url } });
+  for (const entry of modelMedia) content.push({ type: 'image_url', image_url: { url: entry.modelUrl } });
   const response = await fetch(endpointFrom(config.baseUrl), {
     method: 'POST',
     headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
@@ -142,7 +138,10 @@ ${mediaLines}`;
     const match = String(text || '').match(/\{[\s\S]*\}/);
     if (match) { try { parsed = JSON.parse(match[0]); } catch { parsed = null; } }
   }
-  return Array.isArray(parsed?.matches) ? parsed.matches : null;
+  return {
+    matches: Array.isArray(parsed?.matches) ? parsed.matches : [],
+    media: modelMedia.map((entry) => entry.image),
+  };
 }
 
 /**
@@ -152,6 +151,7 @@ ${mediaLines}`;
  */
 export async function resolveSelectionVariantImages({ draft, config = {}, modelConfig = null }) {
   const payload = draft && typeof draft === 'object' ? structuredClone(draft) : {};
+  delete payload.variantImageError;
   const media = (Array.isArray(payload.media) ? payload.media : [])
     .filter((entry) => entry?.url && entry.visible !== false)
     .map((entry) => ({ ...entry, url: absoluteUrl(entry.url, config.publicBaseUrl) || entry.url }));
@@ -184,12 +184,12 @@ export async function resolveSelectionVariantImages({ draft, config = {}, modelC
           reasoningEffort: modelConfig?.reasoningEffort ?? config.reasoningEffort,
         },
       });
-      modelUsed = Boolean(result);
-      for (const proposal of result ?? []) {
+      modelUsed = Boolean(result?.matches?.length);
+      for (const proposal of result?.matches ?? []) {
         const colour = unresolved.find((entry) => entry.key === cleanText(proposal?.color).toLowerCase());
         const number = Number(proposal?.mediaNumber);
-        if (!colour || !Number.isInteger(number) || number < 1 || number > media.length) continue;
-        const chosen = media[number - 1];
+        if (!colour || !Number.isInteger(number) || number < 1 || number > (result.media?.length ?? 0)) continue;
+        const chosen = result.media[number - 1];
         if (!chosen?.url) continue;
         const confidence = Number(proposal?.confidence);
         matches.set(colour.key, {
