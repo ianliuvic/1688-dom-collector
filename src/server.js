@@ -1133,28 +1133,50 @@ async function applyPortalVariantImages(portal, product, assignments, productDet
  * 1688 detail and its English translation are used, so unpublished products
  * can still become Portal candidates.
  */
-/** Restore supplier source URLs on an existing selection draft's media/swatches. */
-function enrichSelectionDraftImageSources(draft, detail) {
+/** Small inline JPEG used by the vision model; keeps selection drafts free of base64. */
+async function selectionImageDataUrl(image) {
+  if (!image?.storage_path) return null;
+  const storageRoot = path.resolve(config.storagePath);
+  const imagePath = path.resolve(image.storage_path);
+  if (!imagePath.startsWith(`${storageRoot}${path.sep}`)) return null;
+  try {
+    const bytes = await sharp(imagePath)
+      .rotate()
+      .resize({ width: 720, height: 720, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+    return `data:image/jpeg;base64,${bytes.toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Restore supplier source URLs and small inline previews on a selection draft. */
+async function enrichSelectionDraftImageSources(draft, detail) {
   if (!draft || typeof draft !== 'object') return draft;
   const byLocalUrl = new Map();
   for (const image of (detail?.images ?? [])) {
     if (!image?.storage_path) continue;
     const local = normalizedImageUrl(`${config.publicBaseUrl}${imagePublicPath(image.storage_path)}`);
     if (!local) continue;
-    byLocalUrl.set(local, image.source_url || null);
+    byLocalUrl.set(local, image);
   }
-  const enrich = (entry) => {
+  const dataUrlCache = new Map();
+  const enrich = async (entry) => {
     if (!entry?.url && !entry?.imageUrl) return entry;
     const current = entry.url || entry.imageUrl;
-    if (!current || entry.sourceUrl) return entry;
-    const sourceUrl = byLocalUrl.get(normalizedImageUrl(current));
-    return sourceUrl ? { ...entry, sourceUrl } : entry;
+    if (!current) return entry;
+    const image = byLocalUrl.get(normalizedImageUrl(current));
+    if (!image) return entry;
+    const key = normalizedImageUrl(current);
+    if (!dataUrlCache.has(key)) dataUrlCache.set(key, await selectionImageDataUrl(image).catch(() => null));
+    return { ...entry, sourceUrl: entry.sourceUrl || image.source_url || null, dataUrl: dataUrlCache.get(key) || undefined };
   };
   return {
     ...draft,
-    media: Array.isArray(draft.media) ? draft.media.map(enrich) : draft.media,
-    swatches: Array.isArray(draft.swatches) ? draft.swatches.map(enrich) : draft.swatches,
-    variants: Array.isArray(draft.variants) ? draft.variants.map(enrich) : draft.variants,
+    media: Array.isArray(draft.media) ? await Promise.all(draft.media.map(enrich)) : draft.media,
+    swatches: Array.isArray(draft.swatches) ? await Promise.all(draft.swatches.map(enrich)) : draft.swatches,
+    variants: Array.isArray(draft.variants) ? await Promise.all(draft.variants.map(enrich)) : draft.variants,
   };
 }
 
@@ -7540,7 +7562,7 @@ app.post('/api/selection/drafts/:id/resolve-variant-images', { preHandler: requi
   if (!row) return reply.code(404).send({ error: 'not_found' });
   try {
     const detail = await db.getProductDetail(id);
-    const draft = enrichSelectionDraftImageSources(row.draft_payload ?? {}, detail);
+    const draft = await enrichSelectionDraftImageSources(row.draft_payload ?? {}, detail);
     const resolved = await resolveSelectionVariantImages({ draft, config });
     const saved = await db.updateSelectionDraft(id, resolved.draft);
     return {
@@ -7668,12 +7690,12 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
   }
   const detail = await db.getProductDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
-  draft = enrichSelectionDraftImageSources(draft, detail);
+  draft = await enrichSelectionDraftImageSources(draft, detail);
   // Resolve variant images from the selected gallery before sending the product
   // to Portal. Swatch images remain colour identifiers and are never published.
   try {
     const resolved = await resolveSelectionVariantImages({ draft, config });
-    draft.variants = resolved.draft.variants;
+    draft = resolved.draft;
   } catch (error) {
     request.log.warn({ err: error, selectionId: id }, 'selection variant image resolution failed');
   }

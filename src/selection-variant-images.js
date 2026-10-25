@@ -82,7 +82,7 @@ function buildColourList(draft) {
 
 function imagePromptLine(image, index) {
   const alt = cleanText(image.alt);
-  return `${index + 1}. ${alt || 'product image'} (${image.modelUrl})`;
+  return `${index + 1}. ${alt || 'product image'}`;
 }
 
 async function askModel({ title, media, colours, config, publicBaseUrl }) {
@@ -91,7 +91,7 @@ async function askModel({ title, media, colours, config, publicBaseUrl }) {
   // URLs are public in a browser but are sometimes unreachable from the model
   // provider's fetcher; the WordPress/supplier source URL avoids that failure.
   const modelMedia = media
-    .map((image) => ({ image, modelUrl: absoluteUrl(image.sourceUrl, publicBaseUrl) || absoluteUrl(image.url, publicBaseUrl) }))
+    .map((image) => ({ image, modelUrl: image.dataUrl || absoluteUrl(image.sourceUrl, publicBaseUrl) || absoluteUrl(image.url, publicBaseUrl) }))
     .filter((entry) => entry.modelUrl);
   if (!modelMedia.length) return null;
   const mediaLines = modelMedia.map((entry, index) => imagePromptLine(entry, index)).join('\n');
@@ -221,7 +221,12 @@ export async function resolveSelectionVariantImages({ draft, config = {}, modelC
     return { ...variant, imageUrl: current?.url ?? null };
   });
   // Keep the original swatch URL as the colour identifier; it was never added
-  // to media and is not used as variant media.
+  // to media and is not used as variant media. Never persist inline model
+  // previews in the draft payload.
+  const stripPreview = ({ dataUrl, ...entry }) => entry;
+  payload.media = Array.isArray(payload.media) ? payload.media.map(stripPreview) : payload.media;
+  payload.swatches = Array.isArray(payload.swatches) ? payload.swatches.map(stripPreview) : payload.swatches;
+  payload.variants = Array.isArray(payload.variants) ? payload.variants.map(stripPreview) : payload.variants;
   return {
     draft: payload,
     matches: [...matches.values()].map((entry) => ({
