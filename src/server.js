@@ -7456,12 +7456,24 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     return reply.code(503).send({ error: 'staging_portal_not_configured' });
   }
   const dryRun = request.body?.dryRun === true || request.query?.dryRun === 'true';
-  let rows;
+  let publishedRows;
   try {
-    rows = await db.listPortalPublishedForReconcile();
+    publishedRows = await db.listPortalPublishedForReconcile();
   } catch (error) {
     return reply.code(500).send({ error: 'reconcile_query_failed', message: String(error?.message || error) });
   }
+  // Historical publication rows can outlive the active staging catalog. Only
+  // reconcile products currently present there; otherwise a stale row could be
+  // archived or counted in the daily report.
+  const activeCatalog = await getPortalStagingActiveIds();
+  if (!activeCatalog.ids) {
+    return reply.code(503).send({
+      error: 'staging_catalog_unavailable',
+      message: activeCatalog.warning || 'staging catalog was not available',
+    });
+  }
+  const rows = publishedRows.filter((row) => activeCatalog.ids.has(row.portal_product_id));
+  const ignoredHistorical = publishedRows.length - rows.length;
   const stockRows = await db.listProductDetailSkuStocks(rows.map((row) => row.product_detail_id));
   const skusByDetail = new Map();
   for (const sku of stockRows) {
@@ -7473,6 +7485,7 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     checkedAt: new Date().toISOString(),
     dryRun,
     checked: rows.length,
+    ignoredHistorical,
     updatedProducts: 0,
     updatedVariants: 0,
     archivedDelisted: [],
@@ -7541,7 +7554,7 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
   }
   const lines = [
     `📦 Portal Staging 库存巡检${dryRun ? '（演练）' : ''}`,
-    `检查产品：${report.checked}`,
+    `检查产品：${report.checked}${report.ignoredHistorical ? `（忽略历史记录 ${report.ignoredHistorical}）` : ''}`,
     `更新产品：${report.updatedProducts}，变体：${report.updatedVariants}`,
     `1688 已下架归档：${report.archivedDelisted.length}`,
     `计算库存为 0 归档：${report.archivedZeroStock.length}`,
