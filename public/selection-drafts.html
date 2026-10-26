@@ -306,7 +306,7 @@ function mediaUrlOptions(selected){
 }
 function colorGroupHtml(group,index){
   const selected=group.swatch?.imageUrl||'';
-  const preview=selected?'<img class="color-preview" data-swatch-preview data-lightbox="'+esc(selected)+'" src="'+esc(selected)+'" alt="" title="View full size" loading="lazy" referrerpolicy="no-referrer">':'<span class="color-empty" data-swatch-preview>No image</span>';
+  const preview=selected?'<img class="color-preview" data-swatch-preview data-lightbox="'+esc(selected)+'" src="'+esc(alibabaThumb(selected))+'" alt="" title="View full size" loading="lazy" referrerpolicy="no-referrer">':'<span class="color-empty" data-swatch-preview>No image</span>';
   const choosePreview=selected?'<img class="choose-img" src="'+esc(pickerThumb(selected))+'" alt="" loading="lazy" referrerpolicy="no-referrer">':'<span class="choose-empty">—</span>';
   return '<div class="color-group" data-color-group="'+index+'"><div class="color-head">'+preview
     +'<label>Color<input data-color-name value="'+esc(group.color||'')+'"></label>'
@@ -328,18 +328,18 @@ function swatchFor(variant){
   const color=String(variant?.optionValues?.Color||'').trim().toLowerCase();
   const swatch=(current?.draft_payload?.swatches||[]).find((entry)=>String(entry.value||'').trim().toLowerCase()===color);
   const url=swatch?.imageUrl||variant?.imageUrl||null;
-  if(url)return '<img class="swatch-img" src="'+esc(url)+'" alt="">';
+  if(url)return '<img class="swatch-img" src="'+esc(alibabaThumb(url))+'" alt="">';
   const hex=/^#[0-9a-f]{6}$/i.test(String(swatch?.color||''))?swatch.color:null;
   return '<span class="swatch-empty"'+(hex?' style="background:'+esc(hex)+'"':'')+'>—</span>';
 }
 function variantRow(v,index){const option=v.optionValues||{};return '<tr data-variant="'+index+'" data-source-price="'+esc(v.sourcePrice??'')+'" data-stock="'+esc(v.stock??'')+'" data-image-url="'+esc(v.imageUrl||'')+'" data-source-row-key="'+esc(v.sourceRowKey||'')+'"><td>'+swatchFor(v)+'</td><td><input data-variant-field="title" value="'+esc(v.title||'')+'"></td><td><input data-variant-field="supplierSku" value="'+esc(v.supplierSku||'')+'"></td><td><input data-variant-option="Color" value="'+esc(option.Color||'')+'"></td><td><input data-variant-option="Size" value="'+esc(option.Size||'')+'"></td><td><button type="button" class="mini danger" data-remove-variant="'+index+'">删除</button></td></tr>';}
-function mediaRow(entry,index){const chart=entry.kind==='size-chart';return '<div class="media-card" draggable="true" data-media-row="'+index+'" data-url="'+esc(entry.url||'')+'" data-kind="'+esc(entry.kind||'')+'" title="'+esc(entry.url||'')+'"><span class="order">'+(index+1)+'</span>'+(chart?'<span class="chart-kind">SIZE CHART</span>':'')+'<img draggable="false" data-lightbox="'+esc(entry.url||'')+'" src="'+esc(entry.url||'')+'" alt="" title="View full size" loading="lazy" referrerpolicy="no-referrer"><label class="show"><input type="checkbox" data-media-visible '+(entry.visible!==false?'checked':'')+'> 展示</label><div class="controls"><button type="button" class="mini" data-media-up="'+index+'">←</button><button type="button" class="mini" data-media-down="'+index+'">→</button><button type="button" class="mini danger" data-remove-media="'+index+'">×</button></div></div>';}
-function poolCard(entry,index){return '<div class="media-card is-pool" data-pool-card="'+index+'" data-url="'+esc(entry.url||'')+'" title="'+esc(entry.url||'')+'"><img data-lightbox="'+esc(entry.url||'')+'" src="'+esc(entry.url||'')+'" alt="" title="View full size" loading="lazy" referrerpolicy="no-referrer"><span class="pool-kind">'+esc(entry.kind||'1688')+'</span><button type="button" class="add-pool" data-add-pool="'+index+'">+ 加入 media</button></div>';}
+function mediaRow(entry,index){const chart=entry.kind==='size-chart';return '<div class="media-card" draggable="true" data-media-row="'+index+'" data-url="'+esc(entry.url||'')+'" data-kind="'+esc(entry.kind||'')+'" title="'+esc(entry.url||'')+'"><span class="order">'+(index+1)+'</span>'+(chart?'<span class="chart-kind">SIZE CHART</span>':'')+'<img draggable="false" data-lightbox="'+esc(entry.url||'')+'" src="'+esc(alibabaThumb(entry.url||''))+'" alt="" title="View full size" loading="lazy" referrerpolicy="no-referrer"><label class="show"><input type="checkbox" data-media-visible '+(entry.visible!==false?'checked':'')+'> 展示</label><div class="controls"><button type="button" class="mini" data-media-up="'+index+'">←</button><button type="button" class="mini" data-media-down="'+index+'">→</button><button type="button" class="mini danger" data-remove-media="'+index+'">×</button></div></div>';}
+function poolCard(entry,index){return '<div class="media-card is-pool" data-pool-card="'+index+'" data-url="'+esc(entry.url||'')+'" title="'+esc(entry.url||'')+'"><img data-lightbox="'+esc(entry.url||'')+'" src="'+esc(alibabaThumb(entry.url||''))+'" alt="" title="View full size" loading="lazy" referrerpolicy="no-referrer"><span class="pool-kind">'+esc(entry.kind||'1688')+'</span><button type="button" class="add-pool" data-add-pool="'+index+'">+ 加入 media</button></div>';}
 function swatchRow(entry,index){
   const media=(current?.draft_payload?.media||[]).map((item)=>item.url).filter(Boolean);
   const selected=String(entry.imageUrl||'');
   const urls=[...new Set([...media, ...(selected?[selected]:[])])];
-  const preview=selected?'<img class="swatch-preview" src="'+esc(selected)+'" alt="">':'<div class="swatch-empty-lg">No image</div>';
+  const preview=selected?'<img class="swatch-preview" src="'+esc(alibabaThumb(selected))+'" alt="">':'<div class="swatch-empty-lg">No image</div>';
   return '<div class="swatch-card" data-swatch-card="'+index+'"><div>'+preview+'</div>'
     +'<label>Color name<input data-swatch-field="value" value="'+esc(entry.value||'')+'"></label>'
     +'<label>Swatch image<select data-swatch-field="imageUrl"><option value="">No image</option>'+urls.map((url,i)=>'<option value="'+esc(url)+'" '+(url===selected?'selected':'')+'>Image '+(i+1)+'</option>').join('')+'</select></label>'
@@ -777,6 +777,13 @@ document.querySelectorAll('[data-close-diff]').forEach((button)=>button.addEvent
 document.querySelector('[data-apply-diff]').addEventListener('click',()=>{void applySourceDiff();});
 document.getElementById('sourceDiff').addEventListener('click',(event)=>{if(event.target.id==='sourceDiff')closeSourceDiff();});
 let activeImagePicker=null;
+function alibabaThumb(url){
+  const value=String(url||'');
+  if(!/alicdn\.com/i.test(value))return value;
+  if(/\.(?:jpe?g)_\d+x\d+\.jpe?g(?:\?|$)/i.test(value)||/\.\d+x\d+\.jpe?g(?:\?|$)/i.test(value))return value;
+  if(!/\.jpe?g(?:\?|$)/i.test(value))return value;
+  return value.replace(/\.(jpe?g)(?=\?|$)/i,(_match,extension)=>'.'+extension+'_310x310.jpg');
+}
 function pickerThumb(url){
   try{
     const parsed=new URL(url);
@@ -785,13 +792,13 @@ function pickerThumb(url){
       return parsed.toString();
     }
   }catch{}
-  return url;
+  return alibabaThumb(url);
 }
 function setSwatchPreview(group,url){
   const current=group.querySelector('[data-swatch-preview]');
   if(!current)return;
   if(url){
-    current.outerHTML='<img class="color-preview" data-swatch-preview data-lightbox="'+esc(url)+'" src="'+esc(url)+'" alt="" title="View full size">';
+    current.outerHTML='<img class="color-preview" data-swatch-preview data-lightbox="'+esc(url)+'" src="'+esc(alibabaThumb(url))+'" alt="" title="View full size">';
   }else{
     current.outerHTML='<span class="color-empty" data-swatch-preview>No image</span>';
   }
