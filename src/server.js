@@ -7490,6 +7490,7 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     updatedVariants: 0,
     archivedDelisted: [],
     archivedZeroStock: [],
+    partial: [],
     skipped: [],
     errors: [],
   };
@@ -7558,7 +7559,7 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
         report.updatedProducts += 1;
         report.updatedVariants += Number(body?.updated || 0);
         if (Array.isArray(body?.missing) && body.missing.length) {
-          report.skipped.push({ styleNo, reason: 'portal_sku_not_matched', missing: body.missing.length });
+          report.partial.push({ styleNo, reason: 'extra_supplier_skus', missing: body.missing.length });
         }
       } catch (error) {
         report.errors.push({ styleNo, action: 'update_stock', message: String(error?.message || error).slice(0, 300) });
@@ -7571,7 +7572,7 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     `更新产品：${report.updatedProducts}，变体：${report.updatedVariants}`,
     `1688 已下架归档：${report.archivedDelisted.length}`,
     `计算库存为 0 归档：${report.archivedZeroStock.length}`,
-    `跳过：${report.skipped.length}，错误：${report.errors.length}`,
+    `部分匹配：${report.partial.length}，跳过：${report.skipped.length}，错误：${report.errors.length}`,
   ];
   const names = (items, key = 'styleNo') => items.slice(0, 15).map((item) => item[key] || item.styleNo || item).join('、') + (items.length > 15 ? ` 等 ${items.length} 款` : '');
   if (report.archivedDelisted.length) lines.push(`下架：${names(report.archivedDelisted)}`);
