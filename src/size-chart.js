@@ -188,7 +188,8 @@ export function formatMeasurement(value, unit) {
 
 function measurementHeader(column) {
   const unit = measurementUnit(column.unit);
-  if (unit) return `${column.label} (in / cm)`;
+  if (unit === 'cm') return `${column.label} (cm / in)`;
+  if (unit === 'in') return `${column.label} (in / cm)`;
   return column.unit ? `${column.label} (${column.unit})` : column.label;
 }
 
