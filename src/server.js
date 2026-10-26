@@ -7509,8 +7509,21 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
       continue;
     }
     const skus = skusByDetail.get(Number(row.product_detail_id)) || [];
+    const optionValue = (options, pattern) => {
+      for (const [key, value] of Object.entries(options ?? {})) {
+        if (pattern.test(String(key)) && value !== null && value !== undefined && String(value).trim()) {
+          return String(value).trim();
+        }
+      }
+      return null;
+    };
     const pricedSkus = skus
-      .map((sku) => ({ supplierSku: String(sku.variant_sku || sku.sku_key || '').trim(), stock: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock) }))
+      .map((sku) => ({
+        supplierSku: String(sku.variant_sku || sku.sku_key || '').trim(),
+        color: optionValue(sku.option_data, /(颜色|色|color|colour)/i),
+        size: optionValue(sku.option_data, /(尺码|尺寸|码数|size)/i),
+        stock: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock),
+      }))
       .filter((sku) => sku.supplierSku);
     if (!pricedSkus.length) {
       report.skipped.push({ styleNo, reason: 'no_sku_stock_rows' });
@@ -7537,7 +7550,7 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
         const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(row.portal_product_id)}/stock`, config.portalStagingApiUrl), {
           method: 'POST',
           headers: { authorization: `Bearer ${config.portalStagingAdminSecret}`, 'content-type': 'application/json' },
-          body: JSON.stringify({ variants: known.map((sku) => ({ supplierSku: sku.supplierSku, stock: Math.max(0, Math.trunc(sku.stock)) })) }),
+          body: JSON.stringify({ variants: known.map((sku) => ({ supplierSku: sku.supplierSku, color: sku.color, size: sku.size, stock: Math.max(0, Math.trunc(sku.stock)) })) }),
           signal: AbortSignal.timeout(60_000),
         });
         const body = await response.json().catch(() => null);

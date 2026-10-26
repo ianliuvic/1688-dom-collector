@@ -3828,7 +3828,7 @@ export function createDatabase(databaseUrl) {
     const ids = [...new Set((productDetailIds ?? []).map(Number).filter(Number.isInteger))];
     if (!ids.length) return [];
     const result = await pool.query(`SELECT product_detail_id, sku_key, sku_text, variant_sku,
-        stock::float8 AS stock
+        stock::float8 AS stock, option_data
       FROM product_detail_skus
       WHERE product_detail_id = ANY($1::bigint[])
       ORDER BY product_detail_id, id`, [ids]);
