@@ -7432,6 +7432,137 @@ app.get('/api/selection/products/:id/media', { preHandler: requireDashboardOrApi
 
 // Portal-published products whose 1688 listing was delisted by a shop scan.
 // The daily scan task reports these so the portal copy can be handled promptly.
+async function archiveStagingPortalProduct(row, reason) {
+  if (!config.portalStagingApiUrl || !config.portalStagingAdminSecret) {
+    throw new Error('staging portal is not configured');
+  }
+  const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(row.portal_product_id)}`, config.portalStagingApiUrl), {
+    method: 'DELETE',
+    headers: { authorization: `Bearer ${config.portalStagingAdminSecret}` },
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!response.ok && response.status !== 404) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error?.message ?? `Portal returned HTTP ${response.status}`);
+  }
+  await db.markPortalPublicationArchived(row.product_detail_id);
+  await db.markSelectionDraftArchived(row.product_detail_id).catch(() => null);
+  portalStagingActiveCache = { at: 0, ids: null, warning: null };
+  return { styleNo: row.style_no || row.title, reason, alreadyRemoved: response.status === 404 };
+}
+
+app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (request, reply) => {
+  if (!config.portalStagingApiUrl || !config.portalStagingAdminSecret) {
+    return reply.code(503).send({ error: 'staging_portal_not_configured' });
+  }
+  const dryRun = request.body?.dryRun === true || request.query?.dryRun === 'true';
+  let rows;
+  try {
+    rows = await db.listPortalPublishedForReconcile();
+  } catch (error) {
+    return reply.code(500).send({ error: 'reconcile_query_failed', message: String(error?.message || error) });
+  }
+  const stockRows = await db.listProductDetailSkuStocks(rows.map((row) => row.product_detail_id));
+  const skusByDetail = new Map();
+  for (const sku of stockRows) {
+    const id = Number(sku.product_detail_id);
+    if (!skusByDetail.has(id)) skusByDetail.set(id, []);
+    skusByDetail.get(id).push(sku);
+  }
+  const report = {
+    checkedAt: new Date().toISOString(),
+    dryRun,
+    checked: rows.length,
+    updatedProducts: 0,
+    updatedVariants: 0,
+    archivedDelisted: [],
+    archivedZeroStock: [],
+    skipped: [],
+    errors: [],
+  };
+  for (const row of rows) {
+    const styleNo = row.style_no || row.title || `#${row.product_detail_id}`;
+    if (row.availability_status === 'delisted') {
+      if (!dryRun) {
+        try {
+          const archived = await archiveStagingPortalProduct(row, '1688_delisted');
+          report.archivedDelisted.push(archived);
+        } catch (error) {
+          report.errors.push({ styleNo, action: 'archive_delisted', message: String(error?.message || error).slice(0, 300) });
+        }
+      } else {
+        report.archivedDelisted.push({ styleNo, reason: '1688_delisted', dryRun: true });
+      }
+      continue;
+    }
+    const skus = skusByDetail.get(Number(row.product_detail_id)) || [];
+    const pricedSkus = skus
+      .map((sku) => ({ supplierSku: String(sku.variant_sku || sku.sku_key || '').trim(), stock: sku.stock === null || sku.stock === undefined ? null : Number(sku.stock) }))
+      .filter((sku) => sku.supplierSku);
+    if (!pricedSkus.length) {
+      report.skipped.push({ styleNo, reason: 'no_sku_stock_rows' });
+      continue;
+    }
+    const known = pricedSkus.filter((sku) => Number.isFinite(sku.stock));
+    const calculated = known.map((sku) => Math.max(sku.stock - 5, 0));
+    const allZero = known.length === pricedSkus.length && known.length > 0 && calculated.every((value) => value === 0);
+    if (allZero) {
+      if (!dryRun) {
+        try {
+          const archived = await archiveStagingPortalProduct(row, 'all_variants_zero_stock');
+          report.archivedZeroStock.push(archived);
+        } catch (error) {
+          report.errors.push({ styleNo, action: 'archive_zero_stock', message: String(error?.message || error).slice(0, 300) });
+        }
+      } else {
+        report.archivedZeroStock.push({ styleNo, reason: 'all_variants_zero_stock', dryRun: true, stock: known.map((sku) => ({ supplierSku: sku.supplierSku, raw: sku.stock, calculated: Math.max(sku.stock - 5, 0) })) });
+      }
+      continue;
+    }
+    if (!dryRun) {
+      try {
+        const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(row.portal_product_id)}/stock`, config.portalStagingApiUrl), {
+          method: 'POST',
+          headers: { authorization: `Bearer ${config.portalStagingAdminSecret}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ variants: known.map((sku) => ({ supplierSku: sku.supplierSku, stock: Math.max(0, Math.trunc(sku.stock)) })) }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        const body = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(body?.error?.message ?? `Portal returned HTTP ${response.status}`);
+        report.updatedProducts += 1;
+        report.updatedVariants += Number(body?.updated || 0);
+        if (Array.isArray(body?.missing) && body.missing.length) {
+          report.skipped.push({ styleNo, reason: 'portal_sku_not_matched', missing: body.missing.length });
+        }
+      } catch (error) {
+        report.errors.push({ styleNo, action: 'update_stock', message: String(error?.message || error).slice(0, 300) });
+      }
+    }
+  }
+  const lines = [
+    `📦 Portal Staging 库存巡检${dryRun ? '（演练）' : ''}`,
+    `检查产品：${report.checked}`,
+    `更新产品：${report.updatedProducts}，变体：${report.updatedVariants}`,
+    `1688 已下架归档：${report.archivedDelisted.length}`,
+    `计算库存为 0 归档：${report.archivedZeroStock.length}`,
+    `跳过：${report.skipped.length}，错误：${report.errors.length}`,
+  ];
+  const names = (items, key = 'styleNo') => items.slice(0, 15).map((item) => item[key] || item.styleNo || item).join('、') + (items.length > 15 ? ` 等 ${items.length} 款` : '');
+  if (report.archivedDelisted.length) lines.push(`下架：${names(report.archivedDelisted)}`);
+  if (report.archivedZeroStock.length) lines.push(`零库存：${names(report.archivedZeroStock)}`);
+  if (report.errors.length) lines.push(`错误：${report.errors.slice(0, 8).map((item) => item.styleNo).join('、')}${report.errors.length > 8 ? ' 等' : ''}`);
+  lines.push(`时间：${report.checkedAt}`);
+  let feishu = null;
+  if (feishuConfigured(config)) {
+    try {
+      feishu = await sendFeishuText({ text: lines.join('\n'), config });
+    } catch (error) {
+      feishu = { error: String(error?.message || error).slice(0, 300) };
+    }
+  }
+  return { ...report, feishu };
+});
+
 app.get('/api/portal/delisted', { preHandler: requireDashboardOrApiKey }, async () => {
   const candidates = await db.listPortalDelistedProducts();
   let activeIds = null;

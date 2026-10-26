@@ -3798,6 +3798,43 @@ export function createDatabase(databaseUrl) {
     return { productDetailId: id, styleNo: row.style_no, offerId: row.offer_id, capturedAt: row.captured_at, skus };
   }
 
+  /** Staging Portal publications used by the daily stock/status reconcile. */
+  async function listPortalPublishedForReconcile() {
+    const result = await pool.query(`SELECT publications.product_detail_id, publications.style_no,
+        publications.portal_product_id, publications.portal_status,
+        publications.result->>'target' AS portal_target,
+        details.offer_id, details.title,
+        src.availability_status, src.delisted_at::text AS delisted_at,
+        src.last_seen_in_scan_at::text AS last_seen_in_scan_at
+      FROM product_portal_publications publications
+      JOIN product_details details ON details.id = publications.product_detail_id
+      LEFT JOIN LATERAL (
+        SELECT products.availability_status, products.delisted_at,
+          products.last_seen_in_scan_at
+        FROM shop_products products
+        WHERE products.offer_id = details.offer_id
+        ORDER BY products.last_crawled_at DESC NULLS LAST
+        LIMIT 1
+      ) src ON true
+      WHERE publications.portal_product_id IS NOT NULL
+        AND COALESCE(publications.result->>'target', 'staging') = 'staging'
+        AND COALESCE(publications.portal_status, '') <> 'ARCHIVED'
+      ORDER BY publications.style_no ASC NULLS LAST, publications.product_detail_id ASC`);
+    return result.rows;
+  }
+
+  /** Per-variant stock rows for the staging Portal reconcile. */
+  async function listProductDetailSkuStocks(productDetailIds) {
+    const ids = [...new Set((productDetailIds ?? []).map(Number).filter(Number.isInteger))];
+    if (!ids.length) return [];
+    const result = await pool.query(`SELECT product_detail_id, sku_key, sku_text, variant_sku,
+        stock::float8 AS stock
+      FROM product_detail_skus
+      WHERE product_detail_id = ANY($1::bigint[])
+      ORDER BY product_detail_id, id`, [ids]);
+    return result.rows;
+  }
+
   /** Portal-published products whose 1688 listing is now delisted (from shop scans). */
   async function listPortalDelistedProducts() {
     const result = await pool.query(`SELECT publications.style_no, publications.portal_product_id,
@@ -3856,7 +3893,7 @@ export function createDatabase(databaseUrl) {
     listSelectionProducts, listSelectionFacets, getSelectionProductMedia, getSelectionProductSkus,
     getSelectionDraft, addSelectionDraft, updateSelectionDraft, updateSelectionDraftContent, updateSelectionDraftSource, resetSelectionDraft,
     removeSelectionDraft, markSelectionDraftPublished, markSelectionDraftArchived, markSelectionDraftFailed, refreshSelectionDraftSource, listSelectionDrafts,
-    listPortalDelistedProducts,
+    listPortalDelistedProducts, listPortalPublishedForReconcile, listProductDetailSkuStocks,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
     listNotAvailableButInStock,
     findExactGalleryDuplicates, findGalleryHashCandidates, backfillProductImageHashes,
