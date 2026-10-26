@@ -2939,9 +2939,32 @@ export function createDatabase(databaseUrl) {
     }
     values.push(safeLimit, safeOffset);
     const result = await pool.query(`
-      SELECT draft.*, details.offer_id, details.title AS source_title,
-        details.currency AS source_currency, details.price_min, details.price_max,
-        details.raw_data, products.shop_id, products.shop_name, products.category AS shop_category
+      SELECT draft.product_detail_id, draft.status, draft.portal_product_id,
+        draft.last_error, details.offer_id, products.shop_id, products.shop_name,
+        draft.draft_payload->>'styleNumber' AS style_number,
+        COALESCE(NULLIF(draft.draft_payload->>'title',''), details.title, '') AS title,
+        COALESCE(
+          (SELECT image->>'url'
+           FROM jsonb_array_elements(COALESCE(draft.draft_payload->'media','[]'::jsonb)) WITH ORDINALITY AS m(image, position)
+           WHERE COALESCE((image->>'visible')::boolean, true)
+           ORDER BY position LIMIT 1),
+          (SELECT image->>'url'
+           FROM jsonb_array_elements(COALESCE(draft.draft_payload->'media','[]'::jsonb)) WITH ORDINALITY AS m(image, position)
+           ORDER BY position LIMIT 1),
+          (SELECT image->>'url'
+           FROM jsonb_array_elements(COALESCE(draft.source_payload->'media','[]'::jsonb)) WITH ORDINALITY AS m(image, position)
+           ORDER BY position LIMIT 1)
+        ) AS cover_url,
+        EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(COALESCE(draft.draft_payload->'variants','[]'::jsonb)) AS v
+          WHERE COALESCE(v->>'imageUrl','')=''
+             OR NOT EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(COALESCE(draft.draft_payload->'media','[]'::jsonb)) AS media
+               WHERE media->>'url' = v->>'imageUrl'
+             )
+        ) AS missing_images
       FROM product_selection_drafts draft
       JOIN product_details details ON details.id=draft.product_detail_id
       LEFT JOIN LATERAL (

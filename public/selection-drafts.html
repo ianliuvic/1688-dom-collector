@@ -102,10 +102,14 @@ function esc(value){return String(value ?? '').replace(/[&<>"']/g,(c)=>({'&':'&a
 function num(value){return value === '' || value === null || value === undefined ? null : Number(value);}
 function draftOf(row){return row?.draft_payload || {};}
 function sourceOf(row){return row?.source_payload || {};}
+function styleOf(row){return row?.style_number || draftOf(row).styleNumber || '';}
+function titleOf(row){return row?.title || draftOf(row).title || row?.source_title || '';}
+function coverOf(row){return row?.cover_url || (draftOf(row).media||[]).find((entry)=>entry?.url&&entry.visible!==false)?.url || (draftOf(row).media||[])[0]?.url || (sourceOf(row).media||[])[0]?.url || '';}
 function statusClass(status){return status === 'PUBLISHED' ? 'ok' : status === 'ERROR' ? 'err' : status === 'ARCHIVED' ? 'warn' : status ? 'warn' : '';}
 function statusLabel(status){return status === 'PUBLISHED' ? '已发布 Portal' : status === 'ERROR' ? '发布失败' : status === 'ARCHIVED' ? '已归档 Portal' : status ? '草稿' : '未加入';}
 let statusFilter='';
 function draftMissingImages(row){
+  if(typeof row?.missing_images==='boolean')return row.missing_images;
   const d=draftOf(row); const media=new Set((d.media||[]).map((entry)=>entry?.url).filter(Boolean));
   return (d.variants||[]).some((variant)=>!variant.imageUrl||!media.has(variant.imageUrl));
 }
@@ -128,17 +132,15 @@ function renderStats(){
     button.classList.toggle('on',statusFilter===key);
   });
 }
-function currentDraftList(){const q=document.getElementById('search').value.trim().toLowerCase();return drafts.filter((row)=>{const status=String(row.status).toUpperCase();if(statusFilter==='PUBLISHED'&&status!=='PUBLISHED')return false;if(statusFilter==='DRAFT'&&(status==='PUBLISHED'||status==='ARCHIVED'))return false;if(statusFilter==='ARCHIVED'&&status!=='ARCHIVED')return false;if(statusFilter==='MISSING'&&!draftMissingImages(row))return false;if(!q)return true;const d=draftOf(row);return [d.styleNumber,d.title,row.shop_name,row.offer_id].some((v)=>String(v||'').toLowerCase().includes(q));});}
+function currentDraftList(){const q=document.getElementById('search').value.trim().toLowerCase();return drafts.filter((row)=>{const status=String(row.status).toUpperCase();if(statusFilter==='PUBLISHED'&&status!=='PUBLISHED')return false;if(statusFilter==='DRAFT'&&(status==='PUBLISHED'||status==='ARCHIVED'))return false;if(statusFilter==='ARCHIVED'&&status!=='ARCHIVED')return false;if(statusFilter==='MISSING'&&!draftMissingImages(row))return false;if(!q)return true;return [styleOf(row),titleOf(row),row.shop_name,row.offer_id].some((v)=>String(v||'').toLowerCase().includes(q));});}
 function renderList(){
   renderStats();
   const list=document.getElementById('draftList'); const rows=currentDraftList();
   list.innerHTML=rows.length?rows.map((row)=>{
-    const d=draftOf(row); const s=sourceOf(row);
-    const media=Array.isArray(d.media)?d.media:[]; const sourceMedia=Array.isArray(s.media)?s.media:[];
-    const cover=(media.find((entry)=>entry?.url&&entry.visible!==false)||media[0]||sourceMedia[0]||{}).url||'';
+    const style=styleOf(row); const title=titleOf(row); const cover=coverOf(row);
     const thumb=cover?'<img class="draft-thumb" src="'+esc(cover)+'" alt="" loading="lazy" referrerpolicy="no-referrer">':'<span class="draft-thumb draft-thumb-empty">—</span>';
     const id=String(row.product_detail_id);
-    return '<div class="draft-row"><input type="checkbox" data-select-draft="'+esc(id)+'"'+(selectedDraftIds.has(id)?' checked':'')+' aria-label="选择 '+esc(d.styleNumber||id)+'"><button type="button" class="draft-item'+(id===String(activeId)?' on':'')+'" data-id="'+esc(id)+'">'+thumb+'<span class="draft-copy"><strong>'+esc(d.styleNumber||('#'+row.product_detail_id))+' · '+esc(d.title||row.source_title||'')+'</strong><small>'+esc(row.shop_name||'未知店铺')+' · '+statusLabel(row.status)+(row.portal_product_id?' · Portal '+esc(row.portal_product_id):'')+(row.last_error?' · '+esc(String(row.last_error).slice(0,45)):'')+'</small></span></button></div>';
+    return '<div class="draft-row"><input type="checkbox" data-select-draft="'+esc(id)+'"'+(selectedDraftIds.has(id)?' checked':'')+' aria-label="选择 '+esc(style||id)+'"><button type="button" class="draft-item'+(id===String(activeId)?' on':'')+'" data-id="'+esc(id)+'">'+thumb+'<span class="draft-copy"><strong>'+esc(style||('#'+row.product_detail_id))+' · '+esc(title)+'</strong><small>'+esc(row.shop_name||'未知店铺')+' · '+statusLabel(row.status)+(row.portal_product_id?' · Portal '+esc(row.portal_product_id):'')+(row.last_error?' · '+esc(String(row.last_error).slice(0,45)):'')+'</small></span></button></div>';
   }).join(''):'<div class="empty">还没有加入 selection 的产品</div>';
   updateBatchControls();
 }
@@ -218,13 +220,16 @@ async function load(){
 }
 async function openDraft(id, push=true){
   activeId=String(id||'');
-  current=drafts.find((row)=>String(row.product_detail_id)===String(activeId)) || null;
-  if(!current && activeId){
+  current=null;
+  let openError='';
+  if(activeId){
     const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{headers:{accept:'application/json'}});
-    if(response.ok) current=(await response.json()).draft;
+    const body=await response.json().catch(()=>null);
+    if(response.ok) current=body?.draft||null;
+    else openError=body?.message||body?.error||('HTTP '+response.status);
   }
   syncSizeChartState();
-  message=''; error='';
+  message=''; error=openError;
   renderEditor();
   renderList();
   if(push && activeId){history.replaceState(null,'','/selection?draft='+encodeURIComponent(activeId));}
