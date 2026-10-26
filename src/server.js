@@ -7564,8 +7564,11 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
       // a product with live Portal variants to be archived.
       const portalVariants = Array.isArray(body?.variants) ? body.variants : null;
       if (portalVariants) {
-        const matched = new Set((Array.isArray(body?.matched) ? body.matched : []).map((sku) => String(sku).trim().toLowerCase()));
-        const portalUnmatched = portalVariants.filter((variant) => !matched.has(String(variant.supplierSku ?? '').trim().toLowerCase()));
+        const normalizeSku = (value) => String(value ?? '').trim().toLowerCase()
+          .replace(/(?:^|-)xxl$/i, '-2xl')
+          .replace(/(?:^|-)xxxl$/i, '-3xl');
+        const matched = new Set((Array.isArray(body?.matched) ? body.matched : []).map(normalizeSku));
+        const portalUnmatched = portalVariants.filter((variant) => !matched.has(normalizeSku(variant.supplierSku)));
         if (portalUnmatched.length) {
           report.unmatchedPortal.push({ styleNo, skus: portalUnmatched.map((variant) => variant.supplierSku) });
         }
