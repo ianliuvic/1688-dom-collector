@@ -1,6 +1,6 @@
 import sharp from 'sharp';
 
-const MAX_COLUMNS = 8;
+const MAX_COLUMNS = 10;
 const MAX_ROWS = 50;
 const MAX_NAME = 120;
 const MAX_LABEL = 80;
@@ -200,7 +200,7 @@ const textWidthLimit = (text, fontSize, maxWidth) => {
 };
 
 function renderSizeChartSvg(chart) {
-  const width = 1600;
+  const width = chart.columns.length > 6 ? 2100 : 1600;
   const margin = 70;
   const tableTop = 135;
   const headerHeight = 68;
