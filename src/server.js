@@ -1254,6 +1254,16 @@ async function buildSelectionSourcePayload(productDetailId) {
     const kind = image.image_type === 'description' ? 'detail' : (image.image_type === 'gallery' ? '1688 gallery' : '1688 image');
     addPoolImage(url, kind, null, sourceUrl);
   }
+  // LinkFox can return detail images that were never persisted as
+  // product_detail_images rows. They are still part of the 1688 detail gallery
+  // and must be available in Selection (the Products page already shows them).
+  const descriptionHtml = detail.raw_data?.linkfox?.raw?.description;
+  if (typeof descriptionHtml === 'string' && descriptionHtml) {
+    for (const match of descriptionHtml.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) {
+      const url = String(match[1] || '').trim();
+      addPoolImage(url, 'detail', null, url);
+    }
+  }
   const mediaPool = [...poolByUrl.values()];
   const normalizedColours = Array.isArray(normalization?.result?.colours) ? normalization.result.colours : [];
   const normalizedSizes = Array.isArray(normalization?.result?.sizes) ? normalization.result.sizes : [];
@@ -7688,6 +7698,16 @@ app.post('/api/selection/drafts/:id/apply-source', { preHandler: requireDashboar
   }
   const saved = await db.updateSelectionDraftSource(id, source, merged, selectionSourceHash(source));
   return { draft: saved, applied: fields };
+});
+
+app.post('/api/selection/drafts/:id/refresh-media-pool', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  const row = await db.getSelectionDraft(id);
+  if (!row) return reply.code(404).send({ error: 'not_found' });
+  const source = await buildSelectionSourcePayload(id);
+  if (!source) return reply.code(404).send({ error: 'source_not_found' });
+  const saved = await db.refreshSelectionDraftSource(id, source, selectionSourceHash(source));
+  return { draft: saved, mediaPoolCount: Array.isArray(source.mediaPool) ? source.mediaPool.length : 0 };
 });
 
 app.post('/api/selection/drafts/:id/refresh-source', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {

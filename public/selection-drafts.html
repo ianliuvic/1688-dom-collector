@@ -246,7 +246,7 @@ function renderEditor(){
   +pricingEditorHtml(s,d)
   +'<div class="section"><h3>Colors & variants</h3><p class="hint">一个 color 只保留一张图片，直接从已选 media 中选择；size 只是该颜色下的变体。进入 Selection 时会自动匹配，也可以手动更换。</p><div class="color-groups" id="colorGroups">'+variantGroups.map((group,index)=>colorGroupHtml(group,index)).join('')+'</div><div class="media-actions"><button type="button" class="add-btn" data-add-color>+ 添加 color</button><button type="button" class="add-btn" data-auto-match-variant-images>Auto match images</button></div></div>'
   +'<div class="section"><h3>Selected media</h3><p class="hint">这些是准备发布到 Portal 的图片；勾选控制前台展示，用箭头调整顺序。</p><div class="media-grid" id="media">'+media.map((entry,index)=>mediaRow(entry,index)).join('')+'</div><div class="media-actions"><label class="add-btn upload-media-btn">+ 上传本地图片<input id="mediaUpload" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple></label><button type="button" class="add-btn" data-open-size-chart>+ 生成尺码表图片</button></div></div>'
-  +(mediaPool.length?'<div class="section media-pool"><h3>Original 1688 images not selected</h3><p class="hint">包含未选入的 1688 gallery、主图和详情图。点击图片下方按钮即可重新加入 selected media。</p><div class="media-grid" id="mediaPool">'+mediaPool.map((entry,index)=>poolCard(entry,index)).join('')+'</div></div>':'')
+  +'<div class="section media-pool"><h3>Original 1688 images not selected</h3><p class="hint">包含未选入的 1688 gallery、主图和详情图。点击图片下方按钮即可重新加入 selected media；如果详情图刚下载或刚补充，点右侧刷新图片池。</p><div class="media-actions"><button type="button" class="add-btn" data-refresh-media-pool>刷新详情图 / 图片池</button></div><div class="media-grid" id="mediaPool">'+mediaPool.map((entry,index)=>poolCard(entry,index)).join('')+(mediaPool.length?'':'<div class="hint">当前没有未选图片。</div>')+'</div></div>'
   +'<div class="actions"><button type="button" class="primary" data-save>保存草稿</button><button type="button" class="publish" data-publish>发布 / 同步到 Portal</button><button type="button" data-refresh>检查源数据更新</button><button type="button" data-reset>恢复源数据</button><button type="button" class="danger" data-remove>从 selection 移除</button></div>'
   +'<div class="msg '+(error?'err':message?'ok':'')+'">'+esc(error||message||'')+'</div>';
   bindEditor();
@@ -391,6 +391,21 @@ function bindEditor(){
   const editor=document.getElementById('editor');
   editor.querySelector('[data-save]').onclick=()=>{saveDraft().catch((e)=>{error=String(e.message||e);message='';renderEditor();});};
   editor.querySelector('[data-refresh]').onclick=()=>{void openSourceDiff();};
+  editor.querySelector('[data-refresh-media-pool]').onclick=async()=>{
+    if(!confirm('刷新图片池会先保存当前草稿，然后重新读取最新 1688 图片。继续？'))return;
+    try{
+      await saveDraft('当前草稿已保存，正在刷新图片池。');
+      const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/refresh-media-pool',{method:'POST',headers:{accept:'application/json'}});
+      const body=await response.json().catch(()=>null);
+      if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));
+      current=body.draft;
+      const index=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));
+      if(index>=0)drafts[index]=current;
+      message='图片池已刷新，共 '+Number(body.mediaPoolCount||0)+' 张来源图片。';
+      error='';
+      renderEditor();renderList();
+    }catch(e){error=String(e.message||e);message='';renderEditor();}
+  };
   editor.querySelector('[data-reset]').onclick=async()=>{if(!confirm('恢复为当前采集源/WP 数据？草稿编辑会丢失。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/reset',{method:'POST'});const body=await response.json();if(!response.ok)throw new Error(body?.message||body?.error);current=body.draft;syncSizeChartState();const i=drafts.findIndex((row)=>String(row.product_detail_id)===String(activeId));if(i>=0)drafts[i]=current;message='已恢复源数据。';error='';renderEditor();renderList();}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-remove]').onclick=async()=>{if(!confirm('从 selection 移除这个产品？如果已发布 Portal，会保留 Portal 产品。'))return;try{const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId),{method:'DELETE'});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error);window.location.href='/selection';}catch(e){error=String(e.message||e);renderEditor();}};
   editor.querySelector('[data-publish]').onclick=async()=>{try{await saveDraft();const response=await fetch('/api/selection/drafts/'+encodeURIComponent(activeId)+'/publish',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({target:'staging'})});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(body?.message||body?.error||('HTTP '+response.status));current=body.draft;message='已发布到 Portal：'+(body.portal?.productId||'');error='';await load();}catch(e){error=String(e.message||e);message='';renderEditor();}};
