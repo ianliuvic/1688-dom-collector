@@ -7491,6 +7491,7 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     archivedDelisted: [],
     archivedZeroStock: [],
     partial: [],
+    unmatchedPortal: [],
     skipped: [],
     errors: [],
   };
@@ -7532,38 +7533,59 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     }
     const known = pricedSkus.filter((sku) => Number.isFinite(sku.stock));
     const calculated = known.map((sku) => Math.max(sku.stock - 5, 0));
-    const allZero = known.length === pricedSkus.length && known.length > 0 && calculated.every((value) => value === 0);
-    if (allZero) {
-      if (!dryRun) {
-        try {
-          const archived = await archiveStagingPortalProduct(row, 'all_variants_zero_stock');
-          report.archivedZeroStock.push(archived);
-        } catch (error) {
-          report.errors.push({ styleNo, action: 'archive_zero_stock', message: String(error?.message || error).slice(0, 300) });
-        }
-      } else {
+    if (dryRun) {
+      const allZero = known.length === pricedSkus.length && known.length > 0 && calculated.every((value) => value === 0);
+      if (allZero) {
         report.archivedZeroStock.push({ styleNo, reason: 'all_variants_zero_stock', dryRun: true, stock: known.map((sku) => ({ supplierSku: sku.supplierSku, raw: sku.stock, calculated: Math.max(sku.stock - 5, 0) })) });
       }
       continue;
     }
-    if (!dryRun) {
-      try {
-        const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(row.portal_product_id)}/stock`, config.portalStagingApiUrl), {
-          method: 'POST',
-          headers: { authorization: `Bearer ${config.portalStagingAdminSecret}`, 'content-type': 'application/json' },
-          body: JSON.stringify({ variants: known.map((sku) => ({ supplierSku: sku.supplierSku, color: sku.color, size: sku.size, stock: Math.max(0, Math.trunc(sku.stock)) })) }),
-          signal: AbortSignal.timeout(60_000),
-        });
-        const body = await response.json().catch(() => null);
-        if (!response.ok) throw new Error(body?.error?.message ?? `Portal returned HTTP ${response.status}`);
-        report.updatedProducts += 1;
-        report.updatedVariants += Number(body?.updated || 0);
-        if (Array.isArray(body?.missing) && body.missing.length) {
-          report.partial.push({ styleNo, reason: 'extra_supplier_skus', missing: body.missing.length });
-        }
-      } catch (error) {
-        report.errors.push({ styleNo, action: 'update_stock', message: String(error?.message || error).slice(0, 300) });
+    if (!known.length) {
+      report.skipped.push({ styleNo, reason: 'no_known_sku_stock' });
+      continue;
+    }
+    try {
+      const response = await fetch(new URL(`/api/v1/admin/catalog/${encodeURIComponent(row.portal_product_id)}/stock`, config.portalStagingApiUrl), {
+        method: 'POST',
+        headers: { authorization: `Bearer ${config.portalStagingAdminSecret}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ variants: known.map((sku) => ({ supplierSku: sku.supplierSku, color: sku.color, size: sku.size, stock: Math.max(0, Math.trunc(sku.stock)) })) }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.error?.message ?? `Portal returned HTTP ${response.status}`);
+      const updated = Number(body?.updated || 0);
+      report.updatedProducts += updated > 0 ? 1 : 0;
+      report.updatedVariants += updated;
+      if (Array.isArray(body?.missing) && body.missing.length) {
+        report.partial.push({ styleNo, reason: 'extra_supplier_skus', missing: body.missing.length });
       }
+      // The zero-stock decision must use the Portal's own variant set, not the
+      // collector's potentially larger SKU list. Extra 1688 SKUs must not cause
+      // a product with live Portal variants to be archived.
+      const portalVariants = Array.isArray(body?.variants) ? body.variants : null;
+      if (portalVariants) {
+        const matched = new Set((Array.isArray(body?.matched) ? body.matched : []).map((sku) => String(sku).trim().toLowerCase()));
+        const portalUnmatched = portalVariants.filter((variant) => !matched.has(String(variant.supplierSku ?? '').trim().toLowerCase()));
+        if (portalUnmatched.length) {
+          report.unmatchedPortal.push({ styleNo, skus: portalUnmatched.map((variant) => variant.supplierSku) });
+        }
+        const allZero = portalVariants.length > 0 && portalVariants.every((variant) => {
+          const stock = Number(variant.stock);
+          return Number.isFinite(stock) && stock <= 5;
+        });
+        if (allZero) {
+          const archived = await archiveStagingPortalProduct(row, 'all_variants_zero_stock');
+          report.archivedZeroStock.push(archived);
+        }
+      } else {
+        const allZero = known.length === pricedSkus.length && calculated.every((value) => value === 0);
+        if (allZero) {
+          const archived = await archiveStagingPortalProduct(row, 'all_variants_zero_stock');
+          report.archivedZeroStock.push(archived);
+        }
+      }
+    } catch (error) {
+      report.errors.push({ styleNo, action: 'update_stock', message: String(error?.message || error).slice(0, 300) });
     }
   }
   const lines = [
@@ -7572,7 +7594,7 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     `更新产品：${report.updatedProducts}，变体：${report.updatedVariants}`,
     `1688 已下架归档：${report.archivedDelisted.length}`,
     `计算库存为 0 归档：${report.archivedZeroStock.length}`,
-    `部分匹配：${report.partial.length}，跳过：${report.skipped.length}，错误：${report.errors.length}`,
+    `部分匹配：${report.partial.length}，Portal 未匹配：${report.unmatchedPortal.length}，跳过：${report.skipped.length}，错误：${report.errors.length}`,
   ];
   const names = (items, key = 'styleNo') => items.slice(0, 15).map((item) => item[key] || item.styleNo || item).join('、') + (items.length > 15 ? ` 等 ${items.length} 款` : '');
   if (report.archivedDelisted.length) lines.push(`下架：${names(report.archivedDelisted)}`);
