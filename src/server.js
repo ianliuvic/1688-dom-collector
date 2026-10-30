@@ -38,7 +38,7 @@ import { resolveSelectionVariantImages } from './selection-variant-images.js';
 import { dedupeImagesByHash, dedupeImagesWithLlm, normalizedSourceImageKey } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
-import { auditSizeValues, sizeValuesFromDimensions } from './selection-size-audit.js';
+import { auditSizeValues, sizeRankValue, sizeValuesFromDimensions } from './selection-size-audit.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
   linkfoxExtrasForMerge } from './linkfox-1688.js';
 import { MAX_OPTION_LABEL_LENGTH } from './option-overrides.js';
@@ -7740,6 +7740,66 @@ app.post('/api/selection/products/:id/size-chart', { preHandler: requireDashboar
     chart: rendered.chart,
     fileName,
   };
+});
+
+app.post('/api/selection/products/:id/size-order', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const publication = await db.getWordPressPublication(id);
+  if (!publication) return reply.code(404).send({ error: 'wordpress_publication_required' });
+  const payload = publication.payload && typeof publication.payload === 'object' ? publication.payload : {};
+  const currentSizes = Array.isArray(payload.sizes?.sizes) ? payload.sizes.sizes : [];
+  const sizeLabel = (entry) => String(entry?.label ?? entry?.value ?? '').trim();
+  const requested = (Array.isArray(request.body?.sizes) ? request.body.sizes : [])
+    .map((value) => String(value ?? '').trim()).filter(Boolean);
+  if (requested.length !== currentSizes.length || new Set(requested.map((value) => value.toUpperCase())).size !== requested.length) {
+    return reply.code(400).send({ error: 'invalid_size_order', message: 'The submitted size list must contain every current size exactly once.' });
+  }
+  const byLabel = new Map(currentSizes.map((entry) => [sizeLabel(entry).toUpperCase(), entry]));
+  if (requested.some((value) => !byLabel.has(value.toUpperCase()))) {
+    return reply.code(400).send({ error: 'invalid_size_order', message: 'The submitted sizes do not match the current publication.' });
+  }
+  const ordered = requested.map((value) => byLabel.get(value.toUpperCase()));
+  payload.sizes = { ...(payload.sizes || {}), default: sizeLabel(ordered[0]), sizes: ordered };
+  if (Array.isArray(payload.sku_matrix?.rows)) {
+    const requestedRank = new Map(requested.map((value, index) => [value.toUpperCase(), index]));
+    const optionValue = (row, pattern) => {
+      const options = row?.options && typeof row.options === 'object' ? row.options : {};
+      const key = Object.keys(options).find((name) => pattern.test(name));
+      return key ? String(options[key] ?? '').trim() : '';
+    };
+    const colorOrder = new Map();
+    for (const row of payload.sku_matrix.rows) {
+      const color = optionValue(row, /colou?r|颜色/i);
+      if (!colorOrder.has(color)) colorOrder.set(color, colorOrder.size);
+    }
+    payload.sku_matrix = {
+      ...payload.sku_matrix,
+      rows: [...payload.sku_matrix.rows].sort((left, right) => {
+        const leftColor = optionValue(left, /colou?r|颜色/i);
+        const rightColor = optionValue(right, /colou?r|颜色/i);
+        const colorDelta = (colorOrder.get(leftColor) ?? 999) - (colorOrder.get(rightColor) ?? 999);
+        if (colorDelta) return colorDelta;
+        const leftSize = optionValue(left, /size|尺码|尺寸|码数/i);
+        const rightSize = optionValue(right, /size|尺码|尺寸|码数/i);
+        return (requestedRank.get(leftSize.toUpperCase()) ?? 999) - (requestedRank.get(rightSize.toUpperCase()) ?? 999);
+      }),
+    };
+  }
+  await db.saveWordPressPublication(id, {
+    translationId: publication.translation_id,
+    externalId: publication.external_id,
+    styleNo: publication.style_no,
+    wpPostId: publication.wp_post_id,
+    wpUrl: publication.wp_url,
+    wpEditUrl: publication.wp_edit_url,
+    wpStatus: publication.wp_status,
+    syncHash: publication.sync_hash,
+    payload,
+    result: publication.result,
+    lastError: publication.last_error,
+  });
+  return { saved: true, sizes: requested, sizeWarning: auditSizeValues(requested) };
 });
 
 /* ---- Portal selection drafts (source/editable/published lifecycle) ---- */

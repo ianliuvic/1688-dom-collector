@@ -41,7 +41,16 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 .badge{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:1px 9px;margin-right:4px;color:#fff;background:#98a2b3}
 .badge.keeper{background:var(--warn)}.badge.delisted{background:#667085}.badge.active{background:var(--good)}
 .badge.size-warn{background:var(--warn)}
-.size-warning{font-size:11.5px;line-height:1.4;color:#93370d;background:#fffaeb;border:1px solid #fedf89;border-radius:6px;padding:3px 8px;max-width:520px}
+.size-warning{font-size:11.5px;line-height:1.4;color:#93370d;background:#fffaeb;border:1px solid #fedf89;border-radius:6px;padding:3px 8px;max-width:620px}
+.size-order-open{border:1px solid #d6a34a;border-radius:6px;background:#fff;color:#93370d;padding:1px 7px;margin-left:6px;font-size:11px;cursor:pointer;white-space:nowrap}
+.size-order-open:hover{background:#fff7e6}
+.size-order-backdrop{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(15,23,42,.55)}
+.size-order-backdrop[hidden]{display:none}
+.size-order-modal{width:min(100%,460px);background:#fff;border-radius:12px;padding:20px;box-shadow:0 20px 60px rgba(15,23,42,.25)}
+.size-order-modal h3{margin:0 0 4px;font-size:17px}.size-order-modal p{margin:0 0 14px;color:var(--muted);font-size:12.5px}
+.size-order-list{display:grid;gap:6px;margin-bottom:16px}.size-order-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#fbfcfe}
+.size-order-row strong{flex:1;font-size:14px}.size-order-row button{width:30px;height:28px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer;font-size:13px}.size-order-row button:disabled{opacity:.35;cursor:default}
+.size-order-hint{font-size:11.5px;color:var(--muted);margin:-6px 0 14px}.size-order-actions{display:flex;gap:8px;justify-content:flex-end}.size-order-actions button{border:1px solid var(--line);border-radius:7px;padding:6px 14px;background:#fff;cursor:pointer}.size-order-actions button.primary{border-color:var(--info);background:var(--info);color:#fff}
 .portal-badge.portal-ok{background:var(--good)}
 .portal-badge.portal-none{background:#98a2b3}
 .portal-badge.portal-archived{background:#b54708}
@@ -178,10 +187,23 @@ main{display:flex;flex-direction:column;gap:8px;padding:12px 24px 60px;max-width
 
 <main id="rows"><div class="loading">加载中…</div></main>
 
+<div id="sizeOrderModal" class="size-order-backdrop" hidden>
+  <div class="size-order-modal" role="dialog" aria-modal="true" aria-labelledby="sizeOrderTitle">
+    <h3 id="sizeOrderTitle">调整尺码顺序</h3>
+    <p id="sizeOrderSubtitle">调整后保存，下一次发布到 Portal 会按新顺序生成变体。</p>
+    <div id="sizeOrderList" class="size-order-list"></div>
+    <div class="size-order-hint">断码无法通过排序修复，需要补齐缺失 SKU。</div>
+    <div class="size-order-actions"><button type="button" id="sizeOrderCancel">取消</button><button type="button" class="primary" id="sizeOrderSave">保存顺序</button></div>
+  </div>
+</div>
+
 <div id="lightbox"><button class="close" aria-label="关闭">×</button><img id="lightboxImg" alt="" referrerpolicy="no-referrer"></div>
 
 <script>
 const state = { page: 1, pageSize: 100, total: 0, dir: 'desc', loading: false };
+const selectionItems = new Map();
+let sizeOrderItem = null;
+let sizeOrderSizes = [];
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value == null ? '' : value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -204,6 +226,63 @@ function fullUrl(url) {
   return url.indexOf('/api/product-images/') >= 0 ? url.replace(/[?&]w=\d+$/, '') : url;
 }
 const fmtSale = (value) => value == null ? '-' : String(value);
+
+function openSizeOrder(id) {
+  const item = selectionItems.get(String(id));
+  if (!item) return;
+  sizeOrderItem = item;
+  sizeOrderSizes = (Array.isArray(item.sizes) ? item.sizes : []).map((value) => String(value));
+  renderSizeOrder();
+  $('sizeOrderModal').hidden = false;
+}
+function renderSizeOrder() {
+  $('sizeOrderSubtitle').textContent = sizeOrderItem ? (sizeOrderItem.styleNo || sizeOrderItem.offerId) + ' · 调整后保存，下一次发布到 Portal 会按新顺序生成变体。' : '';
+  $('sizeOrderList').innerHTML = sizeOrderSizes.map((size, index) => '<div class="size-order-row"><strong>' + esc(size) + '</strong><button type="button" data-size-move="' + index + '" data-size-dir="-1" ' + (index === 0 ? 'disabled' : '') + ' aria-label="上移 ' + esc(size) + '">↑</button><button type="button" data-size-move="' + index + '" data-size-dir="1" ' + (index === sizeOrderSizes.length - 1 ? 'disabled' : '') + ' aria-label="下移 ' + esc(size) + '">↓</button></div>').join('');
+}
+function closeSizeOrder() {
+  $('sizeOrderModal').hidden = true;
+  sizeOrderItem = null;
+  sizeOrderSizes = [];
+}
+async function saveSizeOrder() {
+  if (!sizeOrderItem) return;
+  const save = $('sizeOrderSave');
+  save.disabled = true;
+  save.textContent = '保存中…';
+  try {
+    const response = await fetch('/api/selection/products/' + encodeURIComponent(sizeOrderItem.productDetailId) + '/size-order', {
+      method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ sizes: sizeOrderSizes }),
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(body?.message || body?.error || ('HTTP ' + response.status));
+    closeSizeOrder();
+    await load();
+  } catch (error) {
+    window.alert('保存尺码顺序失败：' + (error?.message || error));
+  } finally {
+    save.disabled = false;
+    save.textContent = '保存顺序';
+  }
+}
+document.addEventListener('click', (event) => {
+  const open = event.target.closest('button[data-size-order]');
+  if (open) { openSizeOrder(open.dataset.sizeOrder); return; }
+  const move = event.target.closest('button[data-size-move]');
+  if (move) {
+    const index = Number(move.dataset.sizeMove);
+    const next = index + Number(move.dataset.sizeDir);
+    if (next >= 0 && next < sizeOrderSizes.length) {
+      [sizeOrderSizes[index], sizeOrderSizes[next]] = [sizeOrderSizes[next], sizeOrderSizes[index]];
+      renderSizeOrder();
+    }
+    return;
+  }
+  if (event.target === $('sizeOrderModal')) closeSizeOrder();
+});
+$('sizeOrderCancel').addEventListener('click', closeSizeOrder);
+$('sizeOrderSave').addEventListener('click', () => void saveSizeOrder());
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !$('sizeOrderModal').hidden) closeSizeOrder(); });
 
 function filterParams() {
   const params = new URLSearchParams();
@@ -285,7 +364,7 @@ function rowHtml(it) {
     '</div>' +
     '<div class="body">' +
       '<div class="chips"><span class="lbl">颜色</span><span class="chip count">' + it.colorCount + ' 个</span>' + chips(it.colors) + '</div>' +
-      '<div class="chips"><span class="lbl">尺码</span><span class="chip count">' + it.sizeCount + ' 个</span>' + chips(it.sizes, 14) + '</div>' +
+      '<div class="chips"><span class="lbl">尺码</span><span class="chip count">' + it.sizeCount + ' 个</span>' + chips(it.sizes, 14) + '<button type="button" class="size-order-open" data-size-order="' + esc(it.productDetailId) + '">调整尺码顺序</button></div>' +
       (sizeWarning ? '<div class="size-warning">' + esc(sizeWarning.message) + '</div>' : '') +
       '<button class="expand" data-media="' + esc(it.productDetailId) + '">查看图片与库存 ▾</button>' +
       '<div class="media" hidden></div>' +
@@ -320,6 +399,8 @@ async function load() {
     $('range').textContent = state.total ? ('显示 ' + start + ' – ' + end) : '';
     $('prev').disabled = state.page <= 1;
     $('next').disabled = state.page >= totalPages;
+    selectionItems.clear();
+    (data.items || []).forEach((item) => selectionItems.set(String(item.productDetailId), item));
     $('rows').innerHTML = (data.items || []).map(rowHtml).join('') || '<div class="empty-state">没有符合条件的产品</div>';
   } catch (error) {
     $('rows').innerHTML = '<div class="empty-state">加载失败：' + esc(error.message || error) + '</div>';

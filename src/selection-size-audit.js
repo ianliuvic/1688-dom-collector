@@ -8,6 +8,8 @@ function clean(value) {
   return String(value ?? '').replace(/\s+/g, '').trim().toUpperCase();
 }
 
+export function sizeRankValue(value) { return rank(value); }
+
 function rank(value) {
   const normalized = clean(value);
   const numberedXl = normalized.match(/^([2-5])XL$/);
