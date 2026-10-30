@@ -32,9 +32,10 @@ export function auditSizeValues(values) {
   if (raw.join('|') !== sorted.join('|')) {
     return { code: 'size_order_unusual', message: `尺码顺序异常：当前 ${raw.join('、')}；建议 ${sorted.join('、')}`, values: raw, expected: sorted };
   }
+  // Numeric sizes (kids 70/80/90 or shoe 36/38/40) do not use the adult
+  // letter-size sequence, so only check ordering for them, not letter gaps.
   const alphaOnly = raw.every((value) => SIZE_ORDER.has(value));
-  const numericOnly = raw.every((value) => /^\d+(?:\.\d+)?$/.test(value));
-  if (!alphaOnly && !numericOnly) return null;
+  if (!alphaOnly) return null;
   const present = new Set(ranks);
   const missing = [];
   for (let value = Math.min(...ranks) + 1; value < Math.max(...ranks); value += 1) {
