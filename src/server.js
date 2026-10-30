@@ -38,6 +38,7 @@ import { resolveSelectionVariantImages } from './selection-variant-images.js';
 import { dedupeImagesByHash, dedupeImagesWithLlm, normalizedSourceImageKey } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
+import { auditSizeValues, sizeValuesFromDimensions } from './selection-size-audit.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
   linkfoxExtrasForMerge } from './linkfox-1688.js';
 import { MAX_OPTION_LABEL_LENGTH } from './option-overrides.js';
@@ -7334,7 +7335,9 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
     portalPublished: result.portalPublished ?? 0,
     portalCheck: staging.ids ? 'ok' : 'failed',
     portalWarning: staging.warning ?? null,
-    items: result.items.map((row) => ({
+    items: result.items.map((row) => {
+      const sizes = (Array.isArray(row.sizes_json) ? row.sizes_json : []).map((s) => s?.label ?? s?.value ?? null).filter(Boolean);
+      return {
       productDetailId: row.product_detail_id,
       offerId: row.offer_id,
       styleNo: row.style_no,
@@ -7348,7 +7351,8 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
       colorCount: row.color_count ?? 0,
       sizeCount: row.size_count ?? 0,
       colors: (Array.isArray(row.colors_json) ? row.colors_json : []).map((c) => c?.label ?? c?.code ?? c?.value ?? null).filter(Boolean),
-      sizes: (Array.isArray(row.sizes_json) ? row.sizes_json : []).map((s) => s?.label ?? s?.value ?? null).filter(Boolean),
+      sizes,
+      sizeWarning: auditSizeValues(sizes),
       saleQuantity: row.sale_quantity_float === null || row.sale_quantity_float === undefined ? null : Number(row.sale_quantity_float),
       thirtyBookCount: row.thirty_book_float === null || row.thirty_book_float === undefined ? null : Number(row.thirty_book_float),
       priceMin: row.price_min_float === null || row.price_min_float === undefined ? null : Number(row.price_min_float),
@@ -7365,7 +7369,8 @@ app.get('/api/selection/products', { preHandler: requireDashboardOrApiKey }, asy
       portalSyncedAt: row.portal_synced_at ?? null,
       portalError: row.portal_error ?? null,
       cover: coverUrl(row),
-    })),
+      };
+    }),
   };
 });
 
@@ -9512,6 +9517,7 @@ function toProductCatalogItem(row) {
         thumb: base ? `${base}?w=160` : (image.source || null),
         source: image.source || null };
     });
+  const dims = dimOrder.map((name) => ({ name, options: dimMap.get(name) }));
   return {
     id: row.id,
     offerId: row.offer_id,
@@ -9543,7 +9549,8 @@ function toProductCatalogItem(row) {
     cover: gallery.length ? gallery[0].thumb : null,
     gallery,
     detailImages,
-    dims: dimOrder.map((name) => ({ name, options: dimMap.get(name) })),
+    dims,
+    sizeWarning: auditSizeValues(sizeValuesFromDimensions(dims)),
   };
 }
 

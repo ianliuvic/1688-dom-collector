@@ -148,6 +148,8 @@ main{display:flex;flex-direction:column;gap:8px;padding:14px 24px 48px;max-width
 .badge.editpending{background:#b54708;font-weight:600}
 .badge.editdone{background:#98a2b3;font-weight:600}
 .badge.ragok{background:#067647;font-weight:600}
+.badge.size-warn{background:#b54708;font-weight:700}
+.size-warning{font-size:11.5px;line-height:1.4;color:#93370d;background:#fffaeb;border:1px solid #fedf89;border-radius:6px;padding:3px 8px;margin-top:6px;max-width:620px}
 .badge.ragoff{background:#667085;font-weight:600}
 .badge.ragpending{background:#b54708;font-weight:600}
 .badge.ragfail{background:#b42318;font-weight:600}
@@ -416,6 +418,10 @@ function row(it){
   // split flow, so the single-product publish preview only makes sense for
   // regular products.
   const effectiveBundle = manual === 'bundle' ? true : manual === 'clear' ? false : isBundle;
+  const sizeWarning = it.sizeWarning;
+  const sizeBadge = sizeWarning
+    ? '<span class="badge size-warn" title="' + esc(sizeWarning.message) + '">尺码异常</span>'
+    : '';
   const bundleBtn = (value, label, cls) =>
     '<button type="button" class="bbtn' + (manual === value || (!manual && value === 'auto') ? ' on ' + cls : '') + '"'
     + ' data-bundle-id="' + it.id + '" data-bundle-value="' + value + '">' + label + '</button>';
@@ -431,10 +437,11 @@ function row(it){
     + '<span class="muted">采集 ' + esc(it.date || '') + '</span>'
     + offerLine(it)
     + (it.shopName ? '<span class="muted">店铺 ' + esc(it.shopName) + '</span>' : '')
-    + wpBadge(it) + listingBadge(it) + portalBadge(it) + editBadge(it) + ragBadge(it)
+    + wpBadge(it) + listingBadge(it) + portalBadge(it) + editBadge(it) + ragBadge(it) + sizeBadge
     + '</div>'
     + '<div class="body"><div class="title">' + esc(it.title || '') + '</div>'
     + '<div class="dims">' + (it.dims.length ? it.dims.map(dimRow).join('') : '<div class="muted" style="font-size:12px;color:var(--muted)">（无变体选项）</div>') + '</div>'
+    + (sizeWarning ? '<div class="size-warning">' + esc(sizeWarning.message) + '</div>' : '')
     + sourceImagesStrip(it) + '</div>'
     + '<div class="side">'
     + '<div class="line"><b>' + priceText(it) + '</b>' + (it.moq != null ? ' <span class="muted">· 起订 ' + it.moq + '</span>' : '') + '</div>'
@@ -3124,6 +3131,7 @@ function wireWpSync(){
       const id = String(selection.dataset.selectionId);
       const row = DATA.find((item) => String(item.id) === id);
       if (row && row.selectionState) { window.location.href = '/selection?draft=' + encodeURIComponent(id); return; }
+      if (row?.sizeWarning && !window.confirm('该产品尺码存在异常：' + row.sizeWarning.message + '\n仍要加入 selection 吗？')) return;
       selection.disabled = true;
       selection.textContent = '加入中…';
       try {
