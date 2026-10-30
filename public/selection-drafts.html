@@ -99,6 +99,7 @@ let selectedDraftIds = new Set();
 let batchBusy = false;
 
 function esc(value){return String(value ?? '').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+const isSizeChartImage = (image) => /(size[-_ ]?chart|尺码表)/i.test(`${image?.url || ''} ${image?.alt || ''}`);
 function num(value){return value === '' || value === null || value === undefined ? null : Number(value);}
 function draftOf(row){return row?.draft_payload || {};}
 function sourceOf(row){return row?.source_payload || {};}
@@ -237,7 +238,7 @@ async function openDraft(id, push=true){
 function renderEditor(){
   const editor=document.getElementById('editor');
   if(!current){editor.innerHTML='<div class="empty">从“全部产品”加入一个产品后开始编辑。</div>';return;}
-  const d=draftOf(current); const s=sourceOf(current); const media=Array.isArray(d.media)?d.media:[]; const sourcePool=Array.isArray(s.mediaPool)?s.mediaPool:[]; const selectedMedia=new Set(media.map((entry)=>entry.url)); const sourceBySelectedUrl=new Map(sourcePool.filter((entry)=>entry.sourceUrl).map((entry)=>[entry.url,entry.sourceUrl])); const selectedSourceUrls=new Set(media.map((entry)=>entry.sourceUrl||sourceBySelectedUrl.get(entry.url)).filter(Boolean)); const poolSeen=new Set(); const mediaPool=sourcePool.filter((entry)=>{if(!entry.url||selectedMedia.has(entry.url))return false;if(entry.sourceUrl&&selectedSourceUrls.has(entry.sourceUrl))return false;if(entry.sourceUrl&&poolSeen.has(entry.sourceUrl))return false;if(entry.sourceUrl)poolSeen.add(entry.sourceUrl);return true;}); const variants=Array.isArray(d.variants)?d.variants:[]; const tiers=Array.isArray(d.priceTiers)?d.priceTiers:[]; const swatches=Array.isArray(d.swatches)?d.swatches:[]; const variantGroups=groupVariants(variants,swatches); const materialValue=Object.prototype.hasOwnProperty.call(d,'fabricMaterial')?String(d.fabricMaterial??''):String(s.fabricMaterial??'85% Polyester, 15% Spandex'); const weightValue=Object.prototype.hasOwnProperty.call(d,'packageWeightGrams')?(d.packageWeightGrams??''):(s.packageWeightGrams??200);
+  const d=draftOf(current); const s=sourceOf(current); const media=(Array.isArray(d.media)?d.media:[]).filter((entry)=>!isSizeChartImage(entry)); const sourcePool=(Array.isArray(s.mediaPool)?s.mediaPool:[]).filter((entry)=>!isSizeChartImage(entry)); const selectedMedia=new Set(media.map((entry)=>entry.url)); const sourceBySelectedUrl=new Map(sourcePool.filter((entry)=>entry.sourceUrl).map((entry)=>[entry.url,entry.sourceUrl])); const selectedSourceUrls=new Set(media.map((entry)=>entry.sourceUrl||sourceBySelectedUrl.get(entry.url)).filter(Boolean)); const poolSeen=new Set(); const mediaPool=sourcePool.filter((entry)=>{if(!entry.url||selectedMedia.has(entry.url))return false;if(entry.sourceUrl&&selectedSourceUrls.has(entry.sourceUrl))return false;if(entry.sourceUrl&&poolSeen.has(entry.sourceUrl))return false;if(entry.sourceUrl)poolSeen.add(entry.sourceUrl);return true;}); const variants=Array.isArray(d.variants)?d.variants:[]; const tiers=Array.isArray(d.priceTiers)?d.priceTiers:[]; const swatches=Array.isArray(d.swatches)?d.swatches:[]; const variantGroups=groupVariants(variants,swatches); const materialValue=Object.prototype.hasOwnProperty.call(d,'fabricMaterial')?String(d.fabricMaterial??''):String(s.fabricMaterial??'85% Polyester, 15% Spandex'); const weightValue=Object.prototype.hasOwnProperty.call(d,'packageWeightGrams')?(d.packageWeightGrams??''):(s.packageWeightGrams??200);
   editor.innerHTML='<div class="editor-head"><div><h2>'+esc(d.title||('产品 #'+current.product_detail_id))+'</h2><div class="hint">Portal draft · revision '+esc(current.revision??1)+'</div></div><div><span class="badge '+statusClass(current.status)+'">'+statusLabel(current.status)+'</span>'+(current.portal_product_id?' <span class="badge ok">Portal '+esc(current.portal_product_id)+'</span>':'')+'</div></div>'
   +'<div class="grid">'
   +field('Style number','styleNumber',d.styleNumber||'')
@@ -306,7 +307,7 @@ function groupVariants(variants,swatches){
   return [...groups.values()];
 }
 function mediaUrlOptions(selected){
-  const urls=[...new Set([...(current?.draft_payload?.media||[]).map((item)=>item.url).filter(Boolean), ...(selected?[selected]:[])])];
+  const urls=[...new Set([...(current?.draft_payload?.media||[]).filter((item)=>!isSizeChartImage(item)).map((item)=>item.url).filter(Boolean), ...(selected?[selected]:[])])];
   return '<option value="">No image</option>'+urls.map((url,index)=>'<option value="'+esc(url)+'" '+(url===selected?'selected':'')+'>Image '+(index+1)+'</option>').join('');
 }
 function colorGroupHtml(group,index){
@@ -341,7 +342,7 @@ function variantRow(v,index){const option=v.optionValues||{};return '<tr data-va
 function mediaRow(entry,index){const chart=entry.kind==='size-chart';return '<div class="media-card" draggable="true" data-media-row="'+index+'" data-url="'+esc(entry.url||'')+'" data-kind="'+esc(entry.kind||'')+'" title="'+esc(entry.url||'')+'"><span class="order">'+(index+1)+'</span>'+(chart?'<span class="chart-kind">SIZE CHART</span>':'')+'<img draggable="false" data-lightbox="'+esc(entry.url||'')+'" src="'+esc(alibabaThumb(entry.url||''))+'" alt="" title="View full size" loading="'+(chart?'eager':'lazy')+'" decoding="async" referrerpolicy="no-referrer"><label class="show"><input type="checkbox" data-media-visible '+(entry.visible!==false?'checked':'')+'> 展示</label><div class="controls"><button type="button" class="mini" data-media-up="'+index+'">←</button><button type="button" class="mini" data-media-down="'+index+'">→</button><button type="button" class="mini danger" data-remove-media="'+index+'">×</button></div></div>';}
 function poolCard(entry,index){return '<div class="media-card is-pool" data-pool-card="'+index+'" data-url="'+esc(entry.url||'')+'" title="'+esc(entry.url||'')+'"><img data-lightbox="'+esc(entry.url||'')+'" src="'+esc(alibabaThumb(entry.url||''))+'" alt="" title="View full size" loading="eager" decoding="async" referrerpolicy="no-referrer"><span class="pool-kind">'+esc(entry.kind||'1688')+'</span><button type="button" class="add-pool" data-add-pool="'+index+'">+ 加入 media</button></div>';}
 function swatchRow(entry,index){
-  const media=(current?.draft_payload?.media||[]).map((item)=>item.url).filter(Boolean);
+  const media=(current?.draft_payload?.media||[]).filter((item)=>!isSizeChartImage(item)).map((item)=>item.url).filter(Boolean);
   const selected=String(entry.imageUrl||'');
   const urls=[...new Set([...media, ...(selected?[selected]:[])])];
   const preview=selected?'<img class="swatch-preview" src="'+esc(alibabaThumb(selected))+'" alt="">':'<div class="swatch-empty-lg">No image</div>';
