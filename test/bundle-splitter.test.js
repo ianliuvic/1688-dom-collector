@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyRemovedSkus } from '../src/bundle-splitter.js';
+import { applyRemovedSkus, applyVariantDropPolicy } from '../src/bundle-splitter.js';
 
 test('applyRemovedSkus drops a variant by skuId and removes its orphaned size', () => {
   const product = {
@@ -41,4 +41,22 @@ test('applyRemovedSkus is a no-op without removals', () => {
   applyRemovedSkus(product, []);
   assert.equal(product.skus.length, 1);
   assert.equal(product.sizes.length, 1);
+});
+
+test('applyVariantDropPolicy keeps an image-colour placeholder the model named', () => {
+  const { kept, dropped } = applyVariantDropPolicy([
+    { source: '图片色', text: 'Tropical Floral', code: 'TROFLR', placeholder: true },
+  ]);
+  assert.deepEqual(kept.map((colour) => colour.text), ['Tropical Floral']);
+  assert.equal(dropped.length, 0);
+});
+
+test('applyVariantDropPolicy still drops seller chatter and unnamed variants', () => {
+  const { kept, dropped } = applyVariantDropPolicy([
+    { source: '现货 放心拍', text: 'Black' },
+    { source: '粉色', text: null },
+    { source: '黑色', text: 'Black' },
+  ]);
+  assert.deepEqual(kept.map((colour) => colour.text), ['Black']);
+  assert.deepEqual(dropped.map((entry) => entry.reason), ['placeholder_variant', 'no_usable_variant_name']);
 });

@@ -481,7 +481,10 @@ export async function classifyNonProductImages({ images, title = '', config }) {
  * A model placeholder flag alone never drops a real option (bundle listings
  * often use the colour dimension for garment types like 比基尼).
  */
-const CHATTER_RE = /(现货|包邮|联系客服|客服|备注|勿拍|随机|图片色|运费|差价|补差|速发|放心拍|留言|多款可选|尺码可选|规格)/;
+// "图片色" is deliberately NOT chatter: it means "colour as shown in the
+// pictures" and the normalizer names those options from image evidence. Treating
+// it as chatter silently dropped every single-colour product.
+const CHATTER_RE = /(现货|包邮|联系客服|客服|备注|勿拍|随机|运费|差价|补差|速发|放心拍|留言|多款可选|尺码可选|规格)/;
 
 export function applyVariantDropPolicy(colours) {
   const kept = [];
