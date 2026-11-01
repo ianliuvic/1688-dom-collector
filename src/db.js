@@ -1466,14 +1466,12 @@ export function createDatabase(databaseUrl) {
        AND publications.first_published_at IS NOT NULL
        AND publications.first_published_at >= $1::timestamptz
        AND publications.first_published_at < $2::timestamptz
-      JOIN LATERAL (
+      LEFT JOIN LATERAL (
         SELECT products.listing_time, products.category, products.image_url,
           shops.shop_name
         FROM shop_products products
         JOIN shop_profiles shops ON shops.id=products.shop_id
         WHERE products.offer_id=details.offer_id
-          AND products.availability_status='active'
-          AND products.ingestion_eligible=true
         ORDER BY products.last_crawled_at DESC
         LIMIT 1
       ) source ON true
