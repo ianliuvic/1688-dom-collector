@@ -491,17 +491,36 @@ export function createCollector({
 
     if (job.options?.mode === 'shop_mtop') {
       try {
-        await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+        let shopPageUrl = job.url;
+        await page.goto(shopPageUrl, { waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(5000);
-        const title = await page.title();
+        let title = await page.title();
         let bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
         let shopData = await parse1688Shop(page).catch(() => null);
         let memberId = job.options.memberId || shopData?.company?.memberId;
+        // 1688 now gates the legacy shop offer list (/page/offerlist.htm) behind a
+        // human-verification page for some sessions, while the shop's own
+        // navigation points at /page/newofferlist.htm (same shop, same offer
+        // list). When the legacy URL is challenged, load that sibling URL
+        // instead; no verification is solved, bypassed or replayed.
+        if (classifySession(page.url(), bodyText) === 'requires_auth') {
+          const legacy = new URL(job.url);
+          if (/^\/page\/offerlist\.htm$/i.test(legacy.pathname)) {
+            legacy.pathname = '/page/newofferlist.htm';
+            await page.goto(legacy.toString(), { waitUntil: 'domcontentloaded' });
+            await page.waitForTimeout(5000);
+            shopPageUrl = legacy.toString();
+            title = await page.title();
+            bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+            shopData = await parse1688Shop(page).catch(() => null);
+            memberId = job.options.memberId || shopData?.company?.memberId;
+          }
+        }
         // Some shops render no pageData on the offerlist page itself; fall back
         // to parsing the shop home (skipping captcha pages, which the classify
         // check below reports as requires_auth).
         if (!memberId && !/滑块|验证码|安全验证|异常访问/.test(bodyText)) {
-          await page.goto(new URL(job.url).origin + '/', { waitUntil: 'domcontentloaded' });
+          await page.goto(new URL(shopPageUrl).origin + '/', { waitUntil: 'domcontentloaded' });
           await page.waitForTimeout(4000);
           const homeText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
           const homeData = await parse1688Shop(page).catch(() => null);
@@ -509,7 +528,7 @@ export function createCollector({
           memberId = homeData?.company?.memberId ?? null;
           if (!memberId) bodyText = `${bodyText} ${homeText}`;
           if (memberId) {
-            await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+            await page.goto(shopPageUrl, { waitUntil: 'domcontentloaded' });
             await page.waitForTimeout(2500);
           }
         }
