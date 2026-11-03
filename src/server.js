@@ -41,6 +41,7 @@ import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
 import { auditSizeValues, sizeRankValue, sizeValuesFromDimensions } from './selection-size-audit.js';
 import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
   linkfoxExtrasForMerge } from './linkfox-1688.js';
+import { classifyLinkFoxListingStatus } from './source-status.js';
 import { MAX_OPTION_LABEL_LENGTH } from './option-overrides.js';
 import { SIZE_CHART_PRESETS, renderSizeChartPng } from './size-chart.js';
 
@@ -8782,46 +8783,146 @@ async function unpublishSplitSiblingPosts(productDetailId, targetStatus) {
   return results;
 }
 
-app.post('/api/product-details/:id/wordpress/unpublish', { preHandler: requireApiKey }, async (request, reply) => {
-  const detail = await db.getProductDetail(request.params.id);
-  if (!detail) return reply.code(404).send({ error: 'not_found' });
-  const targetStatus = request.body?.status === 'private' ? 'private' : 'draft';
+/**
+ * Move a collector-managed product's WordPress publication to a non-public
+ * status and queue the matching RAG deactivation. Shared by the manual
+ * unpublish route and the source-status reconciliation job.
+ */
+async function unpublishProductDetail(detail, { status = 'draft' } = {}) {
+  const targetStatus = status === 'private' ? 'private' : 'draft';
   const publication = await db.getWordPressPublication(detail.id);
   if (!publication?.wp_post_id) {
     const splitSiblings = await unpublishSplitSiblingPosts(detail.id, targetStatus);
     return { status: 'not_published', productDetailId: detail.id,
       ragDeactivationScheduled: false, splitSiblings };
   }
+  const wordpress = await setWordPressProductStatus({
+    postId: publication.wp_post_id, status: targetStatus, config,
+  });
+  const payload = { ...(publication.payload ?? {}), status: targetStatus };
+  const result = { ...(publication.result ?? {}), ...wordpress, status: targetStatus };
+  const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  const saved = await db.saveWordPressPublication(detail.id, {
+    translationId: publication.translation_id,
+    externalId: publication.external_id,
+    styleNo: publication.style_no,
+    wpPostId: publication.wp_post_id,
+    wpUrl: publication.wp_url,
+    wpEditUrl: publication.wp_edit_url,
+    wpStatus: targetStatus,
+    syncHash,
+    payload,
+    result,
+    lastError: null,
+  });
+  const splitSiblings = await unpublishSplitSiblingPosts(detail.id, targetStatus);
+  const rag = await scheduleProductRagSync(detail.id, { trigger: 'source_delisted' });
+  return {
+    status: 'unpublished', productDetailId: detail.id,
+    wordpressStatus: saved.wp_status, ragDeactivationScheduled: rag.scheduled, splitSiblings,
+  };
+}
+
+app.post('/api/product-details/:id/wordpress/unpublish', { preHandler: requireApiKey }, async (request, reply) => {
+  const detail = await db.getProductDetail(request.params.id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
   try {
-    const wordpress = await setWordPressProductStatus({
-      postId: publication.wp_post_id, status: targetStatus, config,
-    });
-    const payload = { ...(publication.payload ?? {}), status: targetStatus };
-    const result = { ...(publication.result ?? {}), ...wordpress, status: targetStatus };
-    const syncHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-    const saved = await db.saveWordPressPublication(detail.id, {
-      translationId: publication.translation_id,
-      externalId: publication.external_id,
-      styleNo: publication.style_no,
-      wpPostId: publication.wp_post_id,
-      wpUrl: publication.wp_url,
-      wpEditUrl: publication.wp_edit_url,
-      wpStatus: targetStatus,
-      syncHash,
-      payload,
-      result,
-      lastError: null,
-    });
-    const splitSiblings = await unpublishSplitSiblingPosts(detail.id, targetStatus);
-    const rag = await scheduleProductRagSync(detail.id, { trigger: 'source_delisted' });
-    return {
-      status: 'unpublished', productDetailId: detail.id,
-      wordpressStatus: saved.wp_status, ragDeactivationScheduled: rag.scheduled, splitSiblings,
-    };
+    return await unpublishProductDetail(detail, { status: request.body?.status });
   } catch (error) {
     request.log.error({ err: error, productDetailId: detail.id }, 'WordPress unpublish failed');
     return reply.code(502).send({ error: 'wordpress_unpublish_failed', message: error.message });
   }
+});
+
+// ---- Non-shop source status (LinkFox offer status) -------------------------
+// Captures with no shop_products row are invisible to the daily shop scans.
+// Their 1688 listing state is checked per offer through the LinkFox gateway
+// ("published" is live, e.g. "member expired" is off shelf); a delisted offer
+// with a live WordPress publication is moved to draft and its RAG entry
+// deactivated through the normal unpublish flow.
+const sourceStatusJobs = new Map();
+
+app.get('/api/product-status/summary', { preHandler: requireApiKey }, async () => db.summarizeNonShopProducts());
+
+app.get('/api/product-status/candidates', { preHandler: requireApiKey }, async (request) => {
+  const limit = Math.min(Math.max(Number(request.query?.limit) || 20, 1), 200);
+  const rows = await db.listNonShopStatusCandidates({ limit, staleHours: 0 });
+  return { count: rows.length, items: rows };
+});
+
+app.post('/api/product-status/refresh', { preHandler: requireApiKey }, async (request, reply) => {
+  if (!config.linkfoxApiKey) {
+    return reply.code(503).send({ error: 'linkfox_not_configured' });
+  }
+  const body = request.body ?? {};
+  const limit = Math.min(Math.max(Number(body.limit) || 50, 1), 200);
+  const staleHours = Number.isFinite(Number(body.staleHours)) ? Math.max(Number(body.staleHours), 0) : 20;
+  const dryRun = body.dryRun === true;
+  const candidates = await db.listNonShopStatusCandidates({
+    limit, staleHours, onlyPublished: body.onlyPublished === true, ids: body.ids,
+  });
+  const job = {
+    id: crypto.randomUUID(), status: 'running', dryRun,
+    total: candidates.length, checked: 0, active: 0, delisted: 0, relisted: 0,
+    unpublished: 0, unknown: 0, failed: 0, results: [], errors: [],
+    createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), completedAt: null,
+  };
+  sourceStatusJobs.set(job.id, job);
+  trimTerminalJobs(sourceStatusJobs);
+  (async () => {
+    try {
+      for (const row of candidates) {
+        try {
+          if (await db.isOfferBlocked(row.offer_id).catch(() => null)) {
+            job.failed += 1;
+            job.errors.push({ productDetailId: row.id, error: 'blocked_offer' });
+            continue;
+          }
+          const raw = await fetchLinkFoxProductDetail({ offerId: row.offer_id }, config);
+          const classified = classifyLinkFoxListingStatus(raw);
+          await db.saveProductSourceStatus(row.id, {
+            status: classified.status,
+            soldOut: classified.soldOut,
+            detail: { state: classified.state, source: 'linkfox' },
+          });
+          job.checked += 1;
+          if (classified.state === 'active') {
+            job.active += 1;
+            if (row.source_status && row.source_status !== 'published') job.relisted += 1;
+          } else if (classified.state === 'delisted') {
+            job.delisted += 1;
+            if (!dryRun && row.wp_status === 'publish') {
+              const detail = await db.getProductDetail(row.id);
+              await unpublishProductDetail(detail, { status: 'draft' });
+              job.unpublished += 1;
+            }
+          } else {
+            job.unknown += 1;
+          }
+          job.results.push({
+            productDetailId: row.id, styleNo: row.style_no ?? null,
+            state: classified.state, status: classified.status,
+          });
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        } catch (error) {
+          job.failed += 1;
+          job.errors.push({ productDetailId: row.id, error: String(error?.message || error).slice(0, 160) });
+        }
+      }
+      job.status = 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.error = String(error?.message || error).slice(0, 300);
+      app.log.error({ err: error, jobId: job.id }, 'product status refresh failed');
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  })();
+  return reply.code(202).send(job);
+});
+
+app.get('/api/product-status/jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  return sourceStatusJobs.get(request.params.id) ?? reply.code(404).send({ error: 'not_found' });
 });
 
 app.post('/api/product-details/:id/wordpress/preview', { preHandler: requireApiKey }, async (request, reply) => {

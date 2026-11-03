@@ -216,6 +216,10 @@ export function createDatabase(databaseUrl) {
       ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_checked_at timestamptz;
       ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_manual_status text;
       ALTER TABLE product_details ADD COLUMN IF NOT EXISTS bundle_manual_at timestamptz;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS source_status text;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS source_status_sold_out text;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS source_status_detail jsonb NOT NULL DEFAULT '{}'::jsonb;
+      ALTER TABLE product_details ADD COLUMN IF NOT EXISTS source_status_checked_at timestamptz;
       CREATE INDEX IF NOT EXISTS product_details_bundle_status_idx
         ON product_details (bundle_status);
       CREATE INDEX IF NOT EXISTS product_details_gallery_fingerprint_idx
@@ -3874,6 +3878,59 @@ export function createDatabase(databaseUrl) {
     return result.rows;
   }
 
+  /**
+   * Captures that no shop scan can reconcile: the offer has no shop_products
+   * row. Their 1688 listing state is checked through the LinkFox gateway.
+   */
+  async function listNonShopStatusCandidates({ limit = 50, staleHours = 20, onlyPublished = false, ids = null } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
+    const stale = Math.min(Math.max(Number(staleHours) || 0, 0), 720);
+    const idList = Array.isArray(ids) && ids.length
+      ? ids.map((value) => Number(value)).filter(Number.isInteger)
+      : null;
+    const params = [safeLimit, String(stale)];
+    let sql = `SELECT details.id, details.offer_id, details.title, details.source_status,
+        details.source_status_checked_at,
+        publications.wp_status, publications.style_no, publications.wp_post_id
+      FROM product_details details
+      LEFT JOIN product_wordpress_publications publications
+        ON publications.product_detail_id = details.id
+      WHERE details.offer_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM shop_products products WHERE products.offer_id = details.offer_id)
+        ${stale > 0 ? `AND (details.source_status_checked_at IS NULL
+             OR details.source_status_checked_at < now() - ($2::text || ' hours')::interval)` : ''}
+        ${onlyPublished ? "AND publications.wp_status = 'publish'" : ''}
+        ${idList ? 'AND details.id = ANY($3::bigint[])' : ''}
+      ORDER BY (publications.wp_status = 'publish') DESC NULLS LAST, details.last_crawled_at DESC
+      LIMIT $1`;
+    if (idList) params.push(idList);
+    const result = await pool.query(sql, params);
+    return result.rows;
+  }
+
+  async function summarizeNonShopProducts() {
+    const result = await pool.query(`SELECT count(*)::int AS total,
+        count(*) FILTER (WHERE publications.wp_status = 'publish')::int AS published,
+        count(*) FILTER (WHERE details.source_status IS NOT NULL
+          AND details.source_status <> 'published')::int AS delisted,
+        count(*) FILTER (WHERE details.source_status IS NULL)::int AS unchecked
+      FROM product_details details
+      LEFT JOIN product_wordpress_publications publications
+        ON publications.product_detail_id = details.id
+      WHERE details.offer_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM shop_products products WHERE products.offer_id = details.offer_id)`);
+    return result.rows[0];
+  }
+
+  async function saveProductSourceStatus(id, { status, soldOut = null, detail = null, checkedAt = null } = {}) {
+    await pool.query(`UPDATE product_details
+      SET source_status=$2, source_status_sold_out=$3, source_status_detail=$4::jsonb,
+          source_status_checked_at=COALESCE($5, now())
+      WHERE id=$1`, [
+      id, status, soldOut, JSON.stringify(detail ?? {}), checkedAt,
+    ]);
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -3883,6 +3940,7 @@ export function createDatabase(databaseUrl) {
     shopCapturedProductIds, deleteShopProfile,
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
+    listNonShopStatusCandidates, summarizeNonShopProducts, saveProductSourceStatus,
     updateProductLinkFoxData, deleteProductDetail,
     listProductCatalog, listDetailsMissingBundleAudit, saveProductBundleStatus,
     setProductBundleManual, listBundleRecheckRows,
