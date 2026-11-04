@@ -1677,7 +1677,7 @@ const selectionFieldSummary = (key, value) => {
   if (key === 'tags') return Array.isArray(value) && value.length ? value.join(', ') : 'No tags';
   if (key === 'pricingRule') {
     const tiers = Array.isArray(value?.tiers) ? value.tiers : [];
-    return `${tiers.length} tiers · sample USD ${Number(value?.sampleMarkupUsd ?? 2.5).toFixed(2)}${tiers.length ? ' · '+tiers.map((tier) => `${tier.label || tier.minQuantity}=${tier.cnyMarkup ?? 0}`).join(', ') : ''}`;
+    return `${tiers.length} tiers · sample USD ${Number(value?.sampleMarkupUsd ?? 1).toFixed(2)}${tiers.length ? ' · '+tiers.map((tier) => `${tier.label || tier.minQuantity}=${tier.cnyMarkup ?? 0}`).join(', ') : ''}`;
   }
   return value === null || value === undefined || value === '' ? '—' : String(value).slice(0, 180);
 };

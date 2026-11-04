@@ -268,7 +268,7 @@ function pricingEditorHtml(source,draft){
   const sourceMax=Number(rule.sourceMaxPrice??source?.sourcePriceMax??0);
   const rate=Number(rule.exchangeRate??6.5)||6.5;
   const tiers=(Array.isArray(rule.tiers)&&rule.tiers.length?rule.tiers:(Array.isArray(draft?.priceTiers)?draft.priceTiers:[])).slice().sort((left,right)=>Number(left.minQuantity||0)-Number(right.minQuantity||0));
-  const sampleMarkup=Number(rule.sampleMarkupUsd??2.5);
+  const sampleMarkup=Number(rule.sampleMarkupUsd??1.0);
   const first=tiers[0];
   const sampleMax=first?Math.max(1,Number(first.minQuantity)-1):49;
   const formula=rule.formula?String(rule.formula):'(source maximum CNY price + tier markup) / exchange rate';
@@ -368,7 +368,7 @@ function readDraft(){
   const exchangeRate=Number(baseRule.exchangeRate??6.5)||6.5;
   const markupInputs=[...document.querySelectorAll('[data-tier-markup]')];
   const sampleInput=document.querySelector('[data-sample-markup]');
-  d.pricingRule={...baseRule,sampleMarkupUsd:num(sampleInput?.value)??baseRule.sampleMarkupUsd??2.5,tiers:(Array.isArray(baseRule.tiers)?baseRule.tiers:[]).map((tier,index)=>({...tier,cnyMarkup:num(markupInputs[index]?.value)??tier.cnyMarkup??0}))};
+  d.pricingRule={...baseRule,sampleMarkupUsd:num(sampleInput?.value)??baseRule.sampleMarkupUsd??1.0,tiers:(Array.isArray(baseRule.tiers)?baseRule.tiers:[]).map((tier,index)=>({...tier,cnyMarkup:num(markupInputs[index]?.value)??tier.cnyMarkup??0}))};
   d.priceTiers=d.pricingRule.tiers.map((tier)=>({label:tier.label,minQuantity:Number(tier.minQuantity),maxQuantity:tier.maxQuantity??null,price:(sourceMax>0?Math.round(((sourceMax+Number(tier.cnyMarkup||0))/exchangeRate+Number.EPSILON)*100)/100:Number(tier.price||0))}));
   d.currency=current?.draft_payload?.currency||'USD';
   d.moq=d.priceTiers[0]?.minQuantity??null;

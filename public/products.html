@@ -1745,6 +1745,13 @@ function renderPublishPreview(id, data){
     : '<div class="pp-card"><div class="pp-card-title">英文标题与描述</div><div class="pp-muted">尚未翻译：发布前需先执行翻译（POST /api/product-details/' + id + '/translations）。</div></div>';
 
   const pricing = data.price.pricing;
+  const baseTierPrice = pricing && Array.isArray(pricing.tiers) && pricing.tiers.length
+    ? Number(pricing.tiers[0].price) : null;
+  const inStockPricingRow = Number.isFinite(baseTierPrice)
+    ? '<tr><th>现货曲线（1–49 件）</th><td>1 件 $' + (baseTierPrice + 1).toFixed(2)
+      + ' · 49 件 $' + (baseTierPrice + 1 / 49).toFixed(2)
+      + ' <span class="pp-muted">(首档 +$1.00，线性递减到 50 件 $' + baseTierPrice.toFixed(2) + ')</span></td></tr>'
+    : '';
   const pricingCard = '<div class="pp-card"><div class="pp-card-title">定价（确定性公式）</div>'
     + '<table class="pp-table"><tbody>'
     + '<tr><th>1688 价格</th><td>' + fmtMoney(data.price.sourceMin, data.price.currency) + ' – ' + fmtMoney(data.price.sourceMax, data.price.currency)
@@ -1753,6 +1760,7 @@ function renderPublishPreview(id, data){
     + (pricing
       ? pricing.tiers.map((tier) => '<tr><th>' + esc(tier.label) + '</th><td>$' + Number(tier.price).toFixed(2) + ' <span class="pp-muted">(源价+' + tier.cny_markup + ')/6.5</span></td></tr>').join('')
       : '<tr><th>美元价</th><td class="pp-muted">缺少可信价格，无法计算</td></tr>')
+    + inStockPricingRow
     + '<tr><th>样品价 / MOQ</th><td>$' + data.price.samplePrice + ' · ' + esc(data.price.moqText) + '</td></tr>'
     + '<tr><th>零售可售</th><td>' + (data.price.retailAvailable ? '是（全部变体有货，页面显示 2× 首档价）' : (data.price.stockKnown ? '否（存在 0 库存）' : '库存未知')) + '</td></tr>'
     + '</tbody></table></div>';
