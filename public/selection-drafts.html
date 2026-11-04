@@ -141,7 +141,8 @@ function renderList(){
     const style=styleOf(row); const title=titleOf(row); const cover=coverOf(row);
     const thumb=cover?'<img class="draft-thumb" src="'+esc(cover)+'" alt="" loading="lazy" referrerpolicy="no-referrer">':'<span class="draft-thumb draft-thumb-empty">—</span>';
     const id=String(row.product_detail_id);
-    return '<div class="draft-row"><input type="checkbox" data-select-draft="'+esc(id)+'"'+(selectedDraftIds.has(id)?' checked':'')+' aria-label="选择 '+esc(style||id)+'"><button type="button" class="draft-item'+(id===String(activeId)?' on':'')+'" data-id="'+esc(id)+'">'+thumb+'<span class="draft-copy"><strong>'+esc(style||('#'+row.product_detail_id))+' · '+esc(title)+'</strong><small>'+esc(row.shop_name||'未知店铺')+' · '+statusLabel(row.status)+(row.portal_product_id?' · Portal '+esc(row.portal_product_id):'')+(row.last_error?' · '+esc(String(row.last_error).slice(0,45)):'')+'</small></span></button></div>';
+    const kind = String(row.draft_kind || row.source_kind || '') === 'split' ? ' · 拆分产品' : '';
+    return '<div class="draft-row"><input type="checkbox" data-select-draft="'+esc(id)+'"'+(selectedDraftIds.has(id)?' checked':'')+' aria-label="选择 '+esc(style||id)+'"><button type="button" class="draft-item'+(id===String(activeId)?' on':'')+'" data-id="'+esc(id)+'">'+thumb+'<span class="draft-copy"><strong>'+esc(style||('#'+row.product_detail_id))+' · '+esc(title)+'</strong><small>'+esc(row.shop_name||'未知店铺')+' · '+statusLabel(row.status)+kind+(row.portal_product_id?' · Portal '+esc(row.portal_product_id):'')+(row.last_error?' · '+esc(String(row.last_error).slice(0,45)):'')+'</small></span></button></div>';
   }).join(''):'<div class="empty">还没有加入 selection 的产品</div>';
   updateBatchControls();
 }

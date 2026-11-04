@@ -864,6 +864,12 @@ function renderSplitPanel(id, plan){
             + '<button type="button" class="sp-pub-save" style="margin-left:8px" data-split-wp-toggle="' + id + '" data-split-wp-product="' + esc(String(product.id ?? '')) + '" data-split-wp-next="' + (content.wp.status === 'publish' ? 'draft' : 'publish') + '"'
             + ' title="' + (content.wp.status === 'publish' ? '取消发布：转为草稿，前台页面不可访问（可随时再发布）' : '发布到 WordPress：前台立即可访问') + '">'
             + (content.wp.status === 'publish' ? '取消发布' : '发布') + '</button>'
+            + (content.wp.styleNo
+              ? '<button type="button" class="sp-pub-save" style="margin-left:8px" data-split-selection="' + id + '" data-split-selection-product="' + esc(String(product.id ?? '')) + '"'
+                + (content.selectionState?.id ? ' data-selection-id="' + esc(String(content.selectionState.id)) + '"' : '')
+                + ' title="只把这个拆分产品加入 Portal Selection，不加入整个捆绑">'
+                + (content.selectionState?.id ? '管理 selection' : '加入 selection') + '</button>'
+              : '')
             + '<span class="sp-wp-status muted" style="font-size:11px;margin-left:6px"></span>'
             + '</div>'
           : '')
@@ -3126,6 +3132,41 @@ function wireWpSync(){
   document.addEventListener('click', async (e) => {
     const img = e.target.closest('img.zoomable');
     if (img) { e.preventDefault(); openLightbox(img.getAttribute('src')); return; }
+    const splitSelection = e.target.closest('button[data-split-selection]');
+    if (splitSelection) {
+      e.preventDefault();
+      const bundleId = String(splitSelection.dataset.splitSelection || '');
+      const splitProductId = String(splitSelection.dataset.splitSelectionProduct || '');
+      const existing = String(splitSelection.dataset.selectionId || '');
+      if (existing) { window.location.href = '/selection?draft=' + encodeURIComponent(existing); return; }
+      if (!bundleId || !splitProductId) return;
+      splitSelection.disabled = true;
+      splitSelection.textContent = '加入中…';
+      try {
+        const response = await fetch('/api/product-details/' + encodeURIComponent(bundleId)
+          + '/split-products/' + encodeURIComponent(splitProductId) + '/selection', {
+          method: 'POST', headers: { accept: 'application/json' },
+        });
+        const body = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(body?.message || body?.error || ('HTTP ' + response.status));
+        const key = String(body?.productDetailId ?? body?.draft?.product_detail_id ?? '');
+        if (!key) throw new Error('服务器没有返回 selection 草稿 ID');
+        splitSelection.dataset.selectionId = key;
+        splitSelection.disabled = false;
+        splitSelection.textContent = '管理 selection';
+        splitSelection.title = '已加入 Portal selection；点击打开草稿';
+        const content = (SPLIT_CONTENTS.get(String(bundleId))?.products ?? [])
+          .find((entry) => String(entry?.id ?? '') === splitProductId);
+        if (content) content.selectionState = { id: key, status: body?.draft?.status || 'DRAFT' };
+        const status = document.getElementById('split-status-' + bundleId);
+        if (status) status.textContent = '已加入 selection：' + (content?.title || splitProductId);
+      } catch (error) {
+        splitSelection.disabled = false;
+        splitSelection.textContent = '加入 selection';
+        window.alert('加入 selection 失败：' + (error?.message || error));
+      }
+      return;
+    }
     const selection = e.target.closest('button[data-selection-id]');
     if (selection) {
       const id = String(selection.dataset.selectionId);

@@ -4,7 +4,7 @@ import path from 'node:path';
 import Fastify from 'fastify';
 import fastifyHttpProxy from '@fastify/http-proxy';
 import sharp from 'sharp';
-import { createDatabase } from './db.js';
+import { createDatabase, isSplitSelectionId } from './db.js';
 import { createCollector, is1688ShopUrl, isAllowed1688Url } from './collector.js';
 import { analyzeProductImage } from './vision.js';
 import { analyzeGalleryImages, auditProductGallery } from './image-cleaner.js';
@@ -1201,6 +1201,10 @@ async function enrichSelectionDraftImageSources(draft, detail) {
 async function buildSelectionSourcePayload(productDetailId) {
   const id = Number(productDetailId);
   if (!Number.isInteger(id) || id <= 0) return null;
+  if (isSplitSelectionId(id)) {
+    const row = await db.getSplitSelectionDraftRef(id);
+    return row ? buildSplitSelectionSourcePayload(row.bundle_product_detail_id, row.split_product_id, id) : null;
+  }
   const [detail, publication, translation, normalization] = await Promise.all([
     db.getProductDetail(id),
     db.getWordPressPublication(id),
@@ -1400,6 +1404,201 @@ async function buildSelectionSourcePayload(productDetailId) {
       capturedAt: detail.last_crawled_at ?? null,
     },
   };
+}
+
+function splitSelectionImageUrl(image) {
+  if (!image) return null;
+  const base = imagePublicPath(image.storage_path);
+  return base ? `${config.publicBaseUrl}${base}` : (image.source_url || null);
+}
+
+/**
+ * Build a Selection source for one split product. A split product is stored in
+ * product_split_contents (derived from its bundle), so it cannot use the normal
+ * product-detail builder. Pricing/weight/category are inherited from the bundle,
+ * while copy, style number, images, colours and SKUs come from the split itself.
+ */
+async function buildSplitSelectionSourcePayload(bundleProductDetailId, splitProductId, selectionId = null) {
+  const bundleId = Number(bundleProductDetailId);
+  const splitId = String(splitProductId ?? '').trim();
+  if (!Number.isInteger(bundleId) || bundleId <= 0 || !splitId) return null;
+  const [bundle, contents, bundleSource] = await Promise.all([
+    db.getProductDetail(bundleId),
+    db.getSplitContents(bundleId),
+    buildSelectionSourcePayload(bundleId),
+  ]);
+  const products = Array.isArray(contents?.result?.products) ? contents.result.products : [];
+  const index = products.findIndex((product) => String(product?.id ?? '') === splitId);
+  const product = products[index];
+  if (!bundle || !bundleSource || !product) return null;
+  const wp = product.wp && typeof product.wp === 'object' ? product.wp : {};
+  const fallbackStyle = bundleSource.styleNumber ? `${bundleSource.styleNumber}S${index + 1}` : '';
+  const styleNumber = String(wp.styleNo || fallbackStyle || '').trim();
+  if (!styleNumber) return null;
+
+  const imageById = new Map((bundle.images ?? []).map((image) => [String(image.id), image]));
+  const media = [];
+  const mediaUrls = new Set();
+  const pushMedia = (url, sourceUrl = null, kind = 'split image') => {
+    const normalized = normalizedImageUrl(url);
+    if (!url || !normalized || mediaUrls.has(normalized)) return;
+    mediaUrls.add(normalized);
+    media.push({
+      url,
+      sourceUrl: sourceUrl || null,
+      alt: null,
+      visible: true,
+      sortOrder: media.length,
+      kind,
+    });
+  };
+  const refs = product.imageRefs && typeof product.imageRefs === 'object' ? product.imageRefs : {};
+  const imageIds = Array.isArray(refs.imageIds) && refs.imageIds.length
+    ? refs.imageIds : (Array.isArray(product.imageIds) ? product.imageIds : []);
+  const imageUrls = Array.isArray(refs.imageUrls) && refs.imageUrls.length
+    ? refs.imageUrls : (Array.isArray(product.imageUrls) ? product.imageUrls : []);
+  for (const imageId of imageIds) {
+    const image = imageById.get(String(imageId));
+    if (image) pushMedia(splitSelectionImageUrl(image), image.source_url || null);
+  }
+  for (const url of imageUrls) {
+    if (url) pushMedia(String(url), String(url), 'split detail image');
+  }
+
+  const colours = Array.isArray(product.colours) ? product.colours : [];
+  const colourLabels = new Map();
+  const swatches = [];
+  const swatchUrls = new Map();
+  for (const colour of colours) {
+    const value = String(colour?.text || colour?.source || '').trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    colourLabels.set(key, value);
+    if (colour?.source) colourLabels.set(String(colour.source).toLowerCase(), value);
+    const image = imageById.get(String(colour?.swatchImageId ?? ''));
+    let imageUrl = splitSelectionImageUrl(image);
+    const thumb = String(colour?.thumb || '').trim();
+    if (!imageUrl && thumb) imageUrl = /^https:\/\//i.test(thumb) ? thumb : `${config.publicBaseUrl}${thumb.startsWith('/') ? '' : '/'}${thumb}`;
+    imageUrl = imageUrl || media[0]?.url || null;
+    swatchUrls.set(key, imageUrl);
+    swatches.push({ value, color: null, imageUrl });
+  }
+
+  const variants = (Array.isArray(product.skus) ? product.skus : []).map((sku, index) => {
+    const rawColour = String(sku?.colour || '').trim();
+    const color = colourLabels.get(rawColour.toLowerCase()) || rawColour;
+    const size = String(sku?.sizeText || sku?.size || '').trim();
+    const swatchUrl = swatchUrls.get(color.toLowerCase()) || swatchUrls.get(rawColour.toLowerCase()) || null;
+    const mediaImage = media.find((entry) => swatchUrl && normalizedImageUrl(entry.url) === normalizedImageUrl(swatchUrl))
+      || media.find((entry) => swatchUrl && normalizedImageUrl(entry.sourceUrl) === normalizedImageUrl(swatchUrl))
+      || media[0] || null;
+    const optionValues = {};
+    if (color) optionValues.Color = color;
+    if (size) optionValues.Size = size;
+    return {
+      sourceRowKey: sku?.skuId != null ? String(sku.skuId) : (sku?.sku ? String(sku.sku) : null),
+      supplierSku: String(sku?.sku || `split-${splitId}-${index + 1}`),
+      title: [color, size].filter(Boolean).join(' / ') || String(sku?.sku || `Variant ${index + 1}`),
+      optionValues,
+      imageUrl: mediaImage?.url || null,
+      sourcePrice: Number.isFinite(Number(sku?.price)) ? Number(sku.price) : null,
+      stock: Number.isFinite(Number(sku?.stock)) ? Number(sku.stock) : null,
+      sortOrder: index,
+    };
+  });
+
+  const mediaPool = [...media];
+  const poolUrls = new Set(media.map((entry) => normalizedImageUrl(entry.url)));
+  for (const swatch of swatches) {
+    const key = normalizedImageUrl(swatch.imageUrl);
+    if (!swatch.imageUrl || !key || poolUrls.has(key)) continue;
+    poolUrls.add(key);
+    mediaPool.push({
+      url: swatch.imageUrl,
+      sourceUrl: null,
+      alt: null,
+      visible: false,
+      sortOrder: mediaPool.length,
+      kind: 'split swatch',
+    });
+  }
+
+  // A split has its own source maximum (the price of its own SKUs), not the
+  // bundle maximum. Recompute the inherited tier prices from that maximum so
+  // Selection opens with a sane sample/volume price instead of the bundle's.
+  const splitPrices = (Array.isArray(product.skus) ? product.skus : [])
+    .map((sku) => Number(sku?.price)).filter((price) => Number.isFinite(price) && price > 0);
+  const splitSourceMin = splitPrices.length ? Math.min(...splitPrices) : bundleSource.sourcePriceMin;
+  const splitSourceMax = splitPrices.length ? Math.max(...splitPrices) : bundleSource.sourcePriceMax;
+  const exchangeRate = Number(bundleSource.pricingRule?.exchangeRate ?? 6.5) || 6.5;
+  let baseTiers = Array.isArray(bundleSource.pricingRule?.tiers) && bundleSource.pricingRule.tiers.length
+    ? bundleSource.pricingRule.tiers
+    : (Array.isArray(bundleSource.priceTiers) ? bundleSource.priceTiers : []);
+  if (!baseTiers.length) {
+    try {
+      baseTiers = buildWearHongxiuPricing(bundle, { sourceMaxOverride: splitSourceMax }).tiers;
+    } catch {
+      baseTiers = [];
+    }
+  }
+  const pricingRule = {
+    ...(bundleSource.pricingRule || {}),
+    formula: bundleSource.pricingRule?.formula || '(source maximum CNY price + tier markup) / exchange rate',
+    sourceMaxPrice: splitSourceMax,
+    exchangeRate,
+    sampleMarkupUsd: bundleSource.pricingRule?.sampleMarkupUsd ?? 1,
+    tiers: baseTiers.map((tier) => ({
+      ...tier,
+      price: splitSourceMax > 0
+        ? Math.round(((splitSourceMax + Number(tier.cnyMarkup || 0)) / exchangeRate + Number.EPSILON) * 100) / 100
+        : Number(tier.price || 0),
+    })),
+  };
+  const priceTiers = pricingRule.tiers.map((tier, index) => ({
+    ...tier,
+    sortOrder: index,
+    price: splitSourceMax > 0
+      ? Math.round(((splitSourceMax + Number(tier.cnyMarkup || 0)) / exchangeRate + Number.EPSILON) * 100) / 100
+      : Number(tier.price || 0),
+  }));
+  const tierPrices = priceTiers.map((tier) => Number(tier.price)).filter((price) => Number.isFinite(price) && price >= 0);
+
+  return {
+    ...bundleSource,
+    styleNumber,
+    title: String(product.title || wp.title || product.name || bundleSource.title || '').trim(),
+    description: String(product.description || wp.description || bundleSource.description || ''),
+    category: wp.categoryName || bundleSource.category || null,
+    tags: Array.isArray(wp.tags) ? wp.tags.filter((tag) => typeof tag === 'string') : [],
+    sourcePriceMin: splitSourceMin,
+    sourcePriceMax: splitSourceMax,
+    pricingRule,
+    priceTiers,
+    priceMin: tierPrices.length ? Math.min(...tierPrices) : bundleSource.priceMin,
+    priceMax: tierPrices.length ? Math.max(...tierPrices) : bundleSource.priceMax,
+    moq: priceTiers[0]?.minQuantity ?? bundleSource.moq,
+    variants,
+    media,
+    mediaPool,
+    swatches,
+    sourceUrl: wp.url || bundleSource.sourceUrl || bundle.canonical_url || bundle.source_url || null,
+    source: {
+      productDetailId: selectionId,
+      bundleProductDetailId: bundleId,
+      splitProductId: splitId,
+      offerId: bundle.offer_id ?? null,
+      wpPostId: wp.postId ?? null,
+      wpUrl: wp.url ?? null,
+      capturedAt: bundle.last_crawled_at ?? null,
+    },
+  };
+}
+
+/** Media/detail helper: split selection drafts use their bundle's captured images. */
+async function getSelectionSourceDetail(selectionId) {
+  if (!isSplitSelectionId(selectionId)) return db.getProductDetail(selectionId);
+  const row = await db.getSplitSelectionDraftRef(selectionId);
+  return row ? db.getProductDetail(row.bundle_product_detail_id) : null;
 }
 
 const selectionIsLocalImage = (url) => {
@@ -2265,6 +2464,12 @@ app.get('/api/product-details/:id/split-content', { preHandler: requireDashboard
   // instead of the generation-time refs (which repair jobs can rewrite).
   const publishSets = {};
   const products = Array.isArray(record?.result?.products) ? record.result.products : [];
+  const selectionRows = products.length ? await db.listSplitSelectionDraftsForBundle(id) : [];
+  const selectionByProduct = new Map(selectionRows.map((row) => [String(row.split_product_id), {
+    id: row.product_detail_id,
+    status: row.status,
+    portalProductId: row.portal_product_id || null,
+  }]));
   if (products.length) {
     const detail = await db.getProductDetail(id);
     for (const product of products) {
@@ -2286,7 +2491,15 @@ app.get('/api/product-details/:id/split-content', { preHandler: requireDashboard
   }
   return {
     productDetailId: id,
-    result: record?.result ?? null,
+    result: record?.result
+      ? {
+        ...record.result,
+        products: products.map((product) => ({
+          ...product,
+          selectionState: selectionByProduct.get(String(product?.id ?? '')) ?? null,
+        })),
+      }
+      : null,
     model: record?.model ?? null,
     updatedAt: record?.updated_at ?? null,
     publishSets,
@@ -7670,7 +7883,7 @@ app.post('/api/selection/products/:id/materialize-image', { preHandler: requireD
   const url = String(request.body?.url || '').trim();
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   if (!/^https:\/\//i.test(url) || url.length > 2000) return reply.code(400).send({ error: 'invalid_image_url' });
-  const detail = await db.getProductDetail(id);
+  const detail = await getSelectionSourceDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   try {
     const localUrl = await materializeSelectionImage(detail, url);
@@ -7686,7 +7899,7 @@ app.post('/api/selection/products/:id/upload-image', { preHandler: requireDashbo
   const contentType = String(request.body?.contentType || '').toLowerCase();
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
   if (!/^image\/(jpeg|png|webp|gif)$/.test(contentType)) return reply.code(400).send({ error: 'invalid_image_type' });
-  const detail = await db.getProductDetail(id);
+  const detail = await getSelectionSourceDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   let bytes;
   try { bytes = Buffer.from(dataBase64.replace(/^data:[^;]+;base64,/i, ''), 'base64'); } catch { return reply.code(400).send({ error: 'invalid_image_data' }); }
@@ -7721,7 +7934,7 @@ app.get('/api/selection/size-chart-presets', { preHandler: requireDashboardOrApi
 app.post('/api/selection/products/:id/size-chart', { preHandler: requireDashboardOrApiKey, bodyLimit: 512 * 1024 }, async (request, reply) => {
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
-  const detail = await db.getProductDetail(id);
+  const detail = await getSelectionSourceDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   let rendered;
   try {
@@ -7813,6 +8026,9 @@ app.get('/api/selection/drafts', { preHandler: requireDashboardOrApiKey }, async
 app.post('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  if (isSplitSelectionId(id)) {
+    return reply.code(400).send({ error: 'split_selection_requires_split_endpoint' });
+  }
   const source = await buildSelectionSourcePayload(id);
   if (!source) return reply.code(404).send({ error: 'not_found' });
   const existing = await db.getSelectionDraft(id);
@@ -7830,6 +8046,61 @@ app.post('/api/selection/drafts/:id', { preHandler: requireDashboardOrApiKey }, 
   } catch (error) {
     request.log.warn({ err: error, selectionId: id }, 'selection variant image setup failed');
     return reply.code(201).send({ draft: created });
+  }
+});
+
+// Add only one split product from a bundle to Selection. The parent bundle and
+// its other split products are untouched; the split gets its own source payload,
+// style number and Portal publication lifecycle.
+app.post('/api/product-details/:id/split-products/:splitProductId/selection', { preHandler: requireDashboardOrApiKey }, async (request, reply) => {
+  const bundleId = Number(request.params.id);
+  const splitProductId = String(request.params.splitProductId || '').trim();
+  if (!Number.isInteger(bundleId) || bundleId <= 0 || !splitProductId) {
+    return reply.code(400).send({ error: 'invalid_split_product' });
+  }
+  if (splitProductId.length > 120) return reply.code(400).send({ error: 'invalid_split_product' });
+  const [bundle, contents] = await Promise.all([
+    db.getProductDetail(bundleId),
+    db.getSplitContents(bundleId),
+  ]);
+  if (!bundle) return reply.code(404).send({ error: 'not_found' });
+  const product = (Array.isArray(contents?.result?.products) ? contents.result.products : [])
+    .find((entry) => String(entry?.id ?? '') === splitProductId);
+  if (!product) return reply.code(404).send({ error: 'split_product_not_found' });
+  const existing = await db.getSplitSelectionDraftByRef(bundleId, splitProductId);
+  if (existing) {
+    return reply.code(200).send({ draft: existing, productDetailId: existing.product_detail_id, created: false });
+  }
+  if (!product.wp?.styleNo) {
+    return reply.code(409).send({
+      error: 'split_not_published',
+      message: '请先把该拆分产品发布到 WordPress 并分配独立款号，再加入 selection。',
+    });
+  }
+  const source = await buildSplitSelectionSourcePayload(bundleId, splitProductId);
+  if (!source || !Array.isArray(source.variants) || !source.variants.length || !Array.isArray(source.media) || !source.media.length) {
+    return reply.code(409).send({
+      error: 'split_source_incomplete',
+      message: '该拆分产品缺少可加入 selection 的变体或图片，请先生成内容并发布到 WordPress。',
+    });
+  }
+  const created = await db.addSplitSelectionDraft(bundleId, splitProductId, source, source, selectionSourceHash(source));
+  if (!created) return reply.code(500).send({ error: 'selection_create_failed' });
+  const selectionId = created.product_detail_id;
+  // The synthetic Selection id is only known after insert; keep the source
+  // metadata consistent for later source refreshes.
+  source.source.productDetailId = selectionId;
+  await db.updateSelectionDraftSource(selectionId, source, source, selectionSourceHash(source));
+  try {
+    const detail = await getSelectionSourceDetail(selectionId);
+    const draft = await enrichSelectionDraftImageSources(source, detail);
+    const sourceSwatches = (await enrichSelectionDraftImageSources({ swatches: source.swatches ?? [] }, detail)).swatches;
+    const resolved = await resolveSelectionVariantImages({ draft, sourceSwatches, config });
+    const saved = await db.updateSelectionDraftContent(selectionId, resolved.draft);
+    return reply.code(201).send({ draft: saved ?? created, productDetailId: selectionId, created: true });
+  } catch (error) {
+    request.log.warn({ err: error, selectionId }, 'split selection variant image setup failed');
+    return reply.code(201).send({ draft: created, productDetailId: selectionId, created: true });
   }
 });
 
@@ -7866,7 +8137,7 @@ app.post('/api/selection/drafts/:id/resolve-variant-images', { preHandler: requi
   const row = await db.getSelectionDraft(id);
   if (!row) return reply.code(404).send({ error: 'not_found' });
   try {
-    const detail = await db.getProductDetail(id);
+    const detail = await getSelectionSourceDetail(id);
     const draft = await enrichSelectionDraftImageSources(row.draft_payload ?? {}, detail);
     const sourceSwatches = (await enrichSelectionDraftImageSources({ swatches: row.source_payload?.swatches ?? [] }, detail)).swatches;
     const resolved = await resolveSelectionVariantImages({ draft, sourceSwatches, config });
@@ -8004,7 +8275,7 @@ app.post('/api/selection/drafts/:id/publish', { preHandler: requireDashboardOrAp
   if (!String(draft.title || '').trim() || !Array.isArray(draft.variants) || !draft.variants.length) {
     return reply.code(400).send({ error: 'draft_incomplete', message: 'Title and at least one variant are required.' });
   }
-  const detail = await db.getProductDetail(id);
+  const detail = await getSelectionSourceDetail(id);
   if (!detail) return reply.code(404).send({ error: 'not_found' });
   // Variant images are resolved and reviewed in Selection. Publishing only
   // validates the saved mapping so it never silently changes the customer's

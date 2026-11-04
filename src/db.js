@@ -7,6 +7,43 @@ import { cleanOptionLabel, normalizeDimensionName, normalizeOptionText } from '.
 
 const { Pool } = pg;
 
+// Split products are not rows in product_details (they are derived from a
+// bundle), but Selection still needs a stable, positive numeric key because the
+// existing Selection UI/API uses product_detail_id everywhere. Reserve the top
+// of the bigint range for these virtual Selection entries.
+export const SPLIT_SELECTION_ID_BASE = 9_000_000_000_000;
+
+export function isSplitSelectionId(value) {
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id >= SPLIT_SELECTION_ID_BASE;
+}
+
+export function splitSelectionId(rowId) {
+  const id = Number(rowId);
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  return SPLIT_SELECTION_ID_BASE + id;
+}
+
+function splitSelectionRowId(value) {
+  return isSplitSelectionId(value) ? Number(value) - SPLIT_SELECTION_ID_BASE : null;
+}
+
+function mapSplitSelectionDraft(row) {
+  if (!row) return null;
+  const selectionId = splitSelectionId(row.id);
+  return {
+    ...row,
+    product_detail_id: selectionId,
+    split_selection_id: selectionId,
+    source_kind: 'split',
+    draft_kind: 'split',
+  };
+}
+
+function selectionDraftResult(row, isSplit) {
+  return (isSplit ? mapSplitSelectionDraft(row) : (row ?? null));
+}
+
 /**
  * Listing-date columns shared by the detail and publication-date queries.
  * Priority: the official-plugin shop scan listing_time, then the LinkFox
@@ -568,6 +605,34 @@ export function createDatabase(databaseUrl) {
         ON product_selection_drafts(portal_product_id);
       ALTER TABLE product_selection_drafts ADD COLUMN IF NOT EXISTS source_hash text;
       ALTER TABLE product_selection_drafts ADD COLUMN IF NOT EXISTS source_checked_at timestamptz;
+      -- Selection drafts for one split product of a bundle. They deliberately
+      -- live outside product_details: a split product is derived content, not a
+      -- captured 1688 listing, and must not appear in product counts/catalogs.
+      CREATE TABLE IF NOT EXISTS product_split_selection_drafts (
+        id bigserial PRIMARY KEY,
+        bundle_product_detail_id bigint NOT NULL REFERENCES product_details(id) ON DELETE CASCADE,
+        split_product_id text NOT NULL,
+        status text NOT NULL DEFAULT 'DRAFT',
+        source_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+        draft_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+        revision integer NOT NULL DEFAULT 1,
+        portal_product_id text,
+        portal_status text,
+        portal_target text,
+        portal_url text,
+        last_error text,
+        selected_at timestamptz NOT NULL DEFAULT now(),
+        last_published_at timestamptz,
+        source_hash text,
+        source_checked_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (bundle_product_detail_id, split_product_id)
+      );
+      CREATE INDEX IF NOT EXISTS product_split_selection_drafts_status_idx
+        ON product_split_selection_drafts(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS product_split_selection_drafts_bundle_idx
+        ON product_split_selection_drafts(bundle_product_detail_id);
       -- Main-image perceptual hashes (dHash + pHash) used to skip capturing a
       -- new offer whose first image is exactly the same image as an existing
       -- product.  Rows are imported from the Wearhongxiu published catalog and
@@ -2824,6 +2889,19 @@ export function createDatabase(databaseUrl) {
   }
 
   async function getPortalPublication(productDetailId) {
+    if (isSplitSelectionId(productDetailId)) {
+      const row = await getSplitSelectionDraftRef(productDetailId);
+      if (!row) return null;
+      const source = row.source_payload && typeof row.source_payload === 'object' ? row.source_payload : {};
+      return {
+        ...row,
+        product_detail_id: splitSelectionId(row.id),
+        wp_post_id: source?.source?.wpPostId ?? null,
+        style_no: source.styleNumber ?? null,
+        source_key: `split-selection:${row.bundle_product_detail_id}:${row.split_product_id}`,
+        result: { target: row.portal_target || 'staging' },
+      };
+    }
     const result = await pool.query(
       'SELECT * FROM product_portal_publications WHERE product_detail_id=$1',
       [productDetailId],
@@ -2831,12 +2909,53 @@ export function createDatabase(databaseUrl) {
     return result.rows[0] ?? null;
   }
 
+  async function getSplitSelectionDraftRef(selectionId) {
+    const rowId = splitSelectionRowId(selectionId);
+    if (!rowId) return null;
+    const result = await pool.query('SELECT * FROM product_split_selection_drafts WHERE id=$1', [rowId]);
+    return result.rows[0] ?? null;
+  }
+
+  async function getSplitSelectionDraftByRef(bundleProductDetailId, splitProductId) {
+    const result = await pool.query(`
+      SELECT * FROM product_split_selection_drafts
+      WHERE bundle_product_detail_id=$1 AND split_product_id=$2`,
+    [bundleProductDetailId, String(splitProductId)]);
+    return mapSplitSelectionDraft(result.rows[0]);
+  }
+
+  async function listSplitSelectionDraftsForBundle(bundleProductDetailId) {
+    const result = await pool.query(`
+      SELECT id, bundle_product_detail_id, split_product_id, status, portal_product_id
+      FROM product_split_selection_drafts
+      WHERE bundle_product_detail_id=$1
+      ORDER BY updated_at DESC, id DESC`, [bundleProductDetailId]);
+    return result.rows.map(mapSplitSelectionDraft);
+  }
+
+  async function addSplitSelectionDraft(bundleProductDetailId, splitProductId, sourcePayload, draftPayload, sourceHash = null) {
+    const inserted = await pool.query(`
+      INSERT INTO product_split_selection_drafts
+        (bundle_product_detail_id, split_product_id, status, source_payload, draft_payload, source_hash, source_checked_at)
+      VALUES ($1, $2, 'DRAFT', $3, $4, $5, now())
+      ON CONFLICT (bundle_product_detail_id, split_product_id) DO NOTHING
+      RETURNING *`,
+    [bundleProductDetailId, String(splitProductId), JSON.stringify(sourcePayload ?? {}),
+      JSON.stringify(draftPayload ?? {}), sourceHash]);
+    if (inserted.rows[0]) return mapSplitSelectionDraft(inserted.rows[0]);
+    return getSplitSelectionDraftByRef(bundleProductDetailId, splitProductId);
+  }
+
   async function getSelectionDraft(productDetailId) {
+    const splitRow = await getSplitSelectionDraftRef(productDetailId);
+    if (splitRow) return mapSplitSelectionDraft(splitRow);
+    if (isSplitSelectionId(productDetailId)) return null;
     const result = await pool.query('SELECT * FROM product_selection_drafts WHERE product_detail_id=$1', [productDetailId]);
     return result.rows[0] ?? null;
   }
 
   async function addSelectionDraft(productDetailId, sourcePayload, draftPayload, sourceHash = null) {
+    if (isSplitSelectionId(productDetailId)) return null;
     const inserted = await pool.query(`
       INSERT INTO product_selection_drafts (product_detail_id, status, source_payload, draft_payload, source_hash, source_checked_at)
       VALUES ($1, 'DRAFT', $2, $3, $4, now())
@@ -2847,156 +2966,280 @@ export function createDatabase(databaseUrl) {
   }
 
   async function updateSelectionDraft(productDetailId, draftPayload) {
-    const result = await pool.query(`
-      UPDATE product_selection_drafts
-      SET draft_payload=$2, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
-      WHERE product_detail_id=$1
-      RETURNING *`, [productDetailId, JSON.stringify(draftPayload ?? {})]);
-    return result.rows[0] ?? null;
+    const splitRowId = splitSelectionRowId(productDetailId);
+    const result = splitRowId
+      ? await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET draft_payload=$2, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+        WHERE id=$1
+        RETURNING *`, [splitRowId, JSON.stringify(draftPayload ?? {})])
+      : await pool.query(`
+        UPDATE product_selection_drafts
+        SET draft_payload=$2, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+        WHERE product_detail_id=$1
+        RETURNING *`, [productDetailId, JSON.stringify(draftPayload ?? {})]);
+    return selectionDraftResult(result.rows[0], Boolean(splitRowId));
   }
 
   /** Persist a resolved draft without downgrading an already-published selection. */
   async function updateSelectionDraftContent(productDetailId, draftPayload) {
-    const result = await pool.query(`
-      UPDATE product_selection_drafts
-      SET draft_payload=$2, last_error=NULL, revision=revision+1, updated_at=now()
-      WHERE product_detail_id=$1
-      RETURNING *`, [productDetailId, JSON.stringify(draftPayload ?? {})]);
-    return result.rows[0] ?? null;
+    const splitRowId = splitSelectionRowId(productDetailId);
+    const result = splitRowId
+      ? await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET draft_payload=$2, last_error=NULL, revision=revision+1, updated_at=now()
+        WHERE id=$1
+        RETURNING *`, [splitRowId, JSON.stringify(draftPayload ?? {})])
+      : await pool.query(`
+        UPDATE product_selection_drafts
+        SET draft_payload=$2, last_error=NULL, revision=revision+1, updated_at=now()
+        WHERE product_detail_id=$1
+        RETURNING *`, [productDetailId, JSON.stringify(draftPayload ?? {})]);
+    return selectionDraftResult(result.rows[0], Boolean(splitRowId));
   }
 
   async function refreshSelectionDraftSource(productDetailId, sourcePayload, sourceHash = null) {
-    const result = await pool.query(`
-      UPDATE product_selection_drafts
-      SET source_payload=$2, source_hash=$3, source_checked_at=now(), updated_at=now()
-      WHERE product_detail_id=$1
-      RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), sourceHash]);
-    return result.rows[0] ?? null;
+    const splitRowId = splitSelectionRowId(productDetailId);
+    const result = splitRowId
+      ? await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET source_payload=$2, source_hash=$3, source_checked_at=now(), updated_at=now()
+        WHERE id=$1
+        RETURNING *`, [splitRowId, JSON.stringify(sourcePayload ?? {}), sourceHash])
+      : await pool.query(`
+        UPDATE product_selection_drafts
+        SET source_payload=$2, source_hash=$3, source_checked_at=now(), updated_at=now()
+        WHERE product_detail_id=$1
+        RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), sourceHash]);
+    return selectionDraftResult(result.rows[0], Boolean(splitRowId));
   }
 
   async function updateSelectionDraftSource(productDetailId, sourcePayload, draftPayload, sourceHash = null) {
-    const result = await pool.query(`
-      UPDATE product_selection_drafts
-      SET source_payload=$2, draft_payload=$3, source_hash=$4, source_checked_at=now(), status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
-      WHERE product_detail_id=$1
-      RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), JSON.stringify(draftPayload ?? {}), sourceHash]);
-    return result.rows[0] ?? null;
+    const splitRowId = splitSelectionRowId(productDetailId);
+    const result = splitRowId
+      ? await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET source_payload=$2, draft_payload=$3, source_hash=$4, source_checked_at=now(), status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+        WHERE id=$1
+        RETURNING *`, [splitRowId, JSON.stringify(sourcePayload ?? {}), JSON.stringify(draftPayload ?? {}), sourceHash])
+      : await pool.query(`
+        UPDATE product_selection_drafts
+        SET source_payload=$2, draft_payload=$3, source_hash=$4, source_checked_at=now(), status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+        WHERE product_detail_id=$1
+        RETURNING *`, [productDetailId, JSON.stringify(sourcePayload ?? {}), JSON.stringify(draftPayload ?? {}), sourceHash]);
+    return selectionDraftResult(result.rows[0], Boolean(splitRowId));
   }
 
   async function resetSelectionDraft(productDetailId) {
-    const result = await pool.query(`
-      UPDATE product_selection_drafts
-      SET draft_payload=source_payload, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
-      WHERE product_detail_id=$1
-      RETURNING *`, [productDetailId]);
-    return result.rows[0] ?? null;
+    const splitRowId = splitSelectionRowId(productDetailId);
+    const result = splitRowId
+      ? await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET draft_payload=source_payload, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+        WHERE id=$1
+        RETURNING *`, [splitRowId])
+      : await pool.query(`
+        UPDATE product_selection_drafts
+        SET draft_payload=source_payload, status='DRAFT', last_error=NULL, revision=revision+1, updated_at=now()
+        WHERE product_detail_id=$1
+        RETURNING *`, [productDetailId]);
+    return selectionDraftResult(result.rows[0], Boolean(splitRowId));
   }
 
   async function removeSelectionDraft(productDetailId) {
-    const result = await pool.query('DELETE FROM product_selection_drafts WHERE product_detail_id=$1 RETURNING *', [productDetailId]);
-    return result.rows[0] ?? null;
+    const splitRowId = splitSelectionRowId(productDetailId);
+    const result = splitRowId
+      ? await pool.query('DELETE FROM product_split_selection_drafts WHERE id=$1 RETURNING *', [splitRowId])
+      : await pool.query('DELETE FROM product_selection_drafts WHERE product_detail_id=$1 RETURNING *', [productDetailId]);
+    return selectionDraftResult(result.rows[0], Boolean(splitRowId));
   }
 
   async function markSelectionDraftPublished(productDetailId, values = {}) {
-    const result = await pool.query(`
-      UPDATE product_selection_drafts
-      SET status='PUBLISHED', portal_product_id=$2, portal_status=$3, last_error=NULL,
-          last_published_at=now(), updated_at=now()
-      WHERE product_detail_id=$1
-      RETURNING *`, [productDetailId, values.portalProductId ?? null, values.portalStatus ?? null]);
-    return result.rows[0] ?? null;
+    const splitRowId = splitSelectionRowId(productDetailId);
+    const result = splitRowId
+      ? await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET status='PUBLISHED', portal_product_id=$2, portal_status=$3, last_error=NULL,
+            last_published_at=now(), updated_at=now()
+        WHERE id=$1
+        RETURNING *`, [splitRowId, values.portalProductId ?? null, values.portalStatus ?? null])
+      : await pool.query(`
+        UPDATE product_selection_drafts
+        SET status='PUBLISHED', portal_product_id=$2, portal_status=$3, last_error=NULL,
+            last_published_at=now(), updated_at=now()
+        WHERE product_detail_id=$1
+        RETURNING *`, [productDetailId, values.portalProductId ?? null, values.portalStatus ?? null]);
+    return selectionDraftResult(result.rows[0], Boolean(splitRowId));
   }
 
   async function markSelectionDraftArchived(productDetailId) {
-    const result = await pool.query(`
-      UPDATE product_selection_drafts
-      SET status='ARCHIVED', portal_status='ARCHIVED', last_error=NULL, updated_at=now()
-      WHERE product_detail_id=$1
-      RETURNING *`, [productDetailId]);
-    return result.rows[0] ?? null;
+    const splitRowId = splitSelectionRowId(productDetailId);
+    const result = splitRowId
+      ? await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET status='ARCHIVED', portal_status='ARCHIVED', last_error=NULL, updated_at=now()
+        WHERE id=$1
+        RETURNING *`, [splitRowId])
+      : await pool.query(`
+        UPDATE product_selection_drafts
+        SET status='ARCHIVED', portal_status='ARCHIVED', last_error=NULL, updated_at=now()
+        WHERE product_detail_id=$1
+        RETURNING *`, [productDetailId]);
+    return selectionDraftResult(result.rows[0], Boolean(splitRowId));
   }
 
   async function markSelectionDraftFailed(productDetailId, error) {
-    const result = await pool.query(`
-      UPDATE product_selection_drafts
-      SET status='ERROR', last_error=$2, updated_at=now()
-      WHERE product_detail_id=$1
-      RETURNING *`, [productDetailId, String(error ?? 'Selection publish failed').slice(0, 2000)]);
-    return result.rows[0] ?? null;
+    const splitRowId = splitSelectionRowId(productDetailId);
+    const result = splitRowId
+      ? await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET status='ERROR', last_error=$2, updated_at=now()
+        WHERE id=$1
+        RETURNING *`, [splitRowId, String(error ?? 'Selection publish failed').slice(0, 2000)])
+      : await pool.query(`
+        UPDATE product_selection_drafts
+        SET status='ERROR', last_error=$2, updated_at=now()
+        WHERE product_detail_id=$1
+        RETURNING *`, [productDetailId, String(error ?? 'Selection publish failed').slice(0, 2000)]);
+    return selectionDraftResult(result.rows[0], Boolean(splitRowId));
   }
 
   async function listSelectionDrafts({ q = '', limit = 100, offset = 0 } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 300);
     const safeOffset = Math.max(Number(offset) || 0, 0);
-    const values = [];
-    let search = '';
-    const term = String(q ?? '').trim().slice(0, 120);
+    const term = String(q ?? '').trim().slice(0, 120).toLowerCase();
+    // The Selection screen has a 300-row cap. Fetch a bounded union of both
+    // draft stores, merge by update time, then paginate so the two sources do
+    // not each paginate independently.
+    const [normal, split] = await Promise.all([
+      pool.query(`
+        SELECT draft.product_detail_id, draft.status, draft.portal_product_id,
+          draft.last_error, details.offer_id, products.shop_id, products.shop_name,
+          draft.draft_payload->>'styleNumber' AS style_number,
+          COALESCE(NULLIF(draft.draft_payload->>'title',''), details.title, '') AS title,
+          draft.updated_at,
+          COALESCE(
+            (SELECT image->>'url'
+             FROM jsonb_array_elements(COALESCE(draft.draft_payload->'media','[]'::jsonb)) WITH ORDINALITY AS m(image, position)
+             WHERE COALESCE((image->>'visible')::boolean, true)
+             ORDER BY position LIMIT 1),
+            (SELECT image->>'url'
+             FROM jsonb_array_elements(COALESCE(draft.draft_payload->'media','[]'::jsonb)) WITH ORDINALITY AS m(image, position)
+             ORDER BY position LIMIT 1),
+            (SELECT image->>'url'
+             FROM jsonb_array_elements(COALESCE(draft.source_payload->'media','[]'::jsonb)) WITH ORDINALITY AS m(image, position)
+             ORDER BY position LIMIT 1)
+          ) AS cover_url,
+          EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(COALESCE(draft.draft_payload->'variants','[]'::jsonb)) AS v
+            WHERE COALESCE(v->>'imageUrl','')=''
+               OR NOT EXISTS (
+                 SELECT 1
+                 FROM jsonb_array_elements(COALESCE(draft.draft_payload->'media','[]'::jsonb)) AS media
+                 WHERE media->>'url' = v->>'imageUrl'
+               )
+          ) AS missing_images
+        FROM product_selection_drafts draft
+        JOIN product_details details ON details.id=draft.product_detail_id
+        LEFT JOIN LATERAL (
+          SELECT src.shop_id, src.category,
+            coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name
+          FROM shop_products src
+          LEFT JOIN shop_profiles shops ON shops.id=src.shop_id
+          WHERE src.offer_id=details.offer_id
+          ORDER BY src.last_crawled_at DESC LIMIT 1
+        ) products ON true
+        ORDER BY draft.updated_at DESC, draft.product_detail_id DESC
+        LIMIT 3000`),
+      pool.query(`
+        SELECT draft.id AS split_row_id, draft.bundle_product_detail_id, draft.split_product_id,
+          draft.status, draft.portal_product_id, draft.portal_status, draft.last_error,
+          draft.draft_payload, draft.source_payload, draft.updated_at,
+          bundle_details.offer_id, bundle_details.title AS bundle_title,
+          products.shop_id, products.shop_name
+        FROM product_split_selection_drafts draft
+        JOIN product_details bundle_details ON bundle_details.id=draft.bundle_product_detail_id
+        LEFT JOIN LATERAL (
+          SELECT src.shop_id,
+            coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name
+          FROM shop_products src
+          LEFT JOIN shop_profiles shops ON shops.id=src.shop_id
+          WHERE src.offer_id=bundle_details.offer_id
+          ORDER BY src.last_crawled_at DESC LIMIT 1
+        ) products ON true
+        ORDER BY draft.updated_at DESC, draft.id DESC
+        LIMIT 3000`),
+    ]);
+
+    const splitItems = split.rows.map((row) => {
+      const draft = row.draft_payload && typeof row.draft_payload === 'object' ? row.draft_payload : {};
+      const source = row.source_payload && typeof row.source_payload === 'object' ? row.source_payload : {};
+      const media = Array.isArray(draft.media) ? draft.media : [];
+      const sourceMedia = Array.isArray(source.media) ? source.media : [];
+      const visible = media.find((entry) => entry?.url && entry.visible !== false)
+        || media.find((entry) => entry?.url)
+        || sourceMedia.find((entry) => entry?.url)
+        || null;
+      const mediaUrls = new Set(media.map((entry) => entry?.url).filter(Boolean));
+      const variants = Array.isArray(draft.variants) ? draft.variants : [];
+      return {
+        product_detail_id: splitSelectionId(row.split_row_id),
+        draft_kind: 'split',
+        source_kind: 'split',
+        bundle_product_detail_id: row.bundle_product_detail_id,
+        split_product_id: row.split_product_id,
+        status: row.status,
+        portal_product_id: row.portal_product_id,
+        portal_status: row.portal_status,
+        last_error: row.last_error,
+        offer_id: row.offer_id,
+        shop_id: row.shop_id,
+        shop_name: row.shop_name,
+        style_number: String(draft.styleNumber || source.styleNumber || ''),
+        title: String(draft.title || source.title || row.bundle_title || ''),
+        cover_url: visible?.url || null,
+        missing_images: variants.some((variant) => !variant?.imageUrl || !mediaUrls.has(variant.imageUrl)),
+        updated_at: row.updated_at,
+      };
+    });
+    const normalItems = normal.rows.map((row) => ({
+      ...row,
+      product_detail_id: row.product_detail_id,
+      draft_kind: 'product',
+      source_kind: 'product',
+    }));
+    let items = [...normalItems, ...splitItems];
     if (term) {
-      values.push(`%${term.replace(/[\\%_]/g, '\\$&')}%`);
-      const p = `$${values.length}`;
-      search = `WHERE (coalesce(draft.draft_payload->>'styleNumber','') ILIKE ${p}
-        OR coalesce(draft.draft_payload->>'title','') ILIKE ${p}
-        OR coalesce(details.offer_id::text,'') ILIKE ${p}
-        OR coalesce(products.shop_name,'') ILIKE ${p})`;
+      items = items.filter((row) => [row.style_number, row.title, row.offer_id, row.shop_name]
+        .some((value) => String(value || '').toLowerCase().includes(term)));
     }
-    values.push(safeLimit, safeOffset);
-    const result = await pool.query(`
-      SELECT draft.product_detail_id, draft.status, draft.portal_product_id,
-        draft.last_error, details.offer_id, products.shop_id, products.shop_name,
-        draft.draft_payload->>'styleNumber' AS style_number,
-        COALESCE(NULLIF(draft.draft_payload->>'title',''), details.title, '') AS title,
-        COALESCE(
-          (SELECT image->>'url'
-           FROM jsonb_array_elements(COALESCE(draft.draft_payload->'media','[]'::jsonb)) WITH ORDINALITY AS m(image, position)
-           WHERE COALESCE((image->>'visible')::boolean, true)
-           ORDER BY position LIMIT 1),
-          (SELECT image->>'url'
-           FROM jsonb_array_elements(COALESCE(draft.draft_payload->'media','[]'::jsonb)) WITH ORDINALITY AS m(image, position)
-           ORDER BY position LIMIT 1),
-          (SELECT image->>'url'
-           FROM jsonb_array_elements(COALESCE(draft.source_payload->'media','[]'::jsonb)) WITH ORDINALITY AS m(image, position)
-           ORDER BY position LIMIT 1)
-        ) AS cover_url,
-        EXISTS (
-          SELECT 1
-          FROM jsonb_array_elements(COALESCE(draft.draft_payload->'variants','[]'::jsonb)) AS v
-          WHERE COALESCE(v->>'imageUrl','')=''
-             OR NOT EXISTS (
-               SELECT 1
-               FROM jsonb_array_elements(COALESCE(draft.draft_payload->'media','[]'::jsonb)) AS media
-               WHERE media->>'url' = v->>'imageUrl'
-             )
-        ) AS missing_images
-      FROM product_selection_drafts draft
-      JOIN product_details details ON details.id=draft.product_detail_id
-      LEFT JOIN LATERAL (
-        SELECT src.shop_id, src.category,
-          coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name
-        FROM shop_products src
-        LEFT JOIN shop_profiles shops ON shops.id=src.shop_id
-        WHERE src.offer_id=details.offer_id
-        ORDER BY src.last_crawled_at DESC LIMIT 1
-      ) products ON true
-      ${search}
-      ORDER BY draft.updated_at DESC, draft.product_detail_id DESC
-      LIMIT $${values.length - 1} OFFSET $${values.length}`, values);
-    const count = await pool.query(`
-      SELECT count(*)::int AS total
-      FROM product_selection_drafts draft
-      JOIN product_details details ON details.id=draft.product_detail_id
-      LEFT JOIN LATERAL (
-        SELECT src.shop_id, src.category,
-          coalesce(shops.shop_name, shops.domain, '未关联店铺') AS shop_name
-        FROM shop_products src
-        LEFT JOIN shop_profiles shops ON shops.id=src.shop_id
-        WHERE src.offer_id=details.offer_id
-        ORDER BY src.last_crawled_at DESC LIMIT 1
-      ) products ON true
-      ${search}`, values.slice(0, -2));
-    return { items: result.rows, total: count.rows[0]?.total ?? 0, limit: safeLimit, offset: safeOffset };
+    items.sort((left, right) => {
+      const delta = new Date(right.updated_at || 0).getTime() - new Date(left.updated_at || 0).getTime();
+      if (delta) return delta;
+      return String(right.product_detail_id).localeCompare(String(left.product_detail_id));
+    });
+    return {
+      items: items.slice(safeOffset, safeOffset + safeLimit),
+      total: items.length,
+      limit: safeLimit,
+      offset: safeOffset,
+    };
   }
 
   async function savePortalPublication(productDetailId, values) {
+    if (isSplitSelectionId(productDetailId)) {
+      const splitRowId = splitSelectionRowId(productDetailId);
+      const saved = await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET portal_product_id=$2, portal_status=$3, portal_target=$4, portal_url=$5,
+            last_error=$6, last_published_at=now(), updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+      [splitRowId, values.portalProductId ?? null, values.portalStatus ?? null,
+        values.result?.target ?? 'staging', values.portalUrl ?? null, values.lastError ?? null]);
+      return mapSplitSelectionDraft(saved.rows[0]);
+    }
     const saved = await pool.query(`
       INSERT INTO product_portal_publications (
         product_detail_id, wp_post_id, style_no, portal_product_id, portal_status,
@@ -3032,6 +3275,16 @@ export function createDatabase(databaseUrl) {
 
   /** Marks a portal publication as archived after the product was removed from the portal. */
   async function markPortalPublicationArchived(productDetailId) {
+    if (isSplitSelectionId(productDetailId)) {
+      const splitRowId = splitSelectionRowId(productDetailId);
+      const saved = await pool.query(`
+        UPDATE product_split_selection_drafts
+        SET portal_status='ARCHIVED', last_error=NULL, updated_at=now()
+        WHERE id=$1
+        RETURNING *
+      `, [splitRowId]);
+      return mapSplitSelectionDraft(saved.rows[0]);
+    }
     const saved = await pool.query(`
       UPDATE product_portal_publications
       SET portal_status='ARCHIVED', last_error=NULL, last_synced_at=now(), updated_at=now()
@@ -3949,6 +4202,7 @@ export function createDatabase(databaseUrl) {
     listSelectionProducts, listSelectionFacets, getSelectionProductMedia, getSelectionProductSkus,
     getSelectionDraft, addSelectionDraft, updateSelectionDraft, updateSelectionDraftContent, updateSelectionDraftSource, resetSelectionDraft,
     removeSelectionDraft, markSelectionDraftPublished, markSelectionDraftArchived, markSelectionDraftFailed, refreshSelectionDraftSource, listSelectionDrafts,
+    getSplitSelectionDraftRef, getSplitSelectionDraftByRef, listSplitSelectionDraftsForBundle, addSplitSelectionDraft,
     listPortalDelistedProducts, listPortalPublishedForReconcile, listProductDetailSkuStocks,
     auditPublicationStock, samplePublicationStocks, listSampleAvailabilityMismatches,
     listNotAvailableButInStock,
