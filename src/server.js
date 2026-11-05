@@ -1333,6 +1333,27 @@ async function buildSelectionSourcePayload(productDetailId) {
       sortOrder: index,
     };
   });
+  const colourRank = new Map();
+  for (const [index, colour] of normalizedColours.entries()) {
+    for (const key of [colour?.source, colour?.text]) {
+      if (key) colourRank.set(String(key).trim().toLowerCase(), index);
+    }
+  }
+  const sizeRank = new Map();
+  for (const [index, size] of normalizedSizes.entries()) {
+    for (const key of [size?.source, size?.text]) {
+      if (key) sizeRank.set(String(key).trim().toLowerCase(), index);
+    }
+  }
+  variants.sort((left, right) => {
+    const leftColour = colourRank.get(String(left.optionValues?.Color || '').trim().toLowerCase()) ?? 999;
+    const rightColour = colourRank.get(String(right.optionValues?.Color || '').trim().toLowerCase()) ?? 999;
+    if (leftColour !== rightColour) return leftColour - rightColour;
+    const leftSize = sizeRank.get(String(left.optionValues?.Size || '').trim().toLowerCase()) ?? 999;
+    const rightSize = sizeRank.get(String(right.optionValues?.Size || '').trim().toLowerCase()) ?? 999;
+    if (leftSize !== rightSize) return leftSize - rightSize;
+    return left.sortOrder - right.sortOrder;
+  });
   const swatchesByLabel = new Map();
   for (const variant of variants) {
     const color = String(variant.optionValues?.Color || '').trim();
