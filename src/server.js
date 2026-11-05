@@ -35,6 +35,7 @@ import { classifyBundleSemantically, bundleClassifierConfig, failedBundleDetecti
 import { analyzeBundleSplit, recomputePlan, generateSplitContents, normalizeSplitContents, applyVariantDropPolicy, applyRemovedSkus, classifyNonProductImages, regenerateSplitCopy } from './bundle-splitter.js';
 import { normalizeVariants } from './variant-normalizer.js';
 import { resolveSelectionVariantImages } from './selection-variant-images.js';
+import { SELECTION_BULK_MARKUP_CNY, SELECTION_PRICING_RATE, SELECTION_SAMPLE_MARKUP_CNY, selectionPricingFor } from './selection-pricing.js';
 import { dedupeImagesByHash, dedupeImagesWithLlm, normalizedSourceImageKey } from './image-dedupe.js';
 import { feishuConfigured, notifyBundleCapture, sendFeishuText } from './feishu.js';
 import { buildSkuRowsFromSkuModel } from './sku-matrix.js';
@@ -1338,16 +1339,18 @@ async function buildSelectionSourcePayload(productDetailId) {
   }
   let pricing = null;
   try { pricing = payload.bulk_pricing ?? buildWearHongxiuPricing(detail); } catch { pricing = null; }
+  const selectionPricing = selectionPricingFor(pricing?.source_max_price ?? detail.price_max);
   const pricingTiers = Array.isArray(pricing?.tiers) && pricing.tiers.length
     ? pricing.tiers
     : Array.isArray(detail.priceTiers) ? detail.priceTiers : [];
-  const priceTiers = pricingTiers.map((tier, index) => ({
+  const fallbackPriceTiers = pricingTiers.map((tier, index) => ({
     label: String(tier.label || `${tier.min_quantity ?? tier.minQuantity ?? 1}+ pcs`),
     minQuantity: Number(tier.min_quantity ?? tier.minQuantity ?? 1),
     maxQuantity: tier.max_quantity ?? tier.maxQuantity ?? null,
     price: Number(tier.price),
     sortOrder: index,
   })).filter((tier) => Number.isFinite(tier.price) && tier.minQuantity > 0);
+  const priceTiers = selectionPricing?.priceTiers ?? fallbackPriceTiers;
   const prices = priceTiers.map((tier) => tier.price);
   const wpSwatches = [...swatchesByLabel.values()];
   const sourceAttributes = Array.isArray(translation?.attributes) && translation.attributes.length
@@ -1371,14 +1374,14 @@ async function buildSelectionSourcePayload(productDetailId) {
     tags: Array.isArray(payload.tags) ? payload.tags.filter((tag) => typeof tag === 'string') : [],
     fabricMaterial,
     packageWeightGrams,
-    currency: String(pricing?.currency || 'USD').toUpperCase(),
-    priceMin: prices.length ? Math.min(...prices) : (detail.price_min === null ? null : Number(detail.price_min)),
-    priceMax: prices.length ? Math.max(...prices) : (detail.price_max === null ? null : Number(detail.price_max)),
-    moq: priceTiers[0]?.minQuantity ?? (detail.moq === null ? null : Number(detail.moq)),
+    currency: String(selectionPricing?.currency || pricing?.currency || 'USD').toUpperCase(),
+    priceMin: selectionPricing?.priceMin ?? (prices.length ? Math.min(...prices) : (detail.price_min === null ? null : Number(detail.price_min))),
+    priceMax: selectionPricing?.priceMax ?? (prices.length ? Math.max(...prices) : (detail.price_max === null ? null : Number(detail.price_max))),
+    moq: selectionPricing?.moq ?? priceTiers[0]?.minQuantity ?? (detail.moq === null ? null : Number(detail.moq)),
     sourcePriceMin: detail.price_min === null || detail.price_min === undefined ? null : Number(detail.price_min),
     sourcePriceMax: detail.price_max === null || detail.price_max === undefined ? null : Number(detail.price_max),
     sourceCurrency: String(detail.currency || 'CNY').toUpperCase(),
-    pricingRule: pricing ? {
+    pricingRule: selectionPricing?.pricingRule ?? (pricing ? {
       formula: pricing.formula || null,
       sourceMaxPrice: pricing.source_max_price ?? null,
       exchangeRate: pricing.exchange_rate_cny_per_usd ?? null,
@@ -1389,7 +1392,7 @@ async function buildSelectionSourcePayload(productDetailId) {
         cnyMarkup: tier.cny_markup ?? tier.cnyMarkup ?? null,
         price: Number(tier.price),
       })),
-    } : null,
+    } : null),
     priceTiers,
     variants,
     media,
@@ -1524,44 +1527,15 @@ async function buildSplitSelectionSourcePayload(bundleProductDetailId, splitProd
   }
 
   // A split has its own source maximum (the price of its own SKUs), not the
-  // bundle maximum. Recompute the inherited tier prices from that maximum so
-  // Selection opens with a sane sample/volume price instead of the bundle's.
+  // bundle maximum. Rebuild the fixed 1 pc / 50+ rule from that maximum so
+  // Selection opens with the split's own purchase prices.
   const splitPrices = (Array.isArray(product.skus) ? product.skus : [])
     .map((sku) => Number(sku?.price)).filter((price) => Number.isFinite(price) && price > 0);
   const splitSourceMin = splitPrices.length ? Math.min(...splitPrices) : bundleSource.sourcePriceMin;
   const splitSourceMax = splitPrices.length ? Math.max(...splitPrices) : bundleSource.sourcePriceMax;
-  const exchangeRate = Number(bundleSource.pricingRule?.exchangeRate ?? 6.5) || 6.5;
-  let baseTiers = Array.isArray(bundleSource.pricingRule?.tiers) && bundleSource.pricingRule.tiers.length
-    ? bundleSource.pricingRule.tiers
-    : (Array.isArray(bundleSource.priceTiers) ? bundleSource.priceTiers : []);
-  if (!baseTiers.length) {
-    try {
-      baseTiers = buildWearHongxiuPricing(bundle, { sourceMaxOverride: splitSourceMax }).tiers;
-    } catch {
-      baseTiers = [];
-    }
-  }
-  const pricingRule = {
-    ...(bundleSource.pricingRule || {}),
-    formula: bundleSource.pricingRule?.formula || '(source maximum CNY price + tier markup) / exchange rate',
-    sourceMaxPrice: splitSourceMax,
-    exchangeRate,
-    sampleMarkupUsd: bundleSource.pricingRule?.sampleMarkupUsd ?? 1,
-    tiers: baseTiers.map((tier) => ({
-      ...tier,
-      price: splitSourceMax > 0
-        ? Math.round(((splitSourceMax + Number(tier.cnyMarkup || 0)) / exchangeRate + Number.EPSILON) * 100) / 100
-        : Number(tier.price || 0),
-    })),
-  };
-  const priceTiers = pricingRule.tiers.map((tier, index) => ({
-    ...tier,
-    sortOrder: index,
-    price: splitSourceMax > 0
-      ? Math.round(((splitSourceMax + Number(tier.cnyMarkup || 0)) / exchangeRate + Number.EPSILON) * 100) / 100
-      : Number(tier.price || 0),
-  }));
-  const tierPrices = priceTiers.map((tier) => Number(tier.price)).filter((price) => Number.isFinite(price) && price >= 0);
+  const splitPricing = selectionPricingFor(splitSourceMax);
+  const pricingRule = splitPricing?.pricingRule ?? bundleSource.pricingRule ?? null;
+  const priceTiers = splitPricing?.priceTiers ?? (Array.isArray(bundleSource.priceTiers) ? bundleSource.priceTiers : []);
 
   return {
     ...bundleSource,
@@ -1574,9 +1548,9 @@ async function buildSplitSelectionSourcePayload(bundleProductDetailId, splitProd
     sourcePriceMax: splitSourceMax,
     pricingRule,
     priceTiers,
-    priceMin: tierPrices.length ? Math.min(...tierPrices) : bundleSource.priceMin,
-    priceMax: tierPrices.length ? Math.max(...tierPrices) : bundleSource.priceMax,
-    moq: priceTiers[0]?.minQuantity ?? bundleSource.moq,
+    priceMin: splitPricing?.priceMin ?? bundleSource.priceMin,
+    priceMax: splitPricing?.priceMax ?? bundleSource.priceMax,
+    moq: splitPricing?.moq ?? priceTiers[0]?.minQuantity ?? bundleSource.moq,
     variants,
     media,
     mediaPool,
@@ -1661,7 +1635,7 @@ const SELECTION_FIELDS = [
   { key: 'mediaPool', label: 'Original image pool' },
   { key: 'variants', label: 'Colors & variants' },
   { key: 'swatches', label: 'Color swatches' },
-  { key: 'pricingRule', label: 'Price markups' },
+  { key: 'pricingRule', label: 'Price rule' },
 ];
 const stableJson = (value) => {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -1676,8 +1650,14 @@ const selectionFieldSummary = (key, value) => {
   if (key === 'swatches') return `${Array.isArray(value) ? value.length : 0} colors`;
   if (key === 'tags') return Array.isArray(value) && value.length ? value.join(', ') : 'No tags';
   if (key === 'pricingRule') {
-    const tiers = Array.isArray(value?.tiers) ? value.tiers : [];
-    return `${tiers.length} tiers · sample USD ${Number(value?.sampleMarkupUsd ?? 1).toFixed(2)}${tiers.length ? ' · '+tiers.map((tier) => `${tier.label || tier.minQuantity}=${tier.cnyMarkup ?? 0}`).join(', ') : ''}`;
+    const sourceMax = Number(value?.sourceMaxPrice ?? 0);
+    const rate = Number(value?.exchangeRate ?? SELECTION_PRICING_RATE) || SELECTION_PRICING_RATE;
+    if (Number.isFinite(sourceMax) && sourceMax > 0) {
+      const onePiece = Math.round(((sourceMax + SELECTION_SAMPLE_MARKUP_CNY) / rate + Number.EPSILON) * 100) / 100;
+      const bulk = Math.round(((sourceMax + SELECTION_BULK_MARKUP_CNY) / rate + Number.EPSILON) * 100) / 100;
+      return `1 pc USD ${onePiece.toFixed(2)} · 50+ USD ${bulk.toFixed(2)}`;
+    }
+    return 'Fixed 1 pc / 50+ rule';
   }
   return value === null || value === undefined || value === '' ? '—' : String(value).slice(0, 180);
 };
@@ -8273,17 +8253,10 @@ app.post('/api/selection/drafts/:id/apply-source', { preHandler: requireDashboar
     merged[key] = source[key];
   }
   if (fields.includes('pricingRule')) {
-    const rule = source.pricingRule ?? {};
-    const sourceMax = Number(rule.sourceMaxPrice ?? source.sourcePriceMax ?? 0);
-    const rate = Number(rule.exchangeRate ?? 6.5) || 6.5;
-    merged.priceTiers = (Array.isArray(rule.tiers) ? rule.tiers : []).map((tier) => ({
-      label: tier.label,
-      minQuantity: Number(tier.minQuantity),
-      maxQuantity: tier.maxQuantity ?? null,
-      price: sourceMax > 0 ? Math.round(((sourceMax + Number(tier.cnyMarkup || 0)) / rate + Number.EPSILON) * 100) / 100 : Number(tier.price || 0),
-    }));
-    const prices = merged.priceTiers.map((tier) => Number(tier.price)).filter((price) => Number.isFinite(price));
-    if (prices.length) { merged.priceMin = Math.min(...prices); merged.priceMax = Math.max(...prices); merged.moq = merged.priceTiers[0]?.minQuantity ?? merged.moq; }
+    merged.priceTiers = Array.isArray(source.priceTiers) ? source.priceTiers : [];
+    merged.priceMin = source.priceMin ?? merged.priceMin;
+    merged.priceMax = source.priceMax ?? merged.priceMax;
+    merged.moq = source.moq ?? merged.priceTiers[0]?.minQuantity ?? merged.moq;
   }
   const saved = await db.updateSelectionDraftSource(id, source, merged, selectionSourceHash(source));
   return { draft: saved, applied: fields };
