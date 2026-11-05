@@ -1354,6 +1354,7 @@ async function buildSelectionSourcePayload(productDetailId) {
     if (leftSize !== rightSize) return leftSize - rightSize;
     return left.sortOrder - right.sortOrder;
   });
+  variants.forEach((variant, index) => { variant.sortOrder = index; });
   const swatchesByLabel = new Map();
   for (const variant of variants) {
     const color = String(variant.optionValues?.Color || '').trim();
