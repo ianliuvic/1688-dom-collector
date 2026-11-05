@@ -7872,7 +7872,7 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     dryRun
       ? '处理结果：演练模式，未修改产品库存或归档状态'
       : `库存同步：${report.updatedProducts} 款产品 / ${report.updatedVariants} 个变体`,
-    `${dryRun ? '演练将归档' : '归档'}：1688 已下架 ${report.archivedDelisted.length} 款；库存不足 ${report.archivedZeroStock.length} 款（产品的全部 Portal 变体库存均 ≤5 才归档）`,
+    `${dryRun ? '演练将归档' : '归档'}：1688 已下架 ${report.archivedDelisted.length} 款；库存不足 ${report.archivedZeroStock.length} 款（产品的全部 Portal 变体库存均 ≤5）`,
   ];
   if (report.archivedDelisted.length) lines.push(`${dryRun ? '演练：将因 1688 下架归档' : '1688 已下架'}：${names(report.archivedDelisted)}`);
   if (report.archivedZeroStock.length) lines.push(`${dryRun ? '演练：将因库存不足归档' : '库存不足归档'}：${names(report.archivedZeroStock)}`);
@@ -7885,10 +7885,11 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
   } else {
     lines.push(`⚠️ 低库存提醒（库存 <20）：${lowStockStyles.length} 款 / ${report.lowStock.length} 个变体`);
     for (const entry of lowStockStyles.slice(0, 15)) {
-      const detail = entry.items.slice(0, 6).map(variantText).join('、');
-      lines.push(`• ${entry.styleNo}（最低 ${entry.minStock}）：${detail}${entry.items.length > 6 ? ` 等 ${entry.items.length} 个变体` : ''}`);
+      const detail = entry.items.slice(0, 10).map(variantText).join('、');
+      lines.push(`• ${entry.styleNo}（最低 ${entry.minStock}）：${detail}${entry.items.length > 10 ? ` 等 ${entry.items.length} 个变体` : ''}`);
     }
     if (lowStockStyles.length > 15) lines.push(`• 其余 ${lowStockStyles.length - 15} 款也低于 20，请到 Portal 查看`);
+    lines.push('说明：库存 <20 只提醒，不会因此归档。');
   }
   lines.push('数据源：1688 最新 SKU 库存快照 → Portal Staging');
   let feishu = null;
