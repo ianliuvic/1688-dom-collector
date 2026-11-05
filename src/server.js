@@ -8345,7 +8345,11 @@ app.post('/api/selection/drafts/:id/refresh-source', { preHandler: requireDashbo
     return { ...swatch, color: old?.color || swatch.color || null, imageUrl: old?.imageUrl || swatch.imageUrl || null };
   });
   const merged = { ...current, variants: variants.length ? variants : current.variants, swatches };
-  const saved = await db.updateSelectionDraftSource(id, source, merged, selectionSourceHash(source));
+  // Refreshing source should not turn an already-published selection back into
+  // a draft. Persist the new source/hash, then update the draft content without
+  // touching its publication status.
+  await db.refreshSelectionDraftSource(id, source, selectionSourceHash(source));
+  const saved = await db.updateSelectionDraftContent(id, merged);
   return { draft: saved };
 });
 
