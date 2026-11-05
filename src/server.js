@@ -1280,6 +1280,12 @@ async function buildSelectionSourcePayload(productDetailId) {
   const sizeLabel = new Map(normalizedSizes
     .filter((size) => size?.source && size?.text)
     .map((size) => [String(size.source).trim().toLowerCase(), String(size.text).trim()]));
+  // Some 1688 matrix rows use a different colour label from the variant
+  // normalization source (for example 印花色 vs 蓝色). When the normalization
+  // has exactly one colour, that row still belongs to that single colour.
+  const singleNormalizedColour = normalizedColours.length === 1 && normalizedColours[0]?.text
+    ? String(normalizedColours[0].text).trim()
+    : null;
   const colourImage = new Map();
   for (const colour of normalizedColours) {
     const label = String(colour?.text || colour?.source || '').trim();
@@ -1305,7 +1311,7 @@ async function buildSelectionSourcePayload(productDetailId) {
   const variants = (payloadRows.length ? payloadRows : (Array.isArray(detail.skus) ? detail.skus : [])).map((sku, index) => {
     const rawColor = String(sku.color ?? pickOption(sku.option_data ?? sku.options, /(^color$|colou?r|颜色)/i) ?? '').trim();
     const rawSize = String(sku.size ?? pickOption(sku.option_data ?? sku.options, /(^size$|尺码|尺寸|码数)/i) ?? '').trim();
-    const color = colourLabel.get(rawColor.toLowerCase()) || rawColor;
+    const color = colourLabel.get(rawColor.toLowerCase()) || singleNormalizedColour || rawColor;
     const size = sizeLabel.get(rawSize.toLowerCase()) || rawSize;
     const base = imagePublicPath(sku.image_storage_path);
     const skuImage = base ? `${config.publicBaseUrl}${base}` : (sku.image_source_url || null);
