@@ -1315,14 +1315,18 @@ async function buildSelectionSourcePayload(productDetailId) {
     const size = sizeLabel.get(rawSize.toLowerCase()) || rawSize;
     const base = imagePublicPath(sku.image_storage_path);
     const skuImage = base ? `${config.publicBaseUrl}${base}` : (sku.image_source_url || null);
+    const extraOptionValues = sku.options && typeof sku.options === 'object'
+      ? Object.fromEntries(Object.entries(sku.options).filter(([key]) => !/(^color$|colou?r|颜色|^size$|尺码|尺寸|码数)/i.test(String(key))))
+      : {};
     return {
       sourceRowKey: sku.source_sku_key ?? sku.sku_key ?? null,
       supplierSku: String(sku.supplier_sku || sku.variant_sku || sku.sku_key || `sku-${index + 1}`),
       title: [color, size].filter(Boolean).join(' / ') || sku.label || sku.sku_text || `Variant ${index + 1}`,
-      optionValues: (sku.options && typeof sku.options === 'object' ? sku.options : {
+      optionValues: {
+        ...extraOptionValues,
         ...(color ? { Color: color } : {}),
         ...(size ? { Size: size } : {}),
-      }),
+      },
       imageUrl: skuImage || colourImage.get(color.toLowerCase()) || null,
       sourcePrice: null,
       stock: sku.source_stock ?? sku.stock ?? null,
