@@ -262,9 +262,12 @@ function field(label,id,value){return '<label class="field"><span>'+esc(label)+'
 function pricingEditorHtml(source,draft){
   const currency=source?.sourceCurrency||'CNY';
   const symbol=currency==='CNY'?'¥':currency+' ';
-  const min=source?.sourcePriceMin; const max=source?.sourcePriceMax;
-  const sourcePrice=min==null&&max==null?'—':(min!=null&&max!=null&&Number(min)!==Number(max)?symbol+Number(min).toFixed(2)+' – '+symbol+Number(max).toFixed(2):symbol+Number(max??min).toFixed(2));
   const rule=draft?.pricingRule||source?.pricingRule||{};
+  const rawMin=Number(source?.sourcePriceMin); const rawMax=Number(source?.sourcePriceMax);
+  const ruleSourceMax=Number(rule.sourceMaxPrice);
+  const min=Number.isFinite(rawMin)&&rawMin>0?rawMin:null;
+  const max=Number.isFinite(rawMax)&&rawMax>0?rawMax:(Number.isFinite(ruleSourceMax)&&ruleSourceMax>0?ruleSourceMax:null);
+  const sourcePrice=min==null&&max==null?'\u2014':(min!=null&&max!=null&&Number(min)!==Number(max)?symbol+Number(min).toFixed(2)+' \u2013 '+symbol+Number(max).toFixed(2):symbol+Number(max??min).toFixed(2));
   const sourceMax=Number(rule.sourceMaxPrice??source?.sourcePriceMax??0);
   const rate=Number(rule.exchangeRate??6.5)||6.5;
   const calcPrice=(cnyMarkup)=>sourceMax>0&&Number.isFinite(Number(cnyMarkup))?Math.round(((sourceMax+Number(cnyMarkup))/rate+Number.EPSILON)*100)/100:null;
