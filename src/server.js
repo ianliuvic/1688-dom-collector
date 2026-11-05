@@ -1368,9 +1368,23 @@ async function buildSelectionSourcePayload(productDetailId) {
   for (const [label, url] of colourImage) {
     if (!swatchesByLabel.has(label)) swatchesByLabel.set(label, { value: label, color: null, imageUrl: url });
   }
+  const rawSourcePrice = detail.raw_data?.price && typeof detail.raw_data.price === 'object' ? detail.raw_data.price : {};
+  const rawSkuPrices = (Array.isArray(detail.raw_data?.skuRows) ? detail.raw_data.skuRows : [])
+    .map((sku) => Number(sku?.price))
+    .filter((price) => Number.isFinite(price) && price > 0);
+  const rawSourceMin = Number(rawSourcePrice.min);
+  const rawSourceMax = Number(rawSourcePrice.max);
+  const storedSourceMin = Number(detail.price_min);
+  const storedSourceMax = Number(detail.price_max);
+  const sourceMin = Number.isFinite(storedSourceMin) && storedSourceMin > 0
+    ? storedSourceMin
+    : (Number.isFinite(rawSourceMin) && rawSourceMin > 0 ? rawSourceMin : (rawSkuPrices.length ? Math.min(...rawSkuPrices) : null));
+  const sourceMax = Number.isFinite(storedSourceMax) && storedSourceMax > 0
+    ? storedSourceMax
+    : (Number.isFinite(rawSourceMax) && rawSourceMax > 0 ? rawSourceMax : (rawSkuPrices.length ? Math.max(...rawSkuPrices) : null));
   let pricing = null;
   try { pricing = payload.bulk_pricing ?? buildWearHongxiuPricing(detail); } catch { pricing = null; }
-  const selectionPricing = selectionPricingFor(pricing?.source_max_price ?? detail.price_max);
+  const selectionPricing = selectionPricingFor(sourceMax ?? pricing?.source_max_price);
   const pricingTiers = Array.isArray(pricing?.tiers) && pricing.tiers.length
     ? pricing.tiers
     : Array.isArray(detail.priceTiers) ? detail.priceTiers : [];
@@ -1406,11 +1420,11 @@ async function buildSelectionSourcePayload(productDetailId) {
     fabricMaterial,
     packageWeightGrams,
     currency: String(selectionPricing?.currency || pricing?.currency || 'USD').toUpperCase(),
-    priceMin: selectionPricing?.priceMin ?? (prices.length ? Math.min(...prices) : (detail.price_min === null ? null : Number(detail.price_min))),
-    priceMax: selectionPricing?.priceMax ?? (prices.length ? Math.max(...prices) : (detail.price_max === null ? null : Number(detail.price_max))),
+    priceMin: selectionPricing?.priceMin ?? (prices.length ? Math.min(...prices) : sourceMin),
+    priceMax: selectionPricing?.priceMax ?? (prices.length ? Math.max(...prices) : sourceMax),
     moq: selectionPricing?.moq ?? priceTiers[0]?.minQuantity ?? (detail.moq === null ? null : Number(detail.moq)),
-    sourcePriceMin: detail.price_min === null || detail.price_min === undefined ? null : Number(detail.price_min),
-    sourcePriceMax: detail.price_max === null || detail.price_max === undefined ? null : Number(detail.price_max),
+    sourcePriceMin: sourceMin,
+    sourcePriceMax: sourceMax,
     sourceCurrency: String(detail.currency || 'CNY').toUpperCase(),
     pricingRule: selectionPricing?.pricingRule ?? (pricing ? {
       formula: pricing.formula || null,
