@@ -7675,6 +7675,11 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     return reply.code(503).send({ error: 'staging_portal_not_configured' });
   }
   const dryRun = request.body?.dryRun === true || request.query?.dryRun === 'true';
+  const notify = request.body?.notify !== false && request.query?.notify !== 'false';
+  const includeSummary = request.body?.includeSummary === true || request.query?.includeSummary === 'true';
+  const normalizeSku = (value) => String(value ?? '').trim().toLowerCase()
+    .replace(/(?:^|-)xxl$/i, '-2xl')
+    .replace(/(?:^|-)xxxl$/i, '-3xl');
   let publishedRows;
   try {
     publishedRows = await db.listPortalPublishedForReconcile();
@@ -7707,12 +7712,31 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     ignoredHistorical,
     updatedProducts: 0,
     updatedVariants: 0,
+    lowStock: [],
     archivedDelisted: [],
     archivedZeroStock: [],
     partial: [],
     unmatchedPortal: [],
     skipped: [],
     errors: [],
+  };
+  const lowStockThreshold = 20;
+  const addLowStock = (styleNo, variants, skuMeta) => {
+    for (const variant of variants) {
+      if (variant?.stock === null || variant?.stock === undefined || String(variant.stock).trim() === '') continue;
+      const stock = Number(variant.stock);
+      if (!Number.isFinite(stock) || stock >= lowStockThreshold) continue;
+      const supplierSku = String(variant?.supplierSku ?? '').trim();
+      if (!supplierSku) continue;
+      const meta = skuMeta.get(normalizeSku(supplierSku)) ?? {};
+      report.lowStock.push({
+        styleNo,
+        supplierSku,
+        color: variant.color || meta.color || null,
+        size: variant.size || meta.size || null,
+        stock,
+      });
+    }
   };
   for (const row of rows) {
     const styleNo = row.style_no || row.title || `#${row.product_detail_id}`;
@@ -7752,10 +7776,13 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
     }
     const known = pricedSkus.filter((sku) => Number.isFinite(sku.stock));
     const calculated = known.map((sku) => Math.max(sku.stock - 5, 0));
+    const skuMeta = new Map(pricedSkus.map((sku) => [normalizeSku(sku.supplierSku), sku]));
     if (dryRun) {
       const allZero = known.length === pricedSkus.length && known.length > 0 && calculated.every((value) => value === 0);
       if (allZero) {
         report.archivedZeroStock.push({ styleNo, reason: 'all_variants_zero_stock', dryRun: true, stock: known.map((sku) => ({ supplierSku: sku.supplierSku, raw: sku.stock, calculated: Math.max(sku.stock - 5, 0) })) });
+      } else {
+        addLowStock(styleNo, known, skuMeta);
       }
       continue;
     }
@@ -7783,9 +7810,6 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
       // a product with live Portal variants to be archived.
       const portalVariants = Array.isArray(body?.variants) ? body.variants : null;
       if (portalVariants) {
-        const normalizeSku = (value) => String(value ?? '').trim().toLowerCase()
-          .replace(/(?:^|-)xxl$/i, '-2xl')
-          .replace(/(?:^|-)xxxl$/i, '-3xl');
         const matched = new Set((Array.isArray(body?.matched) ? body.matched : []).map(normalizeSku));
         const portalUnmatched = portalVariants.filter((variant) => !matched.has(normalizeSku(variant.supplierSku)));
         if (portalUnmatched.length) {
@@ -7798,40 +7822,84 @@ app.post('/api/portal/staging-reconcile', { preHandler: requireApiKey }, async (
         if (allZero) {
           const archived = await archiveStagingPortalProduct(row, 'all_variants_zero_stock');
           report.archivedZeroStock.push(archived);
+        } else {
+          addLowStock(styleNo, portalVariants, skuMeta);
         }
       } else {
         const allZero = known.length === pricedSkus.length && calculated.every((value) => value === 0);
         if (allZero) {
           const archived = await archiveStagingPortalProduct(row, 'all_variants_zero_stock');
           report.archivedZeroStock.push(archived);
+        } else {
+          addLowStock(styleNo, known, skuMeta);
         }
       }
     } catch (error) {
       report.errors.push({ styleNo, action: 'update_stock', message: String(error?.message || error).slice(0, 300) });
     }
   }
-  const lines = [
-    `📦 Portal Staging 库存巡检${dryRun ? '（演练）' : ''}`,
-    `检查产品：${report.checked}${report.ignoredHistorical ? `（忽略历史记录 ${report.ignoredHistorical}）` : ''}`,
-    `更新产品：${report.updatedProducts}，变体：${report.updatedVariants}`,
-    `1688 已下架归档：${report.archivedDelisted.length}`,
-    `计算库存为 0 归档：${report.archivedZeroStock.length}`,
-    `部分匹配：${report.partial.length}，Portal 未匹配：${report.unmatchedPortal.length}，跳过：${report.skipped.length}，错误：${report.errors.length}`,
-  ];
+  const shanghaiTime = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(report.checkedAt)).replace(/\//g, '-');
   const names = (items, key = 'styleNo') => items.slice(0, 15).map((item) => item[key] || item.styleNo || item).join('、') + (items.length > 15 ? ` 等 ${items.length} 款` : '');
-  if (report.archivedDelisted.length) lines.push(`下架：${names(report.archivedDelisted)}`);
-  if (report.archivedZeroStock.length) lines.push(`零库存：${names(report.archivedZeroStock)}`);
-  if (report.errors.length) lines.push(`错误：${report.errors.slice(0, 8).map((item) => item.styleNo).join('、')}${report.errors.length > 8 ? ' 等' : ''}`);
-  lines.push(`时间：${report.checkedAt}`);
+  const lowStockByStyle = new Map();
+  for (const item of report.lowStock) {
+    if (!lowStockByStyle.has(item.styleNo)) lowStockByStyle.set(item.styleNo, []);
+    lowStockByStyle.get(item.styleNo).push(item);
+  }
+  const lowStockStyles = [...lowStockByStyle.entries()]
+    .map(([styleNo, items]) => ({
+      styleNo,
+      items: items.sort((a, b) => a.stock - b.stock),
+      minStock: Math.min(...items.map((item) => item.stock)),
+    }))
+    .sort((a, b) => a.minStock - b.minStock || a.styleNo.localeCompare(b.styleNo));
+  const variantText = (item) => {
+    const option = [item.color, item.size].filter(Boolean).join('/');
+    return `${item.supplierSku}${option ? `（${option}）` : ''}=${item.stock}`;
+  };
+  const lines = [
+    `📦 Portal Staging 每日库存巡检${dryRun ? '（演练，不写入 Portal）' : ''}`,
+    '范围：仅 Portal Staging 测试环境；Production Portal 未改动',
+    `时间（上海）：${shanghaiTime}`,
+    `商品范围：当前 Staging 商品 ${report.checked} 款${report.ignoredHistorical ? `；另有 ${report.ignoredHistorical} 条历史发布记录已不在 Staging，未计入` : ''}`,
+    dryRun
+      ? '处理结果：演练模式，未修改产品库存或归档状态'
+      : `库存同步：${report.updatedProducts} 款产品 / ${report.updatedVariants} 个变体`,
+    `${dryRun ? '演练将归档' : '归档'}：1688 已下架 ${report.archivedDelisted.length} 款；库存不足 ${report.archivedZeroStock.length} 款（产品的全部 Portal 变体库存均 ≤5 才归档）`,
+  ];
+  if (report.archivedDelisted.length) lines.push(`${dryRun ? '演练：将因 1688 下架归档' : '1688 已下架'}：${names(report.archivedDelisted)}`);
+  if (report.archivedZeroStock.length) lines.push(`${dryRun ? '演练：将因库存不足归档' : '库存不足归档'}：${names(report.archivedZeroStock)}`);
+  if (report.partial.length) lines.push(`数据提示：${report.partial.length} 款 1688 有额外 SKU，Portal 无对应变体；不影响已有变体的库存和归档判断`);
+  if (report.unmatchedPortal.length) lines.push(`数据提示：${report.unmatchedPortal.length} 款 Portal 变体未匹配到 1688 SKU`);
+  if (report.skipped.length) lines.push(`跳过：${report.skipped.length} 款（没有可用的 SKU 库存数据）`);
+  if (report.errors.length) lines.push(`错误：${report.errors.length} 款（${names(report.errors)}）`);
+  if (!lowStockStyles.length) {
+    lines.push('✅ 低库存提醒（库存 <20）：无');
+  } else {
+    lines.push(`⚠️ 低库存提醒（库存 <20）：${lowStockStyles.length} 款 / ${report.lowStock.length} 个变体`);
+    for (const entry of lowStockStyles.slice(0, 15)) {
+      const detail = entry.items.slice(0, 6).map(variantText).join('、');
+      lines.push(`• ${entry.styleNo}（最低 ${entry.minStock}）：${detail}${entry.items.length > 6 ? ` 等 ${entry.items.length} 个变体` : ''}`);
+    }
+    if (lowStockStyles.length > 15) lines.push(`• 其余 ${lowStockStyles.length - 15} 款也低于 20，请到 Portal 查看`);
+  }
+  lines.push('数据源：1688 最新 SKU 库存快照 → Portal Staging');
   let feishu = null;
-  if (feishuConfigured(config)) {
+  if (notify && feishuConfigured(config)) {
     try {
       feishu = await sendFeishuText({ text: lines.join('\n'), config });
     } catch (error) {
       feishu = { error: String(error?.message || error).slice(0, 300) };
     }
   }
-  return { ...report, feishu };
+  return { ...report, ...(includeSummary ? { summary: lines.join('\n') } : {}), feishu };
 });
 
 app.get('/api/portal/delisted', { preHandler: requireDashboardOrApiKey }, async () => {
