@@ -4184,6 +4184,17 @@ export function createDatabase(databaseUrl) {
     ]);
   }
 
+  async function listPriceResyncTargets({ onlyPublished = true, limit = 5000 } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 5000, 1), 10000);
+    const result = await pool.query(`SELECT product_detail_id, wp_post_id, style_no, wp_status
+      FROM product_wordpress_publications
+      WHERE wp_post_id IS NOT NULL
+        ${onlyPublished ? "AND wp_status = 'publish'" : ''}
+      ORDER BY product_detail_id
+      LIMIT $1`, [safeLimit]);
+    return result.rows;
+  }
+
   async function ping() {
     await pool.query('SELECT 1');
   }
@@ -4194,6 +4205,7 @@ export function createDatabase(databaseUrl) {
     listBestSellerCandidates,
     saveProductDetail, getProductDetail, saveDetailImages, listProductDetails, listWeeklyMarketingProducts,
     listNonShopStatusCandidates, summarizeNonShopProducts, saveProductSourceStatus,
+    listPriceResyncTargets,
     updateProductLinkFoxData, deleteProductDetail,
     listProductCatalog, listDetailsMissingBundleAudit, saveProductBundleStatus,
     setProductBundleManual, listBundleRecheckRows,

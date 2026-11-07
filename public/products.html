@@ -1758,7 +1758,9 @@ function renderPublishPreview(id, data){
     + (data.price.skuPriceMax !== null ? ' · 单行最高 ' + fmtMoney(data.price.skuPriceMax, data.price.currency) : '')
     + '（' + (data.price.verified ? '已核实' : '未核实') + '）</td></tr>'
     + (pricing
-      ? pricing.tiers.map((tier) => '<tr><th>' + esc(tier.label) + '</th><td>$' + Number(tier.price).toFixed(2) + ' <span class="pp-muted">(源价+' + tier.cny_markup + ')/6.5</span></td></tr>').join('')
+      ? pricing.tiers.map((tier) => '<tr><th>' + esc(tier.label) + '</th><td>$' + Number(tier.price).toFixed(2)
+        + ' <span class="pp-muted">(源价' + (Number(tier.cny_markup) >= 0 ? '+' : '') + tier.cny_markup + ')/6.5'
+        + (Number(tier.cny_markup) < 0 ? '，最低 $2.00' : '') + '</span></td></tr>').join('')
       : '<tr><th>美元价</th><td class="pp-muted">缺少可信价格，无法计算</td></tr>')
     + inStockPricingRow
     + '<tr><th>样品价 / MOQ</th><td>$' + data.price.samplePrice + ' · ' + esc(data.price.moqText) + '</td></tr>'

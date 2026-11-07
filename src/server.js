@@ -9602,6 +9602,67 @@ app.get('/api/wordpress-price-repair-jobs/:id', { preHandler: requireApiKey }, a
   return job ?? reply.code(404).send({ error: 'not_found' });
 });
 
+// Re-price every collector-managed WordPress product with the current tier
+// formula. Content, media, taxonomies and statuses are left untouched; only
+// bulk_pricing, source price meta and the source price range are rewritten.
+const wordpressPriceResyncJobs = new Map();
+
+app.post('/api/wordpress/prices/resync-all', { preHandler: requireApiKey }, async (request, reply) => {
+  const body = request.body ?? {};
+  const onlyPublished = body.onlyPublished !== false;
+  const limit = Math.min(Math.max(Number(body.limit) || 5000, 1), 10000);
+  const id = crypto.randomUUID();
+  const job = { id, status: 'queued', onlyPublished, total: 0, updated: 0, failed: 0,
+    createdAt: new Date().toISOString(), startedAt: null, completedAt: null, errors: [] };
+  wordpressPriceResyncJobs.set(id, job);
+  trimTerminalJobs(wordpressPriceResyncJobs);
+  wordpressMaintenanceQueue = wordpressMaintenanceQueue.catch(() => {}).then(async () => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    try {
+      const targets = await db.listPriceResyncTargets({ onlyPublished, limit });
+      job.total = targets.length;
+      for (let offset = 0; offset < targets.length; offset += 5) {
+        const batch = targets.slice(offset, offset + 5);
+        await Promise.all(batch.map(async (target) => {
+          const detailId = Number(target.product_detail_id);
+          try {
+            const [detail, publication] = await Promise.all([
+              db.getProductDetail(detailId),
+              db.getWordPressPublication(detailId),
+            ]);
+            const synced = await syncWordPressProductPricing({ detail, publication, config });
+            const syncHash = crypto.createHash('sha256').update(JSON.stringify(synced.payload)).digest('hex');
+            await db.saveWordPressPublication(detailId, {
+              translationId: publication.translation_id, externalId: publication.external_id,
+              styleNo: publication.style_no, wpPostId: publication.wp_post_id,
+              wpUrl: synced.wordpress.permalink || publication.wp_url,
+              wpEditUrl: synced.wordpress.edit_link || publication.wp_edit_url,
+              wpStatus: synced.wordpress.status || publication.wp_status,
+              syncHash, payload: synced.payload, result: synced.wordpress, lastError: null,
+            });
+            job.updated += 1;
+          } catch (error) {
+            job.failed += 1;
+            job.errors.push({ productDetailId: detailId, message: String(error?.message || error).slice(0, 200) });
+          }
+        }));
+      }
+      job.status = job.failed ? 'completed_with_errors' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.errors.push({ message: String(error?.message || error).slice(0, 300) });
+    } finally {
+      job.completedAt = new Date().toISOString();
+    }
+  });
+  return reply.code(202).send(job);
+});
+
+app.get('/api/wordpress-price-resync-jobs/:id', { preHandler: requireApiKey }, async (request, reply) => {
+  return wordpressPriceResyncJobs.get(request.params.id) ?? reply.code(404).send({ error: 'not_found' });
+});
+
 app.get('/api/wordpress/best-sellers/preview', { preHandler: requireApiKey }, async (request) => {
   const plan = await buildBestSellerPlan(request.query?.limit);
   return {

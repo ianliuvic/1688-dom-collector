@@ -72,13 +72,15 @@ export function buildWearHongxiuPricing(detail, { sourceMaxOverride = null } = {
   const sourceMax = override === null ? getSourceMaximumPrice(detail) : override;
   if (sourceMax === null) throw new Error('A valid non-negative 1688 maximum price is required for pricing.');
   const exchangeRate = 6.5;
+  const minimumTierPrice = 2;
   const tiers = [
-    { label: '50-299 pcs', min_quantity: 50, max_quantity: 299, cny_markup: 20, price: roundCurrency((sourceMax + 20) / exchangeRate) },
-    { label: '300-999 pcs', min_quantity: 300, max_quantity: 999, cny_markup: 15, price: roundCurrency((sourceMax + 15) / exchangeRate) },
-    { label: '≥1000 pcs', min_quantity: 1000, max_quantity: null, cny_markup: 10, price: roundCurrency((sourceMax + 10) / exchangeRate) },
+    { label: '50-299 pcs', min_quantity: 50, max_quantity: 299, cny_markup: 10, price: roundCurrency((sourceMax + 10) / exchangeRate) },
+    { label: '300-999 pcs', min_quantity: 300, max_quantity: 999, cny_markup: 0, price: roundCurrency(sourceMax / exchangeRate) },
+    { label: '≥1000 pcs', min_quantity: 1000, max_quantity: null, cny_markup: -5, price: roundCurrency(Math.max((sourceMax - 5) / exchangeRate, minimumTierPrice)) },
   ];
   return { currency: 'USD', source_currency: 'CNY', source_max_price: sourceMax,
-    exchange_rate_cny_per_usd: exchangeRate, formula: '(source maximum CNY price + tier markup) / 6.5', tiers };
+    exchange_rate_cny_per_usd: exchangeRate, minimum_tier_price_usd: minimumTierPrice,
+    formula: '(source maximum CNY price + tier markup) / 6.5 (≥1000 pcs floored at $2.00)', tiers };
 }
 
 // 安全余量（2026-10-12 用户确认）：采集库存 - 5 > 0 才算"有货"；
