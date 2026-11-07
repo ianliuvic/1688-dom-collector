@@ -76,7 +76,7 @@ export function buildWearHongxiuPricing(detail, { sourceMaxOverride = null } = {
   const tiers = [
     { label: '50-299 pcs', min_quantity: 50, max_quantity: 299, cny_markup: 10, price: roundCurrency((sourceMax + 10) / exchangeRate) },
     { label: '300-999 pcs', min_quantity: 300, max_quantity: 999, cny_markup: 0, price: roundCurrency(sourceMax / exchangeRate) },
-    { label: '≥1000 pcs', min_quantity: 1000, max_quantity: null, cny_markup: -5, price: roundCurrency(Math.max((sourceMax - 5) / exchangeRate, minimumTierPrice)) },
+    { label: '≥1000 pcs', min_quantity: 1000, max_quantity: null, cny_markup: -2, price: roundCurrency(Math.max((sourceMax - 2) / exchangeRate, minimumTierPrice)) },
   ];
   return { currency: 'USD', source_currency: 'CNY', source_max_price: sourceMax,
     exchange_rate_cny_per_usd: exchangeRate, minimum_tier_price_usd: minimumTierPrice,

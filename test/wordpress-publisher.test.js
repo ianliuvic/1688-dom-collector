@@ -51,7 +51,7 @@ test('builds a priced wearhongxiu payload plus source SKU matrix', () => {
   assert.equal(result.payload.colors.colors[0].label, 'As Picture');
   assert.equal(result.payload.sku_matrix.rows[0].source_stock, 9999);
   assert.equal(result.payload.sku_matrix.rows[1].available, false);
-  assert.deepEqual(result.payload.bulk_pricing.tiers.map((tier) => tier.price), [5.15, 3.62, 2.85]);
+  assert.deepEqual(result.payload.bulk_pricing.tiers.map((tier) => tier.price), [5.15, 3.62, 3.31]);
   assert.equal(result.payload.meta.sample_price, '50.00');
   assert.equal(result.payload.meta.sample_available, true);
   assert.equal(result.payload.meta.bulk_lead_time, '~28 days');
@@ -180,7 +180,7 @@ test('does not trust an unverified global page price over exact saved SKU prices
     skus: detail.skus.map((sku) => ({ ...sku, price: '27' })) };
   const pricing = buildWearHongxiuPricing(polluted);
   assert.equal(pricing.source_max_price, 27);
-  assert.deepEqual(pricing.tiers.map((tier) => tier.price), [5.69, 4.15, 3.38]);
+  assert.deepEqual(pricing.tiers.map((tier) => tier.price), [5.69, 4.15, 3.85]);
 });
 
 test('floors the ≥1000 pcs tier at $2.00', () => {
