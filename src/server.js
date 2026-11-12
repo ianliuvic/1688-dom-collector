@@ -44,7 +44,7 @@ import { buildLinkFoxCapture, downloadLinkFoxImages, fetchLinkFoxProductDetail,
   linkfoxExtrasForMerge } from './linkfox-1688.js';
 import { classifyLinkFoxListingStatus } from './source-status.js';
 import { MAX_OPTION_LABEL_LENGTH } from './option-overrides.js';
-import { SIZE_CHART_PRESETS, renderSizeChartPng } from './size-chart.js';
+import { SIZE_CHART_PRESETS, normalizeSizeChart, renderSizeChartPng } from './size-chart.js';
 
 const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -9243,6 +9243,47 @@ app.post('/api/product-details/:id/wordpress/unpublish', { preHandler: requireAp
   } catch (error) {
     request.log.error({ err: error, productDetailId: detail.id }, 'WordPress unpublish failed');
     return reply.code(502).send({ error: 'wordpress_unpublish_failed', message: error.message });
+  }
+});
+
+// ---- Per-product size chart ------------------------------------------------
+// The chart is stored on the capture (raw_data.sizeChart), so every future
+// re-publish keeps it. When the product already has a WordPress publication the
+// chart is pushed through the normal product sync without touching content.
+app.post('/api/product-details/:id/size-chart', { preHandler: requireApiKey, bodyLimit: 512 * 1024 }, async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_detail_id' });
+  const detail = await db.getProductDetail(id);
+  if (!detail) return reply.code(404).send({ error: 'not_found' });
+  let chart = null;
+  if (request.body?.chart !== null && request.body?.chart !== undefined) {
+    try {
+      chart = normalizeSizeChart(request.body.chart);
+    } catch (error) {
+      return reply.code(400).send({ error: 'invalid_size_chart', message: String(error?.message || error).slice(0, 300) });
+    }
+  }
+  await db.updateProductRawData(id, { sizeChart: chart });
+  const publication = await db.getWordPressPublication(id);
+  if (request.body?.sync === false || !publication?.wp_post_id) {
+    return { productDetailId: id, chart, synced: false };
+  }
+  try {
+    const fresh = await db.getProductDetail(id);
+    const synced = await syncWordPressProductPricing({ detail: fresh, publication, config, sizeChart: chart });
+    const syncHash = crypto.createHash('sha256').update(JSON.stringify(synced.payload)).digest('hex');
+    await db.saveWordPressPublication(id, {
+      translationId: publication.translation_id, externalId: publication.external_id,
+      styleNo: publication.style_no, wpPostId: publication.wp_post_id,
+      wpUrl: synced.wordpress.permalink || publication.wp_url,
+      wpEditUrl: synced.wordpress.edit_link || publication.wp_edit_url,
+      wpStatus: synced.wordpress.status || publication.wp_status,
+      syncHash, payload: synced.payload, result: synced.wordpress, lastError: null,
+    });
+    return { productDetailId: id, chart, synced: true, wordpressStatus: synced.wordpress?.status ?? null };
+  } catch (error) {
+    request.log.error({ err: error, productDetailId: id }, 'size chart sync failed');
+    return reply.code(502).send({ error: 'size_chart_sync_failed', message: String(error?.message || error).slice(0, 300) });
   }
 });
 

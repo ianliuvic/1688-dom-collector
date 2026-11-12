@@ -66,6 +66,15 @@ export function getSourceMaximumPrice(detail) {
   return numbers.length ? Math.max(...numbers) : null;
 }
 
+/** Per-product size chart captured/stored on the collector product. */
+export function sizeChartFromDetail(detail) {
+  const chart = detail?.raw_data?.sizeChart;
+  if (!chart || typeof chart !== 'object') return null;
+  if (!Array.isArray(chart.columns) || !chart.columns.length) return null;
+  if (!Array.isArray(chart.rows) || !chart.rows.length) return null;
+  return chart;
+}
+
 export function buildWearHongxiuPricing(detail, { sourceMaxOverride = null } = {}) {
   const override = sourceMaxOverride === null || sourceMaxOverride === undefined
     ? null : numberOrNull(sourceMaxOverride);
@@ -716,7 +725,7 @@ export function buildWordPressProductDraft({ detail, translation, options = {}, 
       default: sizeEntries[0].label,
       sizes: sizeEntries.map((entry) => ({ label: entry.label, value: entry.value })),
     } : null,
-    size_chart: null,
+    size_chart: sizeChartFromDetail(detail),
     colors: colorOptions.length ? {
       default: colorOptions[0].value,
       colors: colorOptions,
@@ -1049,12 +1058,12 @@ export async function replaceWordPressBestSellers({ postIds, config, categorySlu
   };
 }
 
-export async function syncWordPressProductPricing({ detail, publication, config }) {
+export async function syncWordPressProductPricing({ detail, publication, config, sizeChart = undefined }) {
   const existingPayload = publication?.payload;
   if (!existingPayload?.external_id || !existingPayload?.title) {
     throw new Error('The saved WordPress publication payload is incomplete.');
   }
-  const payload = refreshWordPressProductPricingPayload(existingPayload, detail);
+  const payload = refreshWordPressProductPricingPayload(existingPayload, detail, { sizeChart });
   const wp = wordpressClient(config);
   const result = await wp('/wp-json/hx/v1/products/sync', {
     method: 'POST',
@@ -1065,15 +1074,19 @@ export async function syncWordPressProductPricing({ detail, publication, config 
   return { payload, wordpress: result };
 }
 
-export function refreshWordPressProductPricingPayload(existingPayload, detail) {
+export function refreshWordPressProductPricingPayload(existingPayload, detail, { sizeChart = undefined } = {}) {
   const pricing = buildWearHongxiuPricing(detail);
   const sourceMin = numberOrNull(detail?.price_min);
   const sourceMax = numberOrNull(detail?.price_max);
+  const chart = sizeChart === undefined
+    ? (sizeChartFromDetail(detail) ?? existingPayload?.meta?.size_chart ?? null)
+    : sizeChart;
   return {
     ...existingPayload,
     bulk_pricing: pricing,
     meta: {
       ...(existingPayload?.meta ?? {}),
+      size_chart: chart,
       source_price_min: sourceMin,
       source_price_max: sourceMax,
     },
