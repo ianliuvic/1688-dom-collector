@@ -140,6 +140,7 @@ export function normalizeSizeChart(input) {
     presetId: clean(input.presetId, 80) || null,
     name,
     note: clean(input.note, 300) || null,
+    sizes: rows.map((entry) => entry.size),
     columns,
     rows,
   };

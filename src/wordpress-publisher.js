@@ -72,7 +72,10 @@ export function sizeChartFromDetail(detail) {
   if (!chart || typeof chart !== 'object') return null;
   if (!Array.isArray(chart.columns) || !chart.columns.length) return null;
   if (!Array.isArray(chart.rows) || !chart.rows.length) return null;
-  return chart;
+  const sizes = Array.isArray(chart.sizes) && chart.sizes.length
+    ? chart.sizes
+    : chart.rows.map((row) => String(row?.size ?? '')).filter(Boolean);
+  return { ...chart, sizes };
 }
 
 export function buildWearHongxiuPricing(detail, { sourceMaxOverride = null } = {}) {
@@ -1079,14 +1082,14 @@ export function refreshWordPressProductPricingPayload(existingPayload, detail, {
   const sourceMin = numberOrNull(detail?.price_min);
   const sourceMax = numberOrNull(detail?.price_max);
   const chart = sizeChart === undefined
-    ? (sizeChartFromDetail(detail) ?? existingPayload?.meta?.size_chart ?? null)
+    ? (sizeChartFromDetail(detail) ?? existingPayload?.size_chart ?? null)
     : sizeChart;
   return {
     ...existingPayload,
     bulk_pricing: pricing,
+    size_chart: chart,
     meta: {
       ...(existingPayload?.meta ?? {}),
-      size_chart: chart,
       source_price_min: sourceMin,
       source_price_max: sourceMax,
     },
