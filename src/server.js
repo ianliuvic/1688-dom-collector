@@ -6583,6 +6583,55 @@ app.post('/api/product-details/linkfox', { preHandler: requireApiKey }, async (r
   };
 });
 
+// Read-only LinkFox preview: fetch and normalize the provider record without
+// downloading media or writing any collector/WordPress data.
+app.post('/api/product-details/linkfox/preview', { preHandler: requireApiKey }, async (request, reply) => {
+  const body = request.body ?? {};
+  const offerId = String(body.offerId ?? '').trim()
+    || String(body.url ?? '').match(/\/offer\/(\d{10,13})\.html/i)?.[1] || '';
+  if (!/^\d{10,13}$/.test(offerId)) {
+    return reply.code(400).send({ error: 'valid_1688_offer_id_required' });
+  }
+  let raw;
+  try {
+    raw = await fetchLinkFoxProductDetail({ offerId }, config);
+  } catch (error) {
+    request.log.error({ err: error, offerId }, 'LinkFox preview fetch failed');
+    return reply.code(502).send({
+      error: error.providerAccess ? 'linkfox_access_blocked' : 'linkfox_fetch_failed',
+      message: error.message,
+    });
+  }
+  const capture = buildLinkFoxCapture(raw, { offerId, offerKey: `lfx-${offerId}` });
+  const data = capture.data;
+  const imageTypes = {};
+  for (const image of capture.imagePlan) imageTypes[image.type] = (imageTypes[image.type] ?? 0) + 1;
+  return {
+    mode: 'preview',
+    saved: false,
+    offerId,
+    linkfoxOfferId: offerId,
+    title: data.title,
+    description: data.description,
+    price: data.price,
+    moq: data.moq,
+    currency: data.currency,
+    category: raw.categoryName ?? null,
+    categoryId: raw.categoryId ?? null,
+    createDate: raw.createDate ?? null,
+    soldOut: raw.soldOut ?? null,
+    seller: data.seller,
+    package: data.package,
+    skuRows: data.skuRows,
+    skuDimensions: data.skuDimensions,
+    skuOptions: data.skuOptions,
+    attributes: data.attributes,
+    imageCounts: imageTypes,
+    imagePlan: capture.imagePlan,
+    videos: data.videos,
+  };
+});
+
 app.get('/api/product-details', { preHandler: requireApiKey }, async (request, reply) => {
   const offerId = request.query?.offerId || null;
   if (offerId && !/^\d{10,13}$/.test(String(offerId))) {
